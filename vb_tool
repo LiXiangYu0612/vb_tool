@@ -1,0 +1,494 @@
+#!/bin/bash
+#--------------------------------------------------------------------------------
+#-- File name:   vb_tool
+#-- Version  :  v1.4.11
+#-- Commit at:  2026-05-25 19:00:00
+#-- Purpose:     Vastbase Script Tool
+#-- Author:      MVS & Second-line Team
+#--------------------------------------------------------------------------------
+set -o pipefail
+
+# Resolve the directory where this script is located
+VB_TOOL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Source library files
+source "${VB_TOOL_DIR}/lib/common.sh"
+source "${VB_TOOL_DIR}/lib/help.sh"
+
+# Source all command modules
+for _cmd_file in "${VB_TOOL_DIR}/commands/"*.sh; do
+    [[ -f "$_cmd_file" ]] && source "$_cmd_file"
+done
+unset _cmd_file
+
+case "$1" in
+    as)
+        if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+            as_help
+            exit 0
+        fi
+        if [ -z "$2" ]; then
+            echo "Error: as requires a vb pid parameter" >&2
+            as_help
+            exit 1
+        fi
+        if ! run_as "$2"; then
+            as_help
+            exit 1
+        fi
+        ;;
+    sp)
+        if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+            sp_help
+            exit 0
+        fi
+        if [ -z "$2" ]; then
+            echo "Error: sp requires a parameter" >&2
+            sp_help
+            exit 1
+        fi
+        if ! run_sp "$2"; then
+            sp_help
+            exit 1
+        fi
+        ;;
+    st)
+        if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+            st_help
+            exit 0
+        fi
+        if [ -z "$2" ]; then
+            echo "Error: st requires a relname parameter" >&2
+            st_help
+            exit 1
+        fi
+        if ! run_st "$2"; then
+            st_help
+            exit 1
+        fi
+        ;;
+    slow)
+        if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+            slow_help
+            exit 0
+        fi
+        if ! run_slow; then
+            slow_help
+            exit 1
+        fi
+        ;;
+    xloghc)
+        if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+            xloghc_help
+            exit 0
+        fi
+        if ! run_xloghc; then
+            xloghc_help
+            exit 1
+        fi
+        ;;
+    analyze_log)
+        if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+            analyze_log_help
+            exit 0
+        fi
+        if [ -z "$2" ]; then
+            echo "Error: analyze_log requires a log file parameter" >&2
+            analyze_log_help
+            exit 1
+        fi
+        if ! run_analyze "$@"; then
+            analyze_log_help
+            exit 1
+        fi
+        ;;
+	analyze_log_v2)
+        if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+            analyze_log_v2_help
+            exit 0
+        fi
+        if [ -z "$2" ]; then
+            echo "Error: analyze_log_v2 requires a log file parameter" >&2
+            analyze_log_v2_help
+            exit 1
+        fi
+		shift
+        if ! run_analyze_log_v2 "$@"; then
+            analyze_log_v2_help
+            exit 1
+        fi
+        ;;
+    kill)
+        if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+            kill_help
+            exit 0
+        fi
+        if ! run_kill_sessions "${@:2}"; then
+            kill_help
+            exit 1
+        fi
+        ;;
+    index_check)
+        if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+            echo "Usage: vb_tool index_check [options]"
+            exit 0
+        fi
+        if ! run_redundant_index "${@:2}"; then
+             exit 1
+        fi
+        ;;
+    tabstat)
+        if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+            tabstat_help
+            exit 0
+        fi
+        if [ -z "$2" ] || [ -z "$3" ]; then
+            echo "Error: tabstat requires database, schema, and table parameters" >&2
+            tabstat_help
+            exit 1
+        fi
+        if ! run_tabstat "${@:2}"; then
+            tabstat_help
+            exit 1
+        fi
+        ;;
+    tabsize)
+        if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+            tabsize_help
+            exit 0
+        fi
+        if [ -z "$2" ]; then
+            echo "Error: tabsize requires a top number or database/schema/table parameters" >&2
+            tabsize_help
+            exit 1
+        fi
+        if ! run_tabsize "${@:2}"; then
+            tabsize_help
+            exit 1
+        fi
+        ;;
+    sqlstat)
+        if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+            sqlstat_help
+            exit 0
+        fi
+        if [ -z "$2" ]; then
+            echo "Error: sqlstat requires a unique_query_id" >&2
+            sqlstat_help
+            exit 1
+        fi
+        if ! run_sqlstat "$2"; then
+            sqlstat_help
+            exit 1
+        fi
+        ;;
+    workload)
+    if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+        workload_help
+        exit 0
+    fi
+    shift
+    if ! run_workload "$@"; then
+        workload_help
+        exit 1
+    fi
+    ;;
+    flamegraph)
+        if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+            flamegraph_help
+            exit 0
+        fi
+        if ! run_flamegraph "${@:2}"; then
+            flamegraph_help
+            exit 1
+        fi
+        ;;
+    osw_netstat)
+        if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+            osw_netstat_help
+            exit 0
+        fi
+        if ! run_osw_netstat "${@:2}"; then
+            osw_netstat_help
+            exit 1
+        fi
+        ;;
+    wdr_topsql)
+        if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+            wdr_topsql_help
+            exit 0
+        fi
+        if ! run_wdr_topsql "${@:2}"; then
+            wdr_topsql_help
+            exit 1
+        fi
+        ;;
+    wdr_tabstat)
+        if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+            wdr_tabstat_help
+            exit 0
+        fi
+        if ! run_wdr_tabstat "${@:2}"; then
+            wdr_tabstat_help
+            exit 1
+        fi
+        ;;
+    recover_table)
+        if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+            recover_table_help
+            exit 0
+        fi
+        if ! run_recover_table "${@:2}"; then
+            recover_table_help
+            exit 1
+        fi
+        ;;
+    wdr_summary)
+        if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+            wdr_summary_help
+            exit 0
+        fi
+        if ! run_wdr_summary "${@:2}";  then
+            wdr_summary_help
+            exit 1
+        fi
+        ;;
+    wdr_event)
+        if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+            wdr_event_help
+            exit 0
+        fi
+        if ! run_wdr_event "${@:2}"; then
+            wdr_event_help
+            exit 1
+        fi
+        ;;
+    lockchain)
+        if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+            lockchain_help
+            exit 0
+        fi
+        if ! run_lockchain; then
+            lockchain_help
+            exit 1
+        fi
+        ;;
+    lock_details)
+        if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+            lock_details_help
+            exit 0
+        fi
+        if ! run_lock_details; then
+            lock_details_help
+            exit 1
+        fi
+        ;;
+    priv)
+        if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+            priv_help
+            exit 0
+        fi
+        if ! run_show_privilege "${@:2}"; then
+            priv_help
+            exit 1
+        fi
+        ;;
+    mem)
+        if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+            mem_help
+            exit 0
+        fi
+        if ! run_mem; then
+            mem_help
+            exit 1
+        fi
+        ;;
+    net)
+        if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+            net_help
+            exit 0
+        fi
+        if ! run_net; then
+            net_help
+            exit 1
+        fi
+        ;;
+    tps)
+        if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+            tps_help
+            exit 0
+        fi
+        if ! run_tps; then
+            tps_help
+            exit 1
+        fi
+        ;;
+    repl)
+        if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+            repl_help
+            exit 0
+        fi
+        if ! run_repl; then
+            repl_help
+            exit 1
+        fi
+        ;;
+    relxlog)
+        if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+            relxlog_help
+            exit 0
+        fi
+        if [ -z "$2" ] || [ -z "$3" ]; then
+            echo "Error: relxlog requires START_WAL and END_WAL parameters" >&2
+            relxlog_help
+            exit 1
+        fi
+        if ! run_relxlog "$2" "$3" "$4"; then
+            relxlog_help
+            exit 1
+        fi
+        ;;
+    xlogcom)
+        if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+            xlogcom_help
+            exit 0
+        fi
+        if [ -z "$2" ] || [ -z "$3" ]; then
+            echo "Error: xlogcom requires START_WAL and END_WAL parameters" >&2
+            xlogcom_help
+            exit 1
+        fi
+        if ! run_xlogcom "$2" "$3" "$4" ; then
+            xlogcom_help
+            exit 1
+        fi
+        ;;
+    memhist)
+        if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+            memhist_help
+            exit 0
+        fi
+        if ! run_memhist "${@:2}"; then
+            memhist_help
+            exit 1
+        fi
+        ;;
+    asp)
+        if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+            asp_help
+            exit 0
+        fi
+        if [ -z "$2" ]; then
+            echo "Error: asp requires a type parameter" >&2
+            asp_help
+            exit 1
+        fi
+        if ! run_asp "${@:2}"; then
+            asp_help
+            exit 1
+        fi
+        ;;
+      sqltext)
+            if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+                sqltext_help
+                exit 0
+            fi
+            if [[ $# -lt 2 ]]; then
+                sqltext_help
+                exit 1
+            fi
+            if ! run_sqltext "$2"; then
+                echo "not found unique_id: $2" >&2
+                exit 1
+            fi
+            ;;
+	    sqlhc)
+            if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+                sqlhc_help
+                exit 0
+            fi
+            if [[ $# -lt 2 ]]; then
+                sqlhc_help
+                exit 1
+            fi
+            if ! run_sqlhc "${@:2}"; then
+                echo "not found unique_id: $2" >&2
+                exit 1
+            fi
+            ;;
+    dead_tups)
+        if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+            dead_tups_help
+            exit 0
+        fi
+        if ! run_dead_tups "${@:2}"; then
+            dead_tups_help
+            exit 1
+        fi
+        ;;
+    -h|--help|help|"")
+        show_help
+        ;;
+    list)
+        show_list
+        ;;
+    redo)
+        if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+            redo_help
+            exit 0
+        fi
+        if ! run_redo "${@:2}"; then
+            redo_help
+            exit 1
+        fi
+        ;;
+    ssh_setup)
+        if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+            ssh_setup_help
+            exit 0
+        fi
+        if ! run_ssh "${@:2}"; then
+            ssh_setup_help
+            exit 1
+        fi
+        ;;
+    lsds)
+        if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+            echo "Usage: vb_tool lsds"
+            exit 0
+        fi
+        run_lsds
+        ;;
+    planbyline)
+        if [[ "$2" == "-help" || "$2" == "--help" || -z "$2" ]]; then
+            planbyline_help
+            exit 0
+        fi
+        if ! planbyline "$2"; then
+            planbyline_help
+            exit 1
+        fi
+        ;;
+    osw)
+        if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+            osw_help
+            exit 0
+        fi
+        run_osw "${@:2}"
+        ;;
+    collect_log)
+        if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+            collect_log_help
+            exit 0
+        fi
+        if ! run_collect_log "${@:2}"; then
+            collect_log_help
+            exit 1
+        fi
+        ;;
+    *)
+        echo "Error: unknown script '$1'" >&2
+        show_list
+        exit 1
+        ;;
+esac
