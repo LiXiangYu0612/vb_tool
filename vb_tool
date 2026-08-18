@@ -1,13 +1,13 @@
 #!/bin/bash
 #--------------------------------------------------------------------------------
 #-- File name:   vb_tool
-#-- Version  ：  v1.4.13
-#-- Commit at：  2026-05-25 19:00:00
+#-- Version  ：  v1.4.14
+#-- Commit at：  2026-08-18 21:30:00
 #-- Purpose:     Vastbase Script Tool
 #-- Author:      MVS & Second-line Team 
 #--------------------------------------------------------------------------------
 set -o pipefail
-VB_TOOL_VERSION="v1.4.13"
+VB_TOOL_VERSION="v1.4.14"
 show_help() {
     echo "Vastbase Script Tool (vb_tool)"
     echo ""
@@ -125,7 +125,7 @@ show_help() {
 }
 
 show_list() {
-    echo "Vastbase Script Tool (vb_tool) v1.4.13"
+    echo "Vastbase Script Tool (vb_tool) v1.4.14"
     echo ""
     echo "Usage Summary:"
     echo "  vb_tool <command> [options]"
@@ -10141,7 +10141,7 @@ run_sqltext() {
     fi
 
     local logfiles
-    logfiles=$(find "$gauss_log" -name "*.log" -type f -printf '%T@ %p\n' 2>/dev/null | \
+    logfiles=$(find "$gauss_log" \( -name "*.log" -o -name "*.log.gz" -o -name "*.csv" -o -name "*.csv.gz" \) -type f -printf '%T@ %p\n' 2>/dev/null | \
                sort -rn | \
                head -n 50 | \
                cut -d' ' -f2-)
@@ -10151,8 +10151,19 @@ run_sqltext() {
         return 1
     fi
 
-    local grep_hits
-    grep_hits=$(echo "$logfiles" | xargs grep -l "$unique_id" 2>/dev/null)
+    # pre-filter by content: zgrep for .gz, grep for plain (grep treats gz as binary and misses)
+    local grep_hits=""
+    local _lf _hits_tmp
+    _hits_tmp=$(mktemp /tmp/vb_tool_sqlhc_hits.XXXXXX)
+    while IFS= read -r _lf; do
+        [[ -z "$_lf" ]] && continue
+        case "$_lf" in
+            *.gz) zgrep -l "$unique_id" "$_lf" 2>/dev/null ;;
+            *)    grep  -l "$unique_id" "$_lf" 2>/dev/null ;;
+        esac
+    done <<< "$logfiles" | sort -u > "$_hits_tmp"
+    grep_hits=$(cat "$_hits_tmp")
+    rm -f "$_hits_tmp"
 
     if [[ -z "$grep_hits" ]]; then
         echo "Error: not found unique_id=${unique_id} in any log file" >&2
@@ -10383,12 +10394,15 @@ detail_re    = re.compile(r'DETAIL:\s+parameters:\s+(.+)$',       re.IGNORECASE)
 
 for logfile in logfiles:
     try:
-        fh = open(logfile, 'rb')
+        if logfile.endswith('.gz'):
+            import gzip
+            with gzip.open(logfile, 'rt', encoding='latin-1') as fh:
+                lines = [l.rstrip('\r\n') for l in fh]
+        else:
+            with open(logfile, 'rb') as fh:
+                lines = [l.decode('latin-1').rstrip('\r\n') for l in fh]
     except Exception:
         continue
-
-    with fh:
-        lines = [l.decode('latin-1').rstrip('\r\n') for l in fh]
 
     n = len(lines)
 
@@ -17990,7 +18004,7 @@ local output_to_file=0
     fi
 
     local logfiles
-    logfiles=$(find "$gauss_log" -name "*.log" -type f -printf '%T@ %p\n' 2>/dev/null | \
+    logfiles=$(find "$gauss_log" \( -name "*.log" -o -name "*.log.gz" -o -name "*.csv" -o -name "*.csv.gz" \) -type f -printf '%T@ %p\n' 2>/dev/null | \
                sort -rn | \
                head -n 50 | \
                cut -d' ' -f2-)
@@ -18000,8 +18014,19 @@ local output_to_file=0
         return 1
     fi
 
-    local grep_hits
-    grep_hits=$(echo "$logfiles" | xargs grep -l "$unique_id" 2>/dev/null)
+    # pre-filter by content: zgrep for .gz, grep for plain (grep treats gz as binary and misses)
+    local grep_hits=""
+    local _lf _hits_tmp
+    _hits_tmp=$(mktemp /tmp/vb_tool_sqlhc_hits.XXXXXX)
+    while IFS= read -r _lf; do
+        [[ -z "$_lf" ]] && continue
+        case "$_lf" in
+            *.gz) zgrep -l "$unique_id" "$_lf" 2>/dev/null ;;
+            *)    grep  -l "$unique_id" "$_lf" 2>/dev/null ;;
+        esac
+    done <<< "$logfiles" | sort -u > "$_hits_tmp"
+    grep_hits=$(cat "$_hits_tmp")
+    rm -f "$_hits_tmp"
 
     if [[ -z "$grep_hits" ]]; then
         echo "Error: not found unique_id=${unique_id} in any log file" >&2
@@ -18480,12 +18505,15 @@ detail_re    = re.compile(r'DETAIL:\s+parameters:\s+(.+)$',       re.IGNORECASE)
 
 for logfile in logfiles:
     try:
-        fh = open(logfile, 'rb')
+        if logfile.endswith('.gz'):
+            import gzip
+            with gzip.open(logfile, 'rt', encoding='latin-1') as fh:
+                lines = [l.rstrip('\r\n') for l in fh]
+        else:
+            with open(logfile, 'rb') as fh:
+                lines = [l.decode('latin-1').rstrip('\r\n') for l in fh]
     except Exception:
         continue
-
-    with fh:
-        lines = [l.decode('latin-1').rstrip('\r\n') for l in fh]
 
     n = len(lines)
 

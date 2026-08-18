@@ -50,7 +50,7 @@ vb_tool list
 | `collect_log` | 收集集群或单节点日志 |
 | `tps` / `tabstat` / `tabsize` / `sqlstat` | 性能与对象统计 |
 | `lock_details` / `lockchain` | 锁等待分析 |
-| `sqlhc` | SQL 健康检查 |
+| `sqlhc` | SQL 健康检查（支持 .log/.csv 及其 .gz 压缩日志） |
 
 完整命令见 `vb_tool list`。
 
@@ -76,6 +76,7 @@ vb_tool list
 
 | 版本 | 日期 | 要点 |
 |------|------|------|
+| v1.4.14 | 2026-08-18 | `sqlhc`/`sqltext` 支持压缩与轮转日志（.log.gz/.csv.gz，zgrep 预筛 + gzip 解析） |
 | v1.4.13 | 2026-08-18 | awr 单点 snap 重构（Oracle 风格 snap_id + awrrpt/awrdiff + cron 采样，含 replication/slot 采样器与 `awr status`）；新增 `osw_netstat` |
 | v1.4.12 | 2026-08-17 | awr 集成 baseline；恢复单文件发布 |
 | v1.4.11 | 2026-05-25 | 模块化结构（commands/ + lib/） |
