@@ -1,13 +1,13 @@
 #!/bin/bash
 #--------------------------------------------------------------------------------
 #-- File name:   vb_tool
-#-- Version  ：  v1.4.14
+#-- Version  ：  v1.4.15
 #-- Commit at：  2026-08-18 21:30:00
 #-- Purpose:     Vastbase Script Tool
 #-- Author:      MVS & Second-line Team 
 #--------------------------------------------------------------------------------
 set -o pipefail
-VB_TOOL_VERSION="v1.4.14"
+VB_TOOL_VERSION="v1.4.15"
 show_help() {
     echo "Vastbase Script Tool (vb_tool)"
     echo ""
@@ -125,7 +125,7 @@ show_help() {
 }
 
 show_list() {
-    echo "Vastbase Script Tool (vb_tool) v1.4.14"
+    echo "Vastbase Script Tool (vb_tool) v1.4.15"
     echo ""
     echo "Usage Summary:"
     echo "  vb_tool <command> [options]"
@@ -10130,7 +10130,7 @@ run_sqltext() {
     local unique_id="$1"
 
     local gauss_log
-    gauss_log=$(env | grep -iw GAUSSLOG | cut -d'=' -f2)
+    gauss_log=${GAUSSLOG:-}
     if [[ -z "$gauss_log" ]]; then
         echo "Error: not found GAUSSLOG path" >&2
         return 1
@@ -17993,7 +17993,7 @@ local output_to_file=0
     fi
 
     local gauss_log
-    gauss_log=$(env | grep -iw GAUSSLOG | cut -d'=' -f2)
+    gauss_log=${GAUSSLOG:-}
     if [[ -z "$gauss_log" ]]; then
         echo "Error: not found GAUSSLOG path" >&2
         return 1
