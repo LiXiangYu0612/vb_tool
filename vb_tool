@@ -1,13 +1,13 @@
 #!/bin/bash
 #--------------------------------------------------------------------------------
 #-- File name:   vb_tool
-#-- Version  ：  v1.4.16
+#-- Version  ：  v1.4.17
 #-- Commit at：  2026-08-18 21:30:00
 #-- Purpose:     Vastbase Script Tool
 #-- Author:      MVS & Second-line Team 
 #--------------------------------------------------------------------------------
 set -o pipefail
-VB_TOOL_VERSION="v1.4.16"
+VB_TOOL_VERSION="v1.4.17"
 show_help() {
     echo "Vastbase Script Tool (vb_tool)"
     echo ""
@@ -125,7 +125,7 @@ show_help() {
 }
 
 show_list() {
-    echo "Vastbase Script Tool (vb_tool) v1.4.16"
+    echo "Vastbase Script Tool (vb_tool) v1.4.17"
     echo ""
     echo "Usage Summary:"
     echo "  vb_tool <command> [options]"
@@ -22272,7 +22272,7 @@ _awr_create() {
         case "$1" in
             --root)    root_override="$2"; shift 2;;
             -h|--help) awr_help; return 0;;
-            -d)        echo "Error: 'awr create' is a single-point snapshot (no -d). Use 'awr enable -d N' for periodic capture." >&2; return 2;;
+            -d)        echo "Error: 'awr create' is a single-point snapshot (no -d). Use 'awr config interval <min>' + 'awr enable' for periodic capture." >&2; return 2;;
             --force)   echo "Error: --force not applicable to single-point snapshots" >&2; return 2;;
             *)         echo "Error: unexpected argument '$1' (awr create takes no name / no -d)" >&2; return 2;;
         esac

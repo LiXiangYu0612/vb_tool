@@ -81,6 +81,7 @@ vb_tool list
 
 | 版本 | 日期 | 要点 |
 |------|------|------|
+| v1.4.17 | 2026-08-19 | 修复 `awr create -d` 报错文案：仍引导已移除的 `enable -d`，改为 `awr config interval <min>` + `awr enable` |
 | v1.4.16 | 2026-08-19 | awr 增强：`list` 倒序+默认 30 条+按日期过滤；快照自动清理（保留期默认 30 天，`config retention`，0=永久，挂 create/enable 钩子）；采样间隔可配（`config interval`，enabled 下即时生效）；`awr show` 总览（吸收原 status 命令）；`enable` 移除 `-d` |
 | v1.4.15 | 2026-08-18 | 修复 `GAUSSLOG` 检测：`env | grep -iw` 在 PWD/OLDPWD 含 "gausslog" 时误匹配拼坏路径，改为直接读环境变量 |
 | v1.4.14 | 2026-08-18 | `sqlhc`/`sqltext` 支持压缩与轮转日志（.log.gz/.csv.gz，zgrep 预筛 + gzip 解析） |
