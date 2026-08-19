@@ -39,11 +39,14 @@ vb_tool list
 | `as [pid]` | 显示活跃会话信息 |
 | `asp <type> -b <begin> -e <end>` | 活跃会话概要分析 (cnt/event/waitchain/sql) |
 | `awr create` | 手动创建 AWR 单点快照 |
-| `awr enable [-d N]` | 启用 cron 定时采样（N 分钟，默认 60） |
-| `awr disable` | 停用定时采样 |
+| `awr enable` / `awr disable` | 启停 cron 定时采样（间隔由 `awr config interval` 控制，默认 60 分钟） |
 | `awr awrrpt begin <id> end <id>` | 生成两快照区间 AWR 报告 (HTML) |
 | `awr awrdiff begin <a> end <b> begin <c> end <d>` | 两区间对比报告 |
-| `awr list/show/delete/status` | 快照管理 |
+| `awr list [YYYY-MM-DD]` | 快照清单（snap_id 倒序，默认最新 30 条；指定日期列出全天） |
+| `awr show` | 总览：运行状态 / 采样间隔 / 保留期 / 最老最新快照 |
+| `awr delete until <time>` | 手动按时间清理快照 / 采样日志 / HTML 报告 |
+| `awr config retention <days>` | 保留期（默认 30 天，0=永久；改小立即清理过期数据） |
+| `awr config interval <min>` | 采样间隔（1-60 分钟，默认 60；enabled 状态下改完即时生效） |
 | `analyze_log` / `analyze_log_v2` | 数据库日志分析（v2 输出 HTML 报告） |
 | `wdr_summary` / `wdr_topsql` / `wdr_tabstat` / `wdr_event` | WDR 报告数据提取分析 |
 | `osw_netstat` | 解析 OSWbb oswnetstat 归档（v8/zzz/gz/批量） |
@@ -61,6 +64,8 @@ vb_tool list
 ```
 ~/.vb_tool/awrs/
 ├── sequence                 # snap_id 序列
+├── retention                # 保留天数（默认 30，0=永久）
+├── interval                 # 采样间隔分钟（默认 60）
 ├── snap_<id>/               # 每快照: meta.json + os/ + db/*.csv
 ├── repl_<YYYYMMDD>.log      # pg_stat_replication 每分钟采样
 └── slot_<YYYYMMDD>.log      # pg_replication_slots 每分钟采样
@@ -76,6 +81,7 @@ vb_tool list
 
 | 版本 | 日期 | 要点 |
 |------|------|------|
+| v1.4.16 | 2026-08-19 | awr 增强：`list` 倒序+默认 30 条+按日期过滤；快照自动清理（保留期默认 30 天，`config retention`，0=永久，挂 create/enable 钩子）；采样间隔可配（`config interval`，enabled 下即时生效）；`awr show` 总览（吸收原 status 命令）；`enable` 移除 `-d` |
 | v1.4.15 | 2026-08-18 | 修复 `GAUSSLOG` 检测：`env | grep -iw` 在 PWD/OLDPWD 含 "gausslog" 时误匹配拼坏路径，改为直接读环境变量 |
 | v1.4.14 | 2026-08-18 | `sqlhc`/`sqltext` 支持压缩与轮转日志（.log.gz/.csv.gz，zgrep 预筛 + gzip 解析） |
 | v1.4.13 | 2026-08-18 | awr 单点 snap 重构（Oracle 风格 snap_id + awrrpt/awrdiff + cron 采样，含 replication/slot 采样器与 `awr status`）；新增 `osw_netstat` |

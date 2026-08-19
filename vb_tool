@@ -1,13 +1,13 @@
 #!/bin/bash
 #--------------------------------------------------------------------------------
 #-- File name:   vb_tool
-#-- Version  ：  v1.4.15
+#-- Version  ：  v1.4.16
 #-- Commit at：  2026-08-18 21:30:00
 #-- Purpose:     Vastbase Script Tool
 #-- Author:      MVS & Second-line Team 
 #--------------------------------------------------------------------------------
 set -o pipefail
-VB_TOOL_VERSION="v1.4.15"
+VB_TOOL_VERSION="v1.4.16"
 show_help() {
     echo "Vastbase Script Tool (vb_tool)"
     echo ""
@@ -53,7 +53,7 @@ show_help() {
     echo "  wdr_tabstat                          display wdr table statistics"
     echo "  workload   [begin/end]               Collect workload information"
     echo "  awr  <create|enable|disable|awrrpt   performance AWR snapshots & diff reports"
-	echo "       |awrdiff|list|show|delete> "
+	echo "       |awrdiff|list|show|delete|config> "
     echo "  xlogcom [START_WAL] [END_WAL]        analyze WAL commits per second"
     echo "  xloghc                               display xlog health check information"
     echo "  osw     [interval] [duration]        collect system performance data (default: interval=3s, duration=60s)"
@@ -125,7 +125,7 @@ show_help() {
 }
 
 show_list() {
-    echo "Vastbase Script Tool (vb_tool) v1.4.15"
+    echo "Vastbase Script Tool (vb_tool) v1.4.16"
     echo ""
     echo "Usage Summary:"
     echo "  vb_tool <command> [options]"
@@ -168,7 +168,7 @@ show_list() {
     echo "  wdr_topsql                           display wdr topsql information"
     echo "  wdr_tabstat                          display wdr table statistics"
     echo "  workload   [begin/end]               Collect workload information"
-    echo "  awr        <create|enable|disable|awrrpt|awrdiff|list|show|delete>"         performance AWR snapshots & diff reports
+    echo "  awr        <create|enable|disable|awrrpt|awrdiff|list|show|delete|config>"         performance AWR snapshots & diff reports
     echo "  xlogcom [START_WAL] [END_WAL]        analyze WAL commits per second"
     echo "  xloghc                               display xlog health check information"
     echo "  osw     [interval] [duration]        collect system performance data (default: interval=3s, duration=60s)"
@@ -19166,19 +19166,19 @@ PSQLEOF
 
 awr_help() {
     cat <<'EOF'
-Usage: vb_tool awr <create|enable|disable|status|awrrpt|awrdiff|list|show|delete> [options]
+Usage: vb_tool awr <create|enable|disable|awrrpt|awrdiff|list|show|delete|config> [options]
 
 Single-point performance snapshots (Oracle AWR style). Each snapshot is an
 instantaneous OS+DB sample assigned a monotonic snap_id. An AWR report is the
 counter delta between two snapshots (end - begin).
 
   create                    capture ONE single-point snapshot now (foreground,
-                            ~5-10s), assigns the next snap_id. No -d, no html.
-  enable  [-d N]            install crontab entries: snapshot every N MINUTES
-                            (default 60) + replication sampler every 1 minute
+                            ~5-10s), assigns the next snap_id. No html.
+  enable                    install crontab entries: snapshot every <interval>
+                            MINUTES (see 'config interval', default 60) +
+                            replication sampler every 1 minute; expired data
+                            auto-purged after each capture
   disable                   remove both crontab entries (snapshot + sampler).
-  status                    show whether periodic capture is enabled (crontab
-                            entries) and the exact entries if so.
   awrrpt  begin <id> end <id>
                             render AWR html = snap<end_id> - snap<begin_id>;
                             written to ~/.vb_tool/awr_reports/awr_{db}_{begin}_{end}.html
@@ -19186,15 +19186,27 @@ counter delta between two snapshots (end - begin).
                             render AWR DIFF html (3-col: Period1 | Period2 | Δ);
                             period1 = snap a->b, period2 = snap c->d;
                             written to awrdiff_{db}_{p1_begin}_{p2_begin}.html
-  list                      list stored snapshots (snap_id / ts / host / db)
-  show    <snap_id>         show a snapshot's meta + collected files
+  list    [YYYY-MM-DD]     list stored snapshots (snap_id / ts / host / db),
+                            newest first; default latest 30, a date lists
+                            that whole day
+  show                      awr overview: run status (crontab entries),
+                            sampling interval, retention, oldest/newest
+                            snapshot, snapshot count
   delete  until <time>      delete snapshots (by ts), html reports (by mtime) and
                             old repl_*.log (by whole day) older than <time>;
                             e.g. '2026-08-11' or '2026-08-11 12:00:00'
+  config  retention <days>  set retention in days (default 30; 0 = never purge).
+                            Immediately purges already-expired snaps, repl/slot
+                            logs and html reports.
+  config  interval <min>    set sampling interval in minutes (default 60,
+                            1-60, cron minute-field limit). If periodic capture
+                            is enabled the crontab entry is rewritten at once.
 
 Storage (per snapshot):
   snapshot:   <root>/snap_<id>/{meta.json, os/<proc files>, db/<views>.csv}
   sequence:   <root>/sequence            (next snap_id to allocate)
+  retention:  <root>/retention           (days to keep; default 30, 0 = forever)
+  interval:   <root>/interval            (snapshot interval min; default 60)
   html:       ~/.vb_tool/awr_reports/awr_{db}_{begin}_{end}.html  (by compare_render.py)
   repl logs:  <root>/repl_<YYYYMMDD>.log  per-minute pg_stat_replication samples
               (ts,app,addr,state,sync,sent,write,flush,replay LSN; no standby -> ts,null)
@@ -19211,11 +19223,6 @@ EOF
 
 _awr_root() {
     echo "${VB_TOOL_HOME:-$HOME/.vb_tool}/awrs"
-}
-
-# _awr_snap_dir <id>  -> absolute path to snap_<id>
-_awr_snap_dir() {
-    echo "$(_awr_root)/snap_$1"
 }
 
 # _awr_next_id  -- atomically allocate and return the next snap_id.
@@ -22254,6 +22261,7 @@ _awr_snap() {
     _awr_collect "$dir" || echo "  [WARN] collection reported errors (snap $sid kept)" >&2
     _awr_write_meta "$dir" "$sid" "$ts" "$ts_ep"
     echo "==> snap $sid captured at $ts"
+    _awr_purge_expired
     return 0
 }
 
@@ -22358,18 +22366,17 @@ _awr_awrdiff() {
 }
 
 # awr enable -d N  -- install crontab entry: snapshot every N minutes (default 60).
+# awr enable  -- install the periodic crontab entries. Takes NO options: the
+# snapshot interval comes from 'awr config interval <min>' (<root>/interval,
+# default 60); the replication sampler always runs every 1 minute.
 _awr_enable() {
-    local mins=60
     while [ $# -gt 0 ]; do
         case "$1" in
-            -d)        mins="$2"; shift 2;;
             -h|--help) awr_help; return 0;;
-            *)         echo "Error: unknown option '$1' (usage: enable [-d N])" >&2; return 2;;
+            -d)        echo "Error: 'enable' takes no -d anymore -- set the interval via 'awr config interval <min>' (default 60)" >&2; return 2;;
+            *)         echo "Error: unexpected argument '$1' (usage: enable)" >&2; return 2;;
         esac
     done
-    case "$mins" in ''|*[!0-9]*) echo "Error: -d expects a positive integer (minutes)" >&2; return 2;; esac
-    [ "$mins" -lt 1 ] && { echo "Error: -d must be >= 1 minute" >&2; return 2; }
-    [ "$mins" -gt 60 ] && { echo "Error: -d max 60 minutes (cron minute-field limit; for longer intervals edit crontab manually)" >&2; return 2; }
     command -v crontab >/dev/null 2>&1 || { echo "Error: crontab not found on PATH" >&2; return 1; }
     # Refuse to double-enable: if any of our marker entries is already installed,
     # error out instead of silently rewriting (user must disable first, so an
@@ -22381,6 +22388,7 @@ _awr_enable() {
         crontab -l 2>/dev/null | grep -F '# vb_tool_awr' >&2
         return 2
     fi
+    local mins; mins=$(_awr_interval_read)
     local self; self=$(readlink -f "$0" 2>/dev/null || echo "$0")
     local marker="# vb_tool_awr"
     local rmarker="# vb_tool_awr_repl"
@@ -22390,10 +22398,11 @@ _awr_enable() {
     local entry="*/$mins * * * * /bin/bash -lc '$self awr create >/dev/null 2>&1'  $marker"
     local rentry="* * * * * /bin/bash -lc '$self awr _repl-sample >/dev/null 2>&1'  $rmarker"
     ( crontab -l 2>/dev/null | grep -v "$rmarker" | grep -v "$marker"; echo "$rentry"; echo "$entry" ) | crontab -
-    echo "awr enable: capturing a snapshot every ${mins}min + replication sample every 1min via crontab"
+    echo "awr enable: capturing a snapshot every ${mins}min (see 'awr config interval') + replication sample every 1min via crontab"
     echo "  $entry"
     echo "  $rentry"
     echo "  (run 'awr disable' to stop both)"
+    _awr_purge_expired
     return 0
 }
 
@@ -22415,11 +22424,15 @@ _awr_disable() {
 }
 
 _awr_list() {
+    local date_filter="$1"
+    if [ -n "$date_filter" ] && ! printf '%s' "$date_filter" | grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'; then
+        echo "Error: invalid date '$date_filter' (expect YYYY-MM-DD)" >&2; return 2
+    fi
     local root; root=$(_awr_root)
     if [ ! -d "$root" ]; then echo "(no snaps at $root)"; return 0; fi
-    python3 - "$root" <<'PY'
+    python3 - "$root" "$date_filter" <<'PY'
 import json, os, sys, glob
-root = sys.argv[1]
+root, date_filter = sys.argv[1], sys.argv[2]
 rows = []
 for d in glob.glob(os.path.join(root, "snap_*")):
     if not os.path.isdir(d): continue
@@ -22430,52 +22443,141 @@ for d in glob.glob(os.path.join(root, "snap_*")):
     try: sid = int(sid)
     except Exception: pass
     rows.append((sid, m.get("ts", "?"), m.get("hostname", "?"), m.get("db_name", "?")))
-rows.sort(key=lambda r: (isinstance(r[0], str), r[0]))
+if date_filter:
+    rows = [r for r in rows if str(r[1])[:10] == date_filter]
+# newest first: numeric snap_ids descending, non-numeric fallback ids last
+rows = (sorted([r for r in rows if not isinstance(r[0], str)], key=lambda r: r[0], reverse=True)
+        + sorted([r for r in rows if isinstance(r[0], str)]))
 if not rows:
-    print("(no snaps at %s)" % root); sys.exit()
+    print("(no snaps at %s%s)" % (root, (" on " + date_filter) if date_filter else "")); sys.exit()
+total = len(rows)
+if not date_filter and total > 30:
+    rows = rows[:30]
 print("%-8s %-20s %-14s %s" % ("SNAP_ID", "TS", "HOST", "DB"))
 for r in rows: print("%-8s %-20s %-14s %s" % r)
+if not date_filter and total > 30:
+    print("(showing latest 30 of %d; 'vb_tool awr list YYYY-MM-DD' for a specific day)" % total)
 PY
 }
 
+# awr show -- no arg: awr configuration overview (retention / interval /
+# snapshot inventory). With <snap_id>: that snapshot's meta + collected files.
+# awr show  -- standalone overview: run status (crontab entries when enabled),
+# sampling interval, retention, oldest/newest snapshot, snapshot count.
+# Absorbed the old 'awr status' (same markers disable removes).
 _awr_show() {
-    local sid="$1"
-    if [ -z "$sid" ]; then echo "Error: awr show requires <snap_id>" >&2; return 2; fi
-    local dir; dir=$(_awr_snap_dir "$sid")
-    if [ ! -d "$dir" ]; then echo "Error: snap $sid not found ($dir)" >&2; return 1; fi
-    echo "==> snap $sid: $dir"
-    [ -f "$dir/meta.json" ] && { echo "--- meta.json ---"; cat "$dir/meta.json"; echo; }
-    echo "--- files ---"
-    ( cd "$dir" 2>/dev/null && find . -type f 2>/dev/null | sort | \
-        while read -r f; do printf "%10d  %s\n" "$(wc -c < "$f")" "$f"; done )
+    if [ $# -gt 0 ]; then
+        echo "Error: usage 'awr show' (no arguments; per-snap files live under <root>/snap_<id>/)" >&2
+        return 2
+    fi
+    local root; root=$(_awr_root)
+    local days; days=$(_awr_retention_read)
+    local mins; mins=$(_awr_interval_read)
+    # run status: read the SAME markers enable/disable use, so what show reports
+    # is always consistent with what disable would remove
+    local snapent="" replent=""
+    if command -v crontab >/dev/null 2>&1; then
+        local out; out=$(crontab -l 2>/dev/null)
+        snapent=$(printf '%s\n' "$out" | grep -F '# vb_tool_awr' | grep -vF '# vb_tool_awr_repl')
+        replent=$(printf '%s\n' "$out" | grep -F '# vb_tool_awr_repl')
+    fi
+    local nextid; nextid=$(cat "$root/sequence" 2>/dev/null)
+    case "$nextid" in ''|*[!0-9]*) nextid=1;; esac
+    # inventory: count + oldest/newest (ts-sorted, snap_id alongside)
+    local inv="0"
+    if [ -d "$root" ] && command -v python3 >/dev/null 2>&1; then
+        inv=$(python3 - "$root" <<'PY' 2>/dev/null
+import json, os, sys, glob
+rows = []
+for d in glob.glob(os.path.join(sys.argv[1], "snap_*")):
+    mp = os.path.join(d, "meta.json")
+    try: m = json.load(open(mp)) if os.path.isfile(mp) else {}
+    except Exception: m = {}
+    t = str(m.get("ts", ""))
+    if not t: continue
+    sid = m.get("snap_id", os.path.basename(d).replace("snap_", ""))
+    rows.append((t, str(sid)))
+rows.sort()
+if not rows: print("0")
+else: print("%d\t%s\t%s\t%s\t%s" % (len(rows), rows[0][1], rows[0][0], rows[-1][1], rows[-1][0]))
+PY
+)
+    fi
+    local n osid ots nsid nts
+    n=$(printf '%s\n' "$inv" | head -1 | cut -f1)
+    case "$n" in ''|*[!0-9]*) n=0;; esac
+    osid=$(printf '%s\n' "$inv" | cut -f2); ots=$(printf '%s\n' "$inv" | cut -f3)
+    nsid=$(printf '%s\n' "$inv" | cut -f4); nts=$(printf '%s\n' "$inv" | cut -f5)
+    local oldest="-" newest="-"
+    [ "$n" -gt 0 ] && oldest="$osid  ($ots)" && newest="$nsid  ($nts)"
+    local purge="on (after every create / enable)"
+    [ "$days" -eq 0 ] && purge="off (retention = 0, keep forever)"
+    local rdesc="${days} day(s)"
+    [ "$days" -eq 0 ] && rdesc="0 (never purge)"
+    echo "==> awr show"
+    if [ -z "$snapent" ] && [ -z "$replent" ]; then
+        echo "status        : DISABLED (no periodic snapshot / sampler crontab entries)"
+    else
+        echo "status        : ENABLED"
+        if [ -n "$snapent" ]; then echo "  snapshot:          $snapent"
+        else echo "  snapshot:          (entry missing -- re-run 'awr enable' to fix)"; fi
+        if [ -n "$replent" ]; then echo "  replication sampler: $replent"
+        else echo "  replication sampler: (entry missing -- re-run 'awr enable' to fix)"; fi
+    fi
+    cat <<EOF
+interval      : ${mins} min
+retention     : $rdesc
+auto-purge    : $purge
+oldest snap   : $oldest
+newest snap   : $newest
+snapshots     : $n
+next snap_id  : $nextid
+EOF
     return 0
 }
 
-_awr_delete_until() {
-    local until_time="$1"
-    if [ -z "$until_time" ]; then
-        echo "Error: usage 'awr delete until <time>' (e.g. '2026-08-11' or '2026-08-11 12:00:00')" >&2
-        return 2
-    fi
-    local until_ep
-    until_ep=$(date -d "$until_time" +%s 2>/dev/null)
-    if [ -z "$until_ep" ]; then echo "Error: invalid time '$until_time'" >&2; return 2; fi
+# _awr_purge_core <until_ep>  -- delete everything older than <until_ep> (epoch):
+# snaps (by meta ts), repl_/slot_ logs (by whole day), html reports (by mtime).
+# Echoes "S R H" (the three counts) on stdout; WARNs on unparseable items go to
+# stderr. Shared by 'awr delete until' and the retention auto-purge so both
+# paths always delete exactly the same set of things.
+_awr_purge_core() {
+    local until_ep="$1"
     local root; root=$(_awr_root)
-    local scount=0 d mp ts tep
-    if [ -d "$root" ]; then
-        for d in "$root"/snap_*/; do
-            [ -d "$d" ] || continue
-            mp="${d}meta.json"; [ -f "$mp" ] || continue
-            ts=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('ts',''))" "$mp" 2>/dev/null)
-            tep=$(date -d "$ts" +%s 2>/dev/null)
-            if [ -n "$tep" ] && [ "$tep" -lt "$until_ep" ]; then
-                rm -rf "$d"; scount=$((scount+1))
-            elif [ -z "$tep" ]; then
-                echo "  [WARN] snap $(basename "$d") has unparseable ts '$ts', skipped" >&2
-            fi
-        done
+    local scount=0
+    if [ -d "$root" ] && command -v python3 >/dev/null 2>&1; then
+        # one python pass reads every meta.json (a per-dir python spawn, like
+        # the old loop, would cost ~30ms x N snaps on EVERY periodic create)
+        local expired
+        expired=$(python3 - "$root" "$until_ep" <<'PY'
+import json, os, sys, glob, time
+root, until_ep = sys.argv[1], int(sys.argv[2])
+for d in sorted(glob.glob(os.path.join(root, "snap_*"))):
+    if not os.path.isdir(d): continue
+    ts = ""
+    try:
+        mp = os.path.join(d, "meta.json")
+        if os.path.isfile(mp): ts = str(json.load(open(mp)).get("ts", ""))
+    except Exception:
+        ts = ""
+    try:
+        tep = int(time.mktime(time.strptime(ts, "%Y-%m-%d %H:%M:%S")))
+    except ValueError:
+        print("WARN snap %s has unparseable ts %r, skipped" % (os.path.basename(d), ts), file=sys.stderr)
+        continue
+    if tep < until_ep:
+        print(d)
+PY
+)
+        local d
+        while IFS= read -r d; do
+            [ -n "$d" ] || continue
+            rm -rf "$d" 2>/dev/null && scount=$((scount+1))
+        done <<< "$expired"
+    elif [ -d "$root" ]; then
+        echo "  [WARN] python3 not found -- snap expiry scan skipped" >&2
     fi
-    # repl_/slot_<YYYYMMDD>.log: delete only when the WHOLE day is before until_time
+    # repl_/slot_<YYYYMMDD>.log: delete only when the WHOLE day is before until
     local rcount=0 rf rd d_ep
     for rf in "$root"/repl_*.log "$root"/slot_*.log; do
         [ -f "$rf" ] || continue
@@ -22498,28 +22600,135 @@ _awr_delete_until() {
             rm -f "$f"; hcount=$((hcount+1))
         fi
     done
-    echo "deleted $scount snap(s) (by ts), $rcount repl log(s) (by day), and $hcount html report(s) (by mtime) older than $until_time"
+    echo "$scount $rcount $hcount"
+}
+
+# awr delete until <time>  -- manual one-shot purge (thin wrapper over the core).
+_awr_delete_until() {
+    local until_time="$1"
+    if [ -z "$until_time" ]; then
+        echo "Error: usage 'awr delete until <time>' (e.g. '2026-08-11' or '2026-08-11 12:00:00')" >&2
+        return 2
+    fi
+    local until_ep
+    until_ep=$(date -d "$until_time" +%s 2>/dev/null)
+    if [ -z "$until_ep" ]; then echo "Error: invalid time '$until_time'" >&2; return 2; fi
+    local counts
+    counts=$(_awr_purge_core "$until_ep")
+    set -- $counts
+    echo "deleted $1 snap(s) (by ts), $2 repl/slot log(s) (by day), and $3 html report(s) (by mtime) older than $until_time"
     return 0
 }
 
-# awr status -- show whether the periodic capture (crontab entries) is enabled.
-# Reads the SAME markers enable/disable use (# vb_tool_awr / # vb_tool_awr_repl),
-# so status is always consistent with what disable would remove. Read-only.
-_awr_status() {
-    command -v crontab >/dev/null 2>&1 || { echo "Error: crontab not found on PATH" >&2; return 1; }
-    local out
-    out=$(crontab -l 2>/dev/null) || out=""
-    local snap repl
-    snap=$(printf '%s\n' "$out" | grep -F '# vb_tool_awr' | grep -vF '# vb_tool_awr_repl')
-    repl=$(printf '%s\n' "$out" | grep -F '# vb_tool_awr_repl')
-    if [ -z "$snap" ] && [ -z "$repl" ]; then
-        echo "awr status: DISABLED (no periodic snapshot / sampler crontab entries)"
+# _awr_retention_read  -> retention days from <root>/retention (default 30 when
+# absent/garbage; 0 = keep forever). Echoed on stdout.
+_awr_retention_read() {
+    local root; root=$(_awr_root)
+    local v
+    v=$(cat "$root/retention" 2>/dev/null)
+    case "$v" in ''|*[!0-9]*) v=30;; esac
+    echo "$v"
+}
+
+# _awr_purge_expired  -- retention auto-purge (Oracle MMON style): delete snaps
+# / repl+slot logs / html reports older than now - <retention> days. Prints ONE
+# summary line only when something was actually removed (silent otherwise, so
+# periodic 'awr create' output stays clean; WARN noise also suppressed).
+# Runs after every successful create, after 'awr enable', and after
+# 'awr config retention N' (N > 0).
+_awr_purge_expired() {
+    local days; days=$(_awr_retention_read)
+    [ "$days" -eq 0 ] && return 0
+    local cutoff_ep
+    cutoff_ep=$(date -d "-$days days" +%s 2>/dev/null)
+    [ -z "$cutoff_ep" ] && return 0
+    local counts
+    counts=$(_awr_purge_core "$cutoff_ep" 2>/dev/null)
+    set -- $counts
+    [ "$1" -eq 0 ] && [ "$2" -eq 0 ] && [ "$3" -eq 0 ] && return 0
+    echo "awr auto-purge (retention ${days}d): removed $1 snap(s), $2 repl/slot log(s), $3 html report(s) older than $(date -d "@$cutoff_ep" '+%F %T' 2>/dev/null)"
+    return 0
+}
+
+# _awr_interval_read  -> sampling interval minutes from <root>/interval
+# (default 60 when absent/garbage). Echoed on stdout.
+_awr_interval_read() {
+    local root; root=$(_awr_root)
+    local v
+    v=$(cat "$root/interval" 2>/dev/null)
+    case "$v" in ''|*[!0-9]*) v=60;; esac
+    echo "$v"
+}
+
+# awr config <retention|interval> <value>  -- modify awr settings:
+#   retention <days>  0 = keep forever (max 3650); purges already-expired
+#                     snaps/repl+slot logs/html reports immediately
+#   interval  <min>   1-60 (cron minute-field limit); when periodic capture is
+#                     enabled the crontab entry is rewritten on the spot, so
+#                     the new interval takes effect without disable/enable
+# No args: print current values + usage.
+_awr_config() {
+    local root; root=$(_awr_root)
+    local what="${1:-}"
+    if [ -z "$what" ]; then
+        local r i
+        r=$(_awr_retention_read); i=$(_awr_interval_read)
+        echo "awr config:"
+        if [ "$r" -eq 0 ]; then echo "  retention : 0 (never purge)"
+        else echo "  retention : ${r} day(s)"; fi
+        echo "  interval  : ${i} min"
+        echo "usage: vb_tool awr config retention <days>   (0 = never purge, max 3650)"
+        echo "       vb_tool awr config interval <min>     (1-60)"
         return 0
     fi
-    echo "awr status: ENABLED"
-    [ -n "$snap" ] && { echo "  snapshot:    $snap"; } || echo "  snapshot:    (entry missing -- re-run 'awr enable' to fix)"
-    [ -n "$repl" ] && { echo "  replication sampler: $repl"; } || echo "  replication sampler: (entry missing -- re-run 'awr enable' to fix)"
-    return 0
+    local val="${2:-}"
+    [ -z "$val" ] && { echo "Error: usage 'awr config $what <value>'" >&2; return 2; }
+    shift 2
+    [ $# -gt 0 ] && { echo "Error: unexpected argument '$1'" >&2; return 2; }
+    case "$what" in
+        retention)
+            case "$val" in ''|*[!0-9]*) echo "Error: retention expects a non-negative integer number of days (0 = never purge)" >&2; return 2;; esac
+            [ "$val" -gt 3650 ] && { echo "Error: retention too large (max 3650 days); use 0 for keep-forever" >&2; return 2; }
+            local old; old=$(_awr_retention_read)
+            mkdir -p "$root" 2>/dev/null || { echo "Error: cannot create $root" >&2; return 1; }
+            echo "$val" > "$root/retention" || { echo "Error: cannot write $root/retention" >&2; return 1; }
+            if [ "$val" -eq 0 ]; then
+                echo "awr config: retention ${old} -> 0 (never purge)"
+                return 0
+            fi
+            echo "awr config: retention ${old} -> ${val} day(s)"
+            _awr_purge_expired
+            return 0
+            ;;
+        interval)
+            case "$val" in ''|*[!0-9]*) echo "Error: interval expects a positive integer number of minutes (1-60)" >&2; return 2;; esac
+            if [ "$val" -lt 1 ] || [ "$val" -gt 60 ]; then
+                echo "Error: interval must be 1-60 minutes (cron minute-field limit; longer intervals: edit crontab manually)" >&2
+                return 2
+            fi
+            local oldi; oldi=$(_awr_interval_read)
+            mkdir -p "$root" 2>/dev/null || { echo "Error: cannot create $root" >&2; return 1; }
+            echo "$val" > "$root/interval" || { echo "Error: cannot write $root/interval" >&2; return 1; }
+            echo "awr config: interval ${oldi} -> ${val} min"
+            # take effect immediately when already enabled: rewrite our entries
+            # (same generator as enable; keeps sampler entry, heals half-open)
+            if crontab -l 2>/dev/null | grep -qF '# vb_tool_awr_repl' || \
+               crontab -l 2>/dev/null | grep -F '# vb_tool_awr' | grep -qvF '# vb_tool_awr_repl'; then
+                local self; self=$(readlink -f "$0" 2>/dev/null || echo "$0")
+                local marker="# vb_tool_awr"
+                local rmarker="# vb_tool_awr_repl"
+                local entry="*/$val * * * * /bin/bash -lc '$self awr create >/dev/null 2>&1'  $marker"
+                local rentry="* * * * * /bin/bash -lc '$self awr _repl-sample >/dev/null 2>&1'  $rmarker"
+                ( crontab -l 2>/dev/null | grep -v "$rmarker" | grep -v "$marker"; echo "$rentry"; echo "$entry" ) | crontab -
+                echo "awr config: periodic capture is ENABLED -- crontab entry rewritten to every ${val}min"
+                echo "  $entry"
+            fi
+            return 0
+            ;;
+        *)
+            echo "Error: unknown config key '$what' (expect retention | interval)" >&2
+            return 2;;
+    esac
 }
 
 run_awr() {
@@ -22531,17 +22740,18 @@ run_awr() {
         create)         _awr_create "$@";;
         enable)         _awr_enable "$@";;
         disable)        _awr_disable;;
-        status)         _awr_status;;
         awrrpt)         _awr_awrrpt "$@";;
         awrdiff)        _awr_awrdiff "$@";;
-        list|ls)        _awr_list;;
-        show)           _awr_show "$1";;
+        list|ls)        _awr_list "$1";;
+        show)           _awr_show "$@";;
         delete)         if [ "$1" = "until" ]; then _awr_delete_until "$2";
                         else echo "Error: usage 'vb_tool awr delete until <time>' (e.g. '2026-08-11')" >&2; return 2; fi;;
+        config)         _awr_config "$@";;
         -h|--help|help) awr_help; return 0;;
         *) echo "Error: unknown awr subcommand '$sub'" >&2; awr_help; return 1;;
     esac
 }
+
 case "$1" in
     -V|-v|version)
         echo "$VB_TOOL_VERSION"; exit 0;;
