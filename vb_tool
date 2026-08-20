@@ -20864,6 +20864,7 @@ table.t { border-collapse: collapse; width: auto; max-width: 100%; border: 1px s
 table.t th { background: #cccccc; color: #000; font-weight: bold; padding: 3px 6px; border: 1px solid #999; text-align: center; font-size: 11px; }
 table.t td { padding: 3px 6px; border: 1px solid #d8d8d8; vertical-align: top; font-size: 12px; }
 td.n, th.n { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+td.b { font-weight: bold; }
 tr:nth-child(even) td { background: #f6f8fb; }
 .sql { font-family: 'Courier New', Consolas, monospace; font-size: 11px; max-width: 620px; word-break: break-all; }
 .note { color: #555; font-size: 11px; font-style: italic; margin: 2px 0 6px 0; }
@@ -20991,13 +20992,14 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             parts.append('<tr><td>Freq (min / avg / max MHz)</td><td class="n">%.0f / %.0f / %.0f</td></tr>'
                          % (_ci["freq_min_mhz"], _ci["freq_avg_mhz"], _ci["freq_max_mhz"]))
         parts.append('</table>')
-    sub("CPU utilization")
-    parts.append('<table class="t"><tr><th>Component</th><th class="n">avg value</th></tr>')
-    def cpur(label, field):
-        parts.append('<tr><td>%s</td><td class="n">%.1f%%</td></tr>'
-                     % (esc(label), osd["cpu"].get(field, 0.0)))
-    for f in ("user", "nice", "system", "iowait", "irq", "softirq", "steal", "idle"):
-        cpur(f, f)
+    sub("CPU utilization (%)")
+    # horizontal layout: components as columns, one value row (busy bolded)
+    _cf = ("busy", "user", "nice", "system", "iowait", "irq", "softirq", "steal", "idle")
+    parts.append('<table class="t"><tr>' +
+                 ''.join('<th class="n">%s</th>' % f for f in _cf) + '</tr>')
+    parts.append('<tr>' + ''.join(
+        '<td class="n%s">%.1f</td>' % (' b' if f == "busy" else '',
+                                       osd["cpu"].get(f, 0.0)) for f in _cf) + '</tr>')
     parts.append('</table>')
     _ntop = parse_numa(win["os"].get(("end", "numa"), "")
                        or win["os"].get(("begin", "numa"), ""))
@@ -21533,6 +21535,7 @@ table.t { border-collapse: collapse; width: auto; max-width: 100%; border: 1px s
 table.t th { background: #cccccc; color: #000; font-weight: bold; padding: 3px 6px; border: 1px solid #999; text-align: center; font-size: 11px; }
 table.t td { padding: 3px 6px; border: 1px solid #d8d8d8; vertical-align: top; font-size: 12px; }
 td.n, th.n { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+td.b { font-weight: bold; }
 tr:nth-child(even) td { background: #f6f8fb; }
 .note { color: #555; font-size: 11px; font-style: italic; margin: 2px 0 6px 0; }
 .bad { color: #c0392b; font-weight: bold; }
@@ -21658,15 +21661,19 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                          % (_ci["freq_min_mhz"], _ci["freq_avg_mhz"], _ci["freq_max_mhz"]))
         parts.append('</table>')
     sub("CPU utilization (%)")
-    parts.append('<table class="t"><tr><th>Component</th><th class="n">P1 %</th>'
-                 '<th class="n">P2 %</th><th class="n">&Delta; (pp)</th></tr>')
-    for f, lbl in [("user", "user"), ("nice", "nice"), ("system", "system"),
-                   ("iowait", "iowait"), ("irq", "irq"), ("softirq", "softirq"),
-                   ("steal", "steal"), ("idle", "idle")]:
-        v1 = osd1["cpu"].get(f, 0.0); v2 = osd2["cpu"].get(f, 0.0)
-        cls = ' class="n bad"' if (f == "iowait" and v2 - v1 > 0.5) else ' class="n"'
-        parts.append('<tr><td>%s</td><td class="n">%.1f</td><td class="n">%.1f</td>'
-                     '<td%s>%+.1f</td></tr>' % (esc(lbl), v1, v2, cls, v2 - v1))
+    # horizontal layout: components as columns, P1 / P2 / delta as rows
+    _cf = ("busy", "user", "nice", "system", "iowait", "irq", "softirq", "steal", "idle")
+    parts.append('<table class="t"><tr><th></th>' +
+                 ''.join('<th class="n">%s</th>' % f for f in _cf) + '</tr>')
+    for _rl, _src in (("P1 %", osd1), ("P2 %", osd2)):
+        parts.append('<tr><td class="k">%s</td>' % _rl + ''.join(
+            '<td class="n%s">%.1f</td>' % (' b' if f == "busy" else '',
+                                           _src["cpu"].get(f, 0.0)) for f in _cf) + '</tr>')
+    parts.append('<tr><td class="k">&Delta; (pp)</td>' + ''.join(
+        '<td class="n%s">%+.1f</td>' % (
+            ' bad' if (f == "iowait" and
+                       osd2["cpu"].get(f, 0.0) - osd1["cpu"].get(f, 0.0) > 0.5) else '',
+            osd2["cpu"].get(f, 0.0) - osd1["cpu"].get(f, 0.0)) for f in _cf) + '</tr>')
     parts.append('</table>')
     _ntop = (parse_numa(win2["os"].get(("end", "numa"), "")
                         or win2["os"].get(("begin", "numa"), ""))
