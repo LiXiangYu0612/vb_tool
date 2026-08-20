@@ -13,52 +13,56 @@ show_help() {
     echo ""
     echo "Usage Summary:"
     echo "  vb_tool <command> [options]"
-    echo "  Example: vb_tool as <vb_pid>"
+    echo "  Example: vb_tool -P 5433 sp work_mem"
+    echo ""
+    echo "Global Option:"
+    echo "  -P <port>              database port for multi-instance; accepted by any"
+    echo "                         command, effective for the DB clients (psql/vsql)"
+    echo "                         (default: \$PGPORT environment variable, else 5432)"
     echo ""
     echo "Available Commands:"
-    echo "  analyze_log                          analyze database logs (slow queries or plans)"
-	echo "  analyze_log_v2                       analyze database logs (slow queries) output html report (enhanced version)"
-    echo "  as       [vb pid]                    display active session info"
-    echo "  asp                                  analyze active session profile"
-    echo "  collect_log                          collect logs for cluster or single node"
-    echo "  dead_tups                            display dead tuples information"
-    echo "  index_check                          display redundant/unused/unusable/novalid index"
-    echo "  kill                                 terminate sessions by conditions"
-    echo "  list                                 list vb_tool available script"
-    echo "  lockchain                            display lock wait chain"
-    echo "  lock_details                         display detailed lock information (holders & waiters)"
-    echo "  lsds                                 list block devices and metadata"
-    echo "  mem                                  display memory usage information"
-    echo "  memhist                              display memory usage history"
-    echo "  net                                  display network information"
-    echo "  priv                                 display privileges for users/tables/databases/schemas"
-	echo "  planbyline [file]                    analyze execution plan and output self-time by line"
-    echo "  recover_table                        recover table data by ctid scan (skip corrupted rows)"
-    echo "  redo        -f <log_file>            analyze redo log generate"
-    echo "  relxlog [START_WAL] [END_WAL]        analyze WAL records for relations"
-    echo "  repl                                 display Streaming Replication lag"
-    echo "  slow                                 display top slow sql Information"
-    echo "  sp       [guc]                       display guc parameter"
-    echo "  sqlstat  [unique_query_id]           display sqlstat information"
-	echo "  sqltext  [unique_query_id]           display sqltext from postgresql slow log"
-	echo "  sqlhc    [unique_query_id]           display sql health check(include performance plan & sqlstat & tabstat)"
-    echo "  ssh_setup                            setup SSH connectivity between hosts"
-    echo "  st       [relname]                   display table or view"
-    echo "  tabsize                              display top number size of tables(including all indexes)"
-    echo "  tabstat                              display table statistics"
-    echo "  tps                                  analyze TPS per 10 minutes"
-    echo "  wdr_event                            display wdr top event information"
-    echo "  wdr_summary                          display wdr workload information"
-    echo "  wdr_topsql                           display wdr topsql information"
-    echo "  wdr_tabstat                          display wdr table statistics"
-    echo "  workload   [begin/end]               Collect workload information"
-    echo "  awr  <create|enable|disable|awrrpt   performance AWR snapshots & diff reports"
-	echo "       |awrdiff|list|show|delete|config> "
-    echo "  xlogcom [START_WAL] [END_WAL]        analyze WAL commits per second"
-    echo "  xloghc                               display xlog health check information"
-    echo "  osw     [interval] [duration]        collect system performance data (default: interval=3s, duration=60s)"
-    echo "  osw_netstat <interface> <file|dir>   analyze OSWbb oswnetstat archive (RX/TX + retrans deltas)"
-    echo "  flamegraph [-p <pid>] [-s <seconds>] generate CPU flame graph (default: sample 10s)"
+    echo "  analyze_log     analyze database logs (slow queries or plans)"
+    echo "  analyze_log_v2  analyze database logs (slow queries), output html report (enhanced)"
+    echo "  as              display active session info"
+    echo "  asp             analyze active session profile"
+    echo "  awr             performance AWR snapshots & diff reports"
+    echo "  collect_log     collect logs for cluster or single node"
+    echo "  dead_tups       display dead tuples information"
+    echo "  flamegraph      generate CPU flame graph"
+    echo "  index_check     display redundant/unused/unusable/novalid index"
+    echo "  kill            terminate sessions by conditions"
+    echo "  list            list vb_tool available scripts"
+    echo "  lock_details    display detailed lock information (holders & waiters)"
+    echo "  lockchain       display lock wait chain"
+    echo "  lsds            list block devices and metadata"
+    echo "  mem             display memory usage information"
+    echo "  memhist         display memory usage history"
+    echo "  net             display network information"
+    echo "  osw             collect system performance data (OSWatcher style)"
+    echo "  osw_netstat     analyze OSWbb oswnetstat archive (RX/TX + retrans deltas)"
+    echo "  planbyline      analyze execution plan and output self-time by line"
+    echo "  priv            display privileges for users/tables/databases/schemas"
+    echo "  recover_table   recover table data by ctid scan (skip corrupted rows)"
+    echo "  redo            analyze redo/WAL log generation"
+    echo "  relxlog         analyze WAL records for relations"
+    echo "  repl            display streaming replication lag"
+    echo "  slow            display top slow sql information"
+    echo "  sp              display GUC parameter"
+    echo "  sqlhc           display sql health check (plan & sqlstat & tabstat)"
+    echo "  sqlstat         display sqlstat information"
+    echo "  sqltext         display sqltext from postgresql slow log"
+    echo "  ssh_setup       setup SSH connectivity between hosts"
+    echo "  st              display dict table or view"
+    echo "  tabsize         display top size of tables (including all indexes)"
+    echo "  tabstat         display table statistics"
+    echo "  tps             analyze TPS per 10 minutes"
+    echo "  wdr_event       display wdr top event information"
+    echo "  wdr_summary     display wdr workload information"
+    echo "  wdr_tabstat     display wdr table statistics"
+    echo "  wdr_topsql      display wdr topsql information"
+    echo "  workload        collect workload information"
+    echo "  xlogcom         analyze WAL commits per second"
+    echo "  xloghc          display xlog health check information"
     echo ""
     echo "Run 'vb_tool <command> -help' for detailed usage."
 }
@@ -68,57 +72,58 @@ show_list() {
     echo ""
     echo "Usage Summary:"
     echo "  vb_tool <command> [options]"
-    echo "  Example: vb_tool as <vb_pid>"
+    echo "  Example: vb_tool -P 5433 sp work_mem"
     echo ""
     echo "Available Commands:"
-    echo "  analyze_log                          analyze database logs (slow queries or plans)"
-	echo "  analyze_log_v2                       analyze database logs (slow queries) output html report (enhanced version)"
-    echo "  as       [vb pid]                    display active session info"
-    echo "  asp                                  analyze active session profile"
-    echo "  collect_log                          collect logs for cluster or single node"
-    echo "  dead_tups                            display dead tuples information"
-    echo "  index_check                          display redundant/unused/unusable/novalid index"
-    echo "  kill                                 terminate sessions by conditions"
-    echo "  list                                 list vb_tool available script"
-    echo "  lockchain                            display lock wait chain"
-    echo "  lock_details                         display detailed lock information (holders & waiters)"
-    echo "  lsds                                 list block devices and metadata"
-    echo "  mem                                  display memory usage information"
-    echo "  memhist                              display memory usage history"
-    echo "  net                                  display network information"
-    echo "  priv                                 display privileges for users/tables/databases/schemas"
-	echo "  planbyline [file]                    analyze execution plan and output self-time by line"
-    echo "  recover_table                        recover table data by ctid scan (skip corrupted rows)"
-    echo "  redo        -f <log_file>            analyze redo log generate"
-    echo "  relxlog [START_WAL] [END_WAL]        analyze WAL records for relations"
-    echo "  repl                                 display Streaming Replication lag"
-    echo "  slow                                 display top slow sql Information"
-    echo "  sp       [guc]                       display guc parameter"
-    echo "  sqlstat  [unique_query_id]           display sqlstat information"
-	echo "  sqltext  [unique_query_id]           display sqltext from postgresql slow log"
-	echo "  sqlhc    [unique_query_id]           display sql health check(include performance plan & sqlstat & tabstat)"
-    echo "  ssh_setup                            setup SSH connectivity between hosts"
-    echo "  st       [relname]                   display dict table or view"
-    echo "  tabsize                              display top number size of tables(including all indexes)"
-    echo "  tabstat                              display table statistics"
-    echo "  tps                                  analyze TPS per 10 minutes"
-    echo "  wdr_event                            display wdr top event information"
-    echo "  wdr_summary                          display wdr workload information"
-    echo "  wdr_topsql                           display wdr topsql information"
-    echo "  wdr_tabstat                          display wdr table statistics"
-    echo "  workload   [begin/end]               Collect workload information"
-    echo "  awr        <create|enable|disable|awrrpt|awrdiff|list|show|delete|config>"         performance AWR snapshots & diff reports
-    echo "  xlogcom [START_WAL] [END_WAL]        analyze WAL commits per second"
-    echo "  xloghc                               display xlog health check information"
-    echo "  osw     [interval] [duration]        collect system performance data (default: interval=3s, duration=60s)"
-    echo "  osw_netstat <interface> <file|dir>   analyze OSWbb oswnetstat archive (RX/TX + retrans deltas)"
-    echo "  flamegraph [-p <pid>] [-s <seconds>] generate CPU flame graph (default: sample 10s)"
+    echo "  analyze_log     analyze database logs (slow queries or plans)"
+    echo "  analyze_log_v2  analyze database logs (slow queries), output html report (enhanced)"
+    echo "  as              display active session info"
+    echo "  asp             analyze active session profile"
+    echo "  awr             performance AWR snapshots & diff reports"
+    echo "  collect_log     collect logs for cluster or single node"
+    echo "  dead_tups       display dead tuples information"
+    echo "  flamegraph      generate CPU flame graph"
+    echo "  index_check     display redundant/unused/unusable/novalid index"
+    echo "  kill            terminate sessions by conditions"
+    echo "  list            list vb_tool available scripts"
+    echo "  lock_details    display detailed lock information (holders & waiters)"
+    echo "  lockchain       display lock wait chain"
+    echo "  lsds            list block devices and metadata"
+    echo "  mem             display memory usage information"
+    echo "  memhist         display memory usage history"
+    echo "  net             display network information"
+    echo "  osw             collect system performance data (OSWatcher style)"
+    echo "  osw_netstat     analyze OSWbb oswnetstat archive (RX/TX + retrans deltas)"
+    echo "  planbyline      analyze execution plan and output self-time by line"
+    echo "  priv            display privileges for users/tables/databases/schemas"
+    echo "  recover_table   recover table data by ctid scan (skip corrupted rows)"
+    echo "  redo            analyze redo/WAL log generation"
+    echo "  relxlog         analyze WAL records for relations"
+    echo "  repl            display streaming replication lag"
+    echo "  slow            display top slow sql information"
+    echo "  sp              display GUC parameter"
+    echo "  sqlhc           display sql health check (plan & sqlstat & tabstat)"
+    echo "  sqlstat         display sqlstat information"
+    echo "  sqltext         display sqltext from postgresql slow log"
+    echo "  ssh_setup       setup SSH connectivity between hosts"
+    echo "  st              display dict table or view"
+    echo "  tabsize         display top size of tables (including all indexes)"
+    echo "  tabstat         display table statistics"
+    echo "  tps             analyze TPS per 10 minutes"
+    echo "  wdr_event       display wdr top event information"
+    echo "  wdr_summary     display wdr workload information"
+    echo "  wdr_tabstat     display wdr table statistics"
+    echo "  wdr_topsql      display wdr topsql information"
+    echo "  workload        collect workload information"
+    echo "  xlogcom         analyze WAL commits per second"
+    echo "  xloghc          display xlog health check information"
     echo ""
 }
 
 as_help() {
     echo "Usage: vb_tool as [vb pid]"
     echo "Description: Display active session info for the given vb pid."
+    echo "  -P <port>: database port (default: \$PGPORT env, else 5432)"
     echo ""
 }
 
@@ -126,6 +131,7 @@ recover_table_help() {
     echo "Options for recover_table:"
     echo "  Usage: vb_tool recover_table -d <database> -s <schema> -t <table> [-n <rows_per_page>]"
     echo "  Description: recover table data by ctid scan (skip corrupted rows)"
+    echo "  -P <port>: database port (default: \$PGPORT env, else 5432)"
     echo "  Options:"
     echo "    -d: database name (required)"
     echo "    -s: schema name (required)"
@@ -197,6 +203,7 @@ workload_help() {
     echo "Usage: vb_tool workload <begin|end> [options]"
     echo ""
     echo "Description:"
+    echo "  -P <port>: database port (default: \$PGPORT env, else 5432)"
     echo "  Collect workload information and generate performance report."
     echo ""
     echo "Commands:"
@@ -223,6 +230,7 @@ sqlhc_help() {
     echo "Options for sqlhc:"
     echo "  Usage: vb_tool sqlhc [-o] [-s <seconds>] <unique_id>"
     echo "  Description: display sql health check (performance plan & sqlstat & tabstat)"
+    echo "  -P <port>: database port (default: \$PGPORT env, else 5432)"
     echo "  Options:"
     echo "    -o: write output "
     echo "    -s: duration threshold in seconds (default 300), use EXPLAIN if duration >= threshold"
@@ -254,6 +262,7 @@ dead_tups_help() {
     echo "Options for dead_tups:"
     echo "  Usage: vb_tool dead_tups [-d <database>] [-s <schema>] [-t <table>]"
     echo "  Description: display dead tuples information"
+    echo "  -P <port>: database port (default: \$PGPORT env, else 5432)"
     echo "  Options:"
     echo "    -d: database name"
     echo "    -s: schema name"
@@ -265,6 +274,7 @@ kill_help() {
     echo "Options for kill:"
     echo "  Usage: vb_tool kill [OPTIONS] [SQL_OPTIONS]"
     echo "  Description: terminate sessions by conditions"
+    echo "  -P <port>: database port (default: \$PGPORT env, else 5432)"
     echo "  Options:"
     echo "    -a              ALL Exclude background sessions"
     echo "    -d appname      Filter by application name"
@@ -281,6 +291,7 @@ index_check_help() {
     echo "Options for index_check:"
     echo "  Usage: vb_tool index_check [-d database]"
     echo "  Description: display redundant/unused/unusable/novalid index"
+    echo "  -P <port>: database port (default: \$PGPORT env, else 5432)"
     echo "  Options:"
     echo "    -d: database name"
     echo ""
@@ -290,6 +301,7 @@ priv_help() {
     echo "Options for priv:"
     echo "  Usage: vb_tool priv [-u <user>] [-d <database>] [-s <schema>] [-t <table>]"
     echo "  Description: display privileges for users/tables/databases/schemas"
+    echo "  -P <port>: database port (default: \$PGPORT env, else 5432)"
     echo "  Options:"
     echo "    -u: user name"
     echo "    -d: database name"
@@ -303,6 +315,7 @@ analyze_log_v2_help() {
     echo "  Usage: vb_tool analyze_log_v2 -f <file> [-b <begin>] [-e <end>] [--diff <interval>]"
     echo "         [-p <prefix>] [-d <days>] [-v] [-m <mode>] [-o <output>]"
     echo "  Description: analyze database logs (slow queries) output html report (enhanced version)"
+    echo "  -P <port>: database port (default: \$PGPORT env, else 5432)"
     echo "  Options:"
     echo "    -f: log file name (supports multiple files and wildcards; if omitted, auto-detect from database, analyze last 2 days)"
     echo "    -b: start time (optional, format: 'YYYY-MM-DD HH:MM:SS' or 'YYYY-MM-DD')"
@@ -343,6 +356,7 @@ tabsize_help() {
     echo "Options for tabsize:"
     echo "  Usage: vb_tool tabsize -a <all> -n <top number>  or -d <database> -s <schema> -t <table> -n <top number>"
     echo "  Description: display top number size of tables (including all indexes)"
+    echo "  -P <port>: database port (default: \$PGPORT env, else 5432)"
     echo "  Options:"
     echo "    -a: if need get tablesizes from all databases(optional, -a all)"
     echo "    -d: database name (optinal)"
@@ -356,6 +370,7 @@ tabstat_help() {
     echo "Options for tabstat:"
     echo "  Usage: vb_tool tabstat -d <database> -s <schema> -t <table>"
     echo "  Description: display table statistics"
+    echo "  -P <port>: database port (default: \$PGPORT env, else 5432)"
     echo "  Options:"
     echo "    -d: database name (default: postgres)"
     echo "    -s: schema name (required)"
@@ -367,6 +382,7 @@ lockchain_help() {
     echo "Options for lockchain:"
     echo "  Usage: vb_tool lockchain"
     echo "  Description: display lock wait chain"
+    echo "  -P <port>: database port (default: \$PGPORT env, else 5432)"
     echo ""
 }
 
@@ -374,6 +390,7 @@ lock_details_help() {
     echo "Options for lock_details:"
     echo "  Usage: vb_tool lock_details"
     echo "  Description: display detailed lock information (holders & waiters)"
+    echo "  -P <port>: database port (default: \$PGPORT env, else 5432)"
     echo ""
 }
 
@@ -381,6 +398,7 @@ mem_help() {
     echo "Options for mem:"
     echo "  Usage: vb_tool mem"
     echo "  Description: display memory usage information"
+    echo "  -P <port>: database port (default: \$PGPORT env, else 5432)"
     echo ""
 }
 
@@ -395,6 +413,7 @@ memhist_help() {
     echo "Options for memhist:"
     echo "  Usage: vb_tool memhist [-b begin_time] [-e end_time]"
     echo "  Description: display memory usage history from snapshots"
+    echo "  -P <port>: database port (default: \$PGPORT env, else 5432)"
     echo ""
     echo "  Options:"
     echo "    -b begin_time    Begin time (default: today 00:00:00)"
@@ -438,6 +457,7 @@ repl_help() {
     echo "Options for repl:"
     echo "  Usage: vb_tool repl"
     echo "  Description: display Streaming Replication lag"
+    echo "  -P <port>: database port (default: \$PGPORT env, else 5432)"
     echo ""
 }
 
@@ -460,6 +480,7 @@ slow_help() {
     echo "Options for slow:"
     echo "  Usage: vb_tool slow"
     echo "  Description: display top slow sql Information"
+    echo "  -P <port>: database port (default: \$PGPORT env, else 5432)"
     echo ""
 }
 
@@ -467,6 +488,7 @@ sp_help() {
     echo "Options for sp:"
     echo "  Usage: vb_tool sp [guc]"
     echo "  Description: display guc parameter"
+    echo "  -P <port>: database port (default: \$PGPORT env, else 5432)"
     echo ""
 }
 
@@ -474,6 +496,7 @@ sqlstat_help() {
     echo "Options for sqlstat:"
     echo "  Usage: vb_tool sqlstat [unique_query_id]"
     echo "  Description: display sqlstat information"
+    echo "  -P <port>: database port (default: \$PGPORT env, else 5432)"
     echo ""
 }
 
@@ -481,6 +504,7 @@ sqltext_help() {
     echo "Options for sqltext:"
     echo "  Usage: vb_tool sqltext [unique_query_id]"
     echo "  Description: display sqltext from postgresql slow log"
+    echo "  -P <port>: database port (default: \$PGPORT env, else 5432)"
     echo ""
 }
 
@@ -488,6 +512,7 @@ st_help() {
     echo "Options for st:"
     echo "  Usage: vb_tool st [relname]"
     echo "  Description: display dict table or view"
+    echo "  -P <port>: database port (default: \$PGPORT env, else 5432)"
     echo ""
 }
 
@@ -495,6 +520,7 @@ wdr_summary_help() {
     echo "Options for wdr_summary:"
     echo "  Usage: vb_tool wdr_summary [-b begin_time] [-e end_time]"
     echo "  Description: display wdr workload information"
+    echo "  -P <port>: database port (default: \$PGPORT env, else 5432)"
     echo ""
     echo "  Options:"
     echo "    -b begin_time    Begin time (default: today 00:00:00)"
@@ -524,6 +550,7 @@ wdr_event_help() {
     echo "Options for wdr_event:"
     echo "  Usage: vb_tool wdr_event [-b begin_time] [-e end_time]"
     echo "  Description: display wdr top event information"
+    echo "  -P <port>: database port (default: \$PGPORT env, else 5432)"
     echo ""
     echo "  Options:"
     echo "    -b begin_time    Begin time (default: today 00:00:00)"
@@ -553,6 +580,7 @@ wdr_tabstat_help() {
     echo "Options for wdr_tabstat:"
     echo "  Usage: vb_tool wdr_tabstat -b begin_time -e end_time -d database_name -s schema_name -t table_name"
     echo "  Description: Display table DML/scan/live-dead-tuple statistics from WDR snapshots."
+    echo "  -P <port>: database port (default: \$PGPORT env, else 5432)"
     echo ""
     echo "  Options:"
     echo "    -b begin_time    Begin time (default: today 00:00:00)"
@@ -595,6 +623,7 @@ wdr_topsql_help() {
     echo "Options for wdr_topsql:"
     echo "  Usage: vb_tool wdr_topsql [-b begin_time] [-e end_time] [-n top_n] [-t order_type]"
     echo "  Description: display top SQL information"
+    echo "  -P <port>: database port (default: \$PGPORT env, else 5432)"
     echo ""
     echo "  Options:"
     echo "    -b begin_time    Begin time (default: today 00:00:00)"
@@ -625,6 +654,7 @@ tps_help() {
     echo "Options for tps:"
     echo "  Usage: vb_tool tps"
     echo "  Description: Statistics for Total Transactions and TPS via interactive prompts"
+    echo "  -P <port>: database port (default: \$PGPORT env, else 5432)"
     echo ""
     echo "  Interactive Flow:"
     echo "    1. please input begin date:  (Format: YYYY-MM-DD, Default: 2000-01-01)"
@@ -930,6 +960,7 @@ xloghc_help() {
     echo "Options for xloghc:"
     echo "  Usage: vb_tool xloghc"
     echo "  Description: display xlog health check information"
+    echo "  -P <port>: database port (default: \$PGPORT env, else 5432)"
     echo ""
 }
 
@@ -19114,6 +19145,37 @@ PSQLEOF
 
 
 
+
+# ---- global -P <port>: multi-instance support (all database commands) ------
+# Resolved ONCE here (before dispatch) and exported as PGPORT for this process
+# only: every child psql/vsql connection inherits it; nothing persists after
+# the run. Without -P the clients' native default applies ($PGPORT, else 5432).
+# NOTE: keep this block OUTSIDE the awr region (above its header): the awr
+# build/merge chain replaces [awr header .. column-0 'case "$1" in'] verbatim.
+_vb_port_args=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -P)
+            if [ $# -lt 2 ] || ! printf '%s' "${2:-}" | grep -qE '^[0-9]+$' || [ "${2:-}" -lt 1 ] || [ "${2:-}" -gt 65535 ]; then
+                echo "Error: -P expects a port number (1-65535), e.g. -P 5433" >&2
+                exit 2
+            fi
+            export PGPORT="$2"; shift 2;;
+        -P[0-9]*)
+            _vb_p="${1#-P}"
+            if [ "$_vb_p" -lt 1 ] || [ "$_vb_p" -gt 65535 ]; then
+                echo "Error: -P expects a port number (1-65535), e.g. -P 5433" >&2
+                exit 2
+            fi
+            export PGPORT="$_vb_p"; shift
+            unset _vb_p;;
+        *)
+            _vb_port_args+=("$1"); shift;;
+    esac
+done
+set -- ${_vb_port_args[@]+"${_vb_port_args[@]}"}
+unset _vb_port_args
+
 # ================== awr management (v1) ==================
 #
 # Oracle-style single-point performance snapshots. Each `awr create` captures one
@@ -19173,6 +19235,7 @@ Storage (per snapshot):
                no slot -> ts,null)
 
 Env: VB_TOOL_HOME  root dir (default ~/.vb_tool); snaps under $VB_TOOL_HOME/awrs/snap_<id>/
+Port:   -P <port> anywhere on the command line selects the instance (default: $PGPORT, else 5432)
 
 Requirements: dbe_perf + gs_instance_time (same as `workload`). Not on PG-only
 kernels lacking dbe_perf (e.g. E100/v0).
