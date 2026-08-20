@@ -19339,15 +19339,15 @@ order by cnt desc;"
 
         printf '\033[2J\033[H'
         printf 'vbtop   port:%s   refresh:%ds   %s\n' "${PGPORT:-5432}" "$interval" "$(date '+%F %T')"
-        printf 'CPU     us %5.1f%%  sy %5.1f%%  id %5.1f%%  wa %5.1f%%  st %5.1f%%  (%s cores)' "$a_us" "$a_sy" "$a_id" "$a_wa" "$a_st" "$cores"
-        printf '      NET     rx %7.1f MB/s   tx %7.1f MB/s\n' "$n_rx" "$n_tx"
-        printf 'MEM     used %s / %s (%d%%)   avail %s   swap %s\n' \
+        printf 'CPU     us %5.1f%%  sy %5.1f%%  id %5.1f%%  wa %5.1f%%  st %5.1f%%   (%s cores)\n' "$a_us" "$a_sy" "$a_id" "$a_wa" "$a_st" "$cores"
+        printf 'NET     rx %8.1f MB/s      tx %8.1f MB/s\n' "$n_rx" "$n_tx"
+        printf 'MEM     used %s/%s (%d%%)   avail %s   swap %s\n' \
             "$(_vtop_hum $((mt - ma)))" "$(_vtop_hum "$mt")" "$mep" "$(_vtop_hum "$ma")" "$(_vtop_hum $((mst - msf)))"
         if [ -n "$dev" ]; then
             local dpar dsz drot dsch dqd
             read -r dpar dsz drot dsch dqd <<< "$devinfo"
             printf 'DSK     %s @ %s   [%s %s  rot:%s  sched:%s  qd:%s]\n' "$dev" "$datadir" "$dpar" "$dsz" "$drot" "$dsch" "$dqd"
-            printf '        read %6s iops %8.1f MB/s  avg %5.1f ms   |   write %6s iops %8.1f MB/s  avg %5.1f ms   |   util %3.0f%%\n' \
+            printf '        read %5s iops %6.1f MB/s  avg %6.1f ms  |  write %5s iops %6.1f MB/s  avg %6.1f ms  |  util %3.0f%%\n' \
                 "$d_rops" "$d_rmb" "$d_rms" "$d_wops" "$d_wmb" "$d_wms" "$d_util"
         else
             printf 'DSK     (cannot map %s to a /proc/diskstats device)\n' "$datadir"
@@ -19405,13 +19405,13 @@ limit ${topn};"
                     ===WAIT) section=WAIT; continue;;
                     ===TOP)
                         if [ -n "$h_node" ]; then
-                            printf 'DB      node:%s   ver:%s   up %s' "$h_node" "$h_ver" \
+                            printf 'DB      %s  %s  up %s' "$h_node" "$h_ver" \
                                 "$(awk -v s="$h_up" 'BEGIN{printf "%dd%02dh%02dm", int(s/86400), int(s%86400/3600), int(s%3600/60)}')"
-                            [ -n "$s_tot" ] && printf '   sessions %s total / %s active   long-tx(>60s) %s' "$s_tot" "$s_act" "$s_ltx"
-                            [ -n "$m_used" ] && printf '   dbmem %sG / %sG' "$m_used" "$m_max"
+                            [ -n "$s_tot" ] && printf '  sess %s tot/%s act  ltx>60s %s' "$s_tot" "$s_act" "$s_ltx"
+                            [ -n "$m_used" ] && printf '  dbmem %sG/%sG' "$m_used" "$m_max"
                             printf '\n'
                         fi
-                        [ -n "$wtxt" ] && printf 'WAIT    %s\n' "$wtxt"
+                        [ -n "$wtxt" ] && printf 'WAIT    %s\n' "$(echo $wtxt)"
                         printf '%-11s %6s %7s %5s %-5s %-19s %s\n' "SQLID" "CPU%" "RUN/TOT" "ET(s)" "ST" "WAIT_EVENT" "SQLTEXT"
                         section=TOP; continue;;
                 esac
@@ -19420,7 +19420,7 @@ limit ${topn};"
                     SESS) IFS='|' read -r s_tot s_act s_ltx <<< "$line";;
                     DBM)  IFS='|' read -r m_used m_max <<< "$line";;
                     WAIT) IFS='|' read -r wc wn <<< "$line"
-                          wtxt="${wtxt}${wc}:${wn}  ";;
+                          wtxt="${wtxt}${wc} ${wn}   ";;
                     TOP)  IFS='|' read -r r_sqlid r_cpu r_ns r_rn r_et r_st r_we r_sql <<< "$line"
                           printf '%-11.11s %6s %7s %5s %-5.5s %-19.19s %.44s\n' "$r_sqlid" "${r_cpu}%" "${r_rn}/${r_ns}" "$r_et" "$r_st" "$r_we" "$r_sql";;
                 esac
