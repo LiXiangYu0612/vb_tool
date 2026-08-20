@@ -32,6 +32,11 @@ vb_tool --help
 vb_tool list
 ```
 
+## 全局选项
+
+- `-P <port>`：所有连接数据库的命令均可用，指定实例端口（仅本次调用生效，等同临时设置 `PGPORT`；支持前置、尾置、粘连 `-P5433` 三种写法）。不带 `-P` 时连接当前 `$PGPORT` 环境变量指向的实例。
+- 所有命令统一支持 `-h` / `-help` / `--help` 查看各自帮助（v1.4.19 起全命令统一）。
+
 ## 命令列表（节选）
 
 | 命令 | 说明 |
@@ -84,8 +89,8 @@ vb_tool list
 
 | 版本 | 日期 | 要点 |
 |------|------|------|
-| v1.4.19 | 2026-08-20 | awr 报告 OS 统计大升级 + Oracle AWR 正宗配色：磁盘表合并 lsds 设备元数据列（Size/Type/Rot/Sched/QDepth/NR_RQ/WC）+ discard/flush 统计（kernel 4.18+）；CPU Info 新增 Platform 行（物理机/虚拟机识别）；网络表新增 Speed/Duplex/Queues/RX·TX ring 列；新增 Network Protocol Errors 节（netstat -s 错误类计数器：核心 30 项固定序、0 值灰显、非零尾巴追加）；报告样式换装 Oracle AWR 原版配色（钢蓝 #336699 标题/卡其分隔线/亮蓝 #0066CC 表头白字/淡黄 #FFFFCC 隔行/棕色 #663300 链接）；大节标题右上加 ↑ Top 返回目录按钮；列名 AWR 化（Reads per Sec 等，去除所有 /s 表头）；修复 SQL 表维度为 CPU/IO Time 时列重复；lsds 新增 --raw 原始输出 |
-| v1.4.18 | 2026-08-20 | awr 存储按端口分实例（`awrs/<port>/`，多实例并行采样互不干扰，旧扁平布局自动迁移）；`awr show` 新增 `last snap age` 存活提示（ENABLED 时显示 ok/STALE，防"crontab 还在但快照早停了"的静默故障）；修复 interval=60 时 `*/60` 触发 crontab 安装告警（改为 `0 * * * *`） |
+| v1.4.19 | 2026-08-20 | awr 报告 OS 统计大升级 + Oracle AWR 正宗配色：磁盘表合并 lsds 设备元数据列（Size/Type/Rot/Sched/QDepth/NR_RQ/WC）+ discard/flush 统计（kernel 4.18+）；CPU Info 新增 Platform 行（物理机/虚拟机识别）；网络表新增 Speed/Duplex/Queues/RX·TX ring 列；新增 Network Protocol Errors 节（netstat -s 错误类计数器：核心 30 项固定序、0 值灰显、非零尾巴追加）；报告样式换装 Oracle AWR 原版配色（钢蓝 #336699 标题/卡其分隔线/亮蓝 #0066CC 表头白字/淡黄 #FFFFCC 隔行/棕色 #663300 链接）；大节标题右上加 ↑ Top 返回目录按钮；列名 AWR 化（Reads per Sec 等，去除所有 /s 表头）；修复 SQL 表维度为 CPU/IO Time 时列重复；lsds 新增 --raw 原始输出；全命令统一支持 -h/-help/--help |
+| v1.4.18 | 2026-08-20 | awr 存储按端口分实例（`awrs/<port>/`，多实例并行采样互不干扰，旧扁平布局自动迁移）；新增全局选项 `-P <port>` 指定实例端口（仅本次调用生效）；lockchain 2PC 判据修正（`pid IS NULL` + vxid `-1/<xid>`，prepared 事务以 `P:<xid>` 显示）；`awr show` 新增 `last snap age` 存活提示（ENABLED 时显示 ok/STALE，防"crontab 还在但快照早停了"的静默故障）；修复 interval=60 时 `*/60` 触发 crontab 安装告警（改为 `0 * * * *`） |
 | v1.4.17 | 2026-08-19 | 修复 `awr create -d` 报错文案：仍引导已移除的 `enable -d`，改为 `awr config interval <min>` + `awr enable` |
 | v1.4.16 | 2026-08-19 | awr 增强：`list` 倒序+默认 30 条+按日期过滤；快照自动清理（保留期默认 30 天，`config retention`，0=永久，挂 create/enable 钩子）；采样间隔可配（`config interval`，enabled 下即时生效）；`awr show` 总览（吸收原 status 命令）；`enable` 移除 `-d` |
 | v1.4.15 | 2026-08-18 | 修复 `GAUSSLOG` 检测：`env | grep -iw` 在 PWD/OLDPWD 含 "gausslog" 时误匹配拼坏路径，改为直接读环境变量 |
