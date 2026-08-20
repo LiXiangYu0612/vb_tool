@@ -19245,8 +19245,8 @@ _vtop_mem() {
 }
 
 _vtop_print_os() { # oratop-style coded-header sections; reads caller-scope vars
-    printf 'OS      CPUus   CPUsy   CPUid   CPUwa   MEMused       MEMav    SWAP    NETrx    NETtx\n'
-    printf '        %5.1f   %5.1f   %5.1f   %5.1f   %-13s %-7s  %-7s %7.1f  %7.1f\n' \
+    printf 'OS      %5s %5s %5s %5s %13s %7s %7s %8s %8s\n' CPUus CPUsy CPUid CPUwa MEMused MEMav SWAP NETrx NETtx
+    printf '        %5.1f %5.1f %5.1f %5.1f %13s %7s %7s %8.1f %8.1f\n' \
         "$a_us" "$a_sy" "$a_id" "$a_wa" \
         "$(_vtop_hum $((mt - ma)))/$(_vtop_hum "$mt")" "$(_vtop_hum "$ma")" \
         "$(_vtop_hum $((mst - msf)))" "$n_rx" "$n_tx"
@@ -19254,8 +19254,8 @@ _vtop_print_os() { # oratop-style coded-header sections; reads caller-scope vars
         local dpar dsz drot dsch dqd
         read -r dpar dsz drot dsch dqd <<< "$devinfo"
         printf 'DSK     %s @ %s   [%s %s  rot:%s  sched:%s  qd:%s]\n' "$dev" "$datadir" "$dpar" "$dsz" "$drot" "$dsch" "$dqd"
-        printf '        riops  rMB/s  ravms | wiops  wMB/s  wavms  util\n'
-        printf '        %5s  %6.1f  %6.1f | %5s  %6.1f  %6.1f  %5.0f\n' \
+        printf '        %5s %6s %6s | %5s %6s %6s %5s\n' riops rMB/s ravms wiops wMB/s wavms util
+        printf '        %5s %6.1f %6.1f | %5s %6.1f %6.1f %5.0f\n' \
             "$d_rops" "$d_rmb" "$d_rms" "$d_wops" "$d_wmb" "$d_wms" "$d_util"
     else
         printf 'DSK     (cannot map %s to a /proc/diskstats device)\n' "$datadir"
