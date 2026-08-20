@@ -1,13 +1,13 @@
 #!/bin/bash
 #--------------------------------------------------------------------------------
 #-- File name:   vb_tool
-#-- Version  ：  v1.4.18
+#-- Version  ：  v1.4.19
 #-- Commit at：  2026-08-18 21:30:00
 #-- Purpose:     Vastbase Script Tool
 #-- Author:      MVS & Second-line Team 
 #--------------------------------------------------------------------------------
 set -o pipefail
-VB_TOOL_VERSION="v1.4.18"
+VB_TOOL_VERSION="v1.4.19"
 show_help() {
     echo "Vastbase Script Tool (vb_tool)"
     echo ""
@@ -68,7 +68,7 @@ show_help() {
 }
 
 show_list() {
-    echo "Vastbase Script Tool (vb_tool) v1.4.18"
+    echo "Vastbase Script Tool (vb_tool) v1.4.19"
     echo ""
     echo "Usage Summary:"
     echo "  vb_tool <command> [options]"
@@ -21161,40 +21161,40 @@ def render_single_awr(win, metric, top_n, out_html, repl_dir=None):
     repl_dir set (awrrpt path) => a Replication section is rendered from
     per-minute repl_*.log samples."""
     CSS_AWR = """
-body { font-family: Verdana, Arial, Helvetica, sans-serif; font-size: 12px; color: #000; background: #fff; margin: 10px; }
-.rhead { border: 1px solid #999; margin-bottom: 8px; }
-.rhead .title { background: #ffcc66; color: #333; font-weight: bold; font-size: 15px; padding: 6px 8px; border-bottom: 1px solid #999; }
+body { font-family: Arial, Helvetica, Geneva, sans-serif; font-size: 13px; color: #000; background: #fff; margin: 10px; }
+.rhead { border: 1px solid #cccc99; margin-bottom: 8px; }
+.rhead .title { background: #fff; color: #336699; font-weight: bold; font-size: 26px; padding: 6px 2px; border-bottom: 1px solid #cccc99; }
 .rhead table { border-collapse: collapse; width: 100%; }
-.rhead td { border: 1px solid #d9c98a; padding: 4px 8px; font-size: 12px; background: #fffdf3; }
-.rhead td.k { background: #ffe9a8; font-weight: bold; width: 16%; }
-.sec { background: #336699; color: #fff; font-weight: bold; font-size: 15px; padding: 5px 10px; margin-top: 22px; border: 1px solid #284b6d; }
-.sec h2 { display: inline; margin: 0; font-size: 15px; color: inherit; font-weight: inherit; }
-.sec .totop { float: right; color: #fff; text-decoration: none; border: 1px solid rgba(255,255,255,.55);
-              border-radius: 3px; padding: 0 8px; font-size: 11px; font-weight: normal; }
-.sec .totop:hover { background: rgba(255,255,255,.18); }
-.sub { background: #d6e4f0; color: #1f3a5a; font-weight: bold; font-size: 12px; padding: 3px 6px; margin-top: 12px; border: 1px solid #b6cde3; }
-table.t { border-collapse: collapse; width: auto; max-width: 100%; border: 1px solid #999; margin-top: 2px; }
-table.t th { background: #cccccc; color: #000; font-weight: bold; padding: 3px 6px; border: 1px solid #999; text-align: center; font-size: 11px; }
-table.t td { padding: 3px 6px; border: 1px solid #d8d8d8; vertical-align: top; font-size: 12px; }
+.rhead td { border: 1px solid #cccc99; padding: 3px 8px; font-size: 12px; background: #fff; vertical-align: top; }
+.rhead td.k { background: #FFFFCC; font-weight: bold; width: 16%; }
+.sec { background: #fff; color: #336699; font-weight: bold; font-size: 24px; padding: 0; margin-top: 26px; border: none; }
+.sec h2 { display: inline; margin: 0; font-size: 24px; color: #336699; font-weight: bold; }
+.sec .totop { float: right; color: #663300; background: #fff; text-decoration: none; border: 1px solid #663300;
+              padding: 1px 10px; font-size: 12px; font-weight: bold; margin-top: 8px; }
+.sec .totop:hover { background: #FFFFCC; }
+.sub { background: #fff; color: #336699; font-weight: bold; font-size: 17px; padding: 0; margin-top: 16px; border: none; }
+table.t { border-collapse: collapse; width: auto; max-width: 100%; border: 1px solid #000; margin-top: 4px; }
+table.t th { background: #0066CC; color: #fff; font-weight: bold; padding: 3px 6px; border: 1px solid #0066CC; text-align: center; font-size: 11px; }
+table.t td { padding: 3px 6px; border: 1px solid #cccccc; vertical-align: top; font-size: 12px; background: #fff; }
 td.n, th.n { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
 td.b { font-weight: bold; }
-tr:nth-child(even) td { background: #f6f8fb; }
-.sql { font-family: 'Courier New', Consolas, monospace; font-size: 11px; max-width: 620px; word-break: break-all; }
+tr:nth-child(even) td { background: #FFFFCC; }
+.sql { font-family: 'Courier New', Courier, monospace; font-size: 11px; max-width: 620px; word-break: break-all; }
 .note { color: #555; font-size: 11px; font-style: italic; margin: 2px 0 6px 0; }
 .bad { color: #c0392b; font-weight: bold; }
-.foot { color: #555; font-size: 11px; margin-top: 20px; border-top: 1px solid #ccc; padding-top: 8px; }
-.sqlblock { border: 1px solid #ccc; margin: 6px 0; padding: 6px 8px; background: #fafafa; }
-.sqlid { font-weight: bold; color: #1f3a5a; font-size: 12px; margin-bottom: 4px; }
-.sqlfull { font-family: 'Courier New', Consolas, monospace; font-size: 11px; white-space: pre-wrap;
+.foot { color: #555; font-size: 11px; margin-top: 20px; border-top: 1px solid #cccc99; padding-top: 8px; }
+.sqlblock { border: 1px solid #cccc99; margin: 6px 0; padding: 6px 8px; background: #fff; }
+.sqlid { font-weight: bold; color: #336699; font-size: 12px; margin-bottom: 4px; }
+.sqlfull { font-family: 'Courier New', Courier, monospace; font-size: 11px; white-space: pre-wrap;
            word-break: break-all; margin: 0; color: #222; }
 table.params { table-layout: fixed; width: 100%; }
 table.params td { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 table.params td.wrap { white-space: normal; overflow: visible; text-overflow: clip; word-break: break-word; }
-.toc { border: 1px solid #999; background: #fffdf3; padding: 8px 12px; margin-bottom: 12px; font-size: 12px; }
+.toc { border: 1px solid #cccc99; background: #fff; padding: 8px 12px; margin-bottom: 12px; font-size: 12px; }
 .toc b { display: inline-block; margin-bottom: 4px; }
 .toc ul { margin: 0; padding-left: 20px; }
 .toc li { line-height: 1.7; }
-.toc a { color: #1f3a5a; text-decoration: none; }
+.toc a { color: #663300; text-decoration: none; }
 .toc a:hover { text-decoration: underline; }
 """
     m = win["meta"]
@@ -21325,9 +21325,9 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         parts.append(numa_html_table(_ntop,
                      lambda nid, key: _numa_stat_delta(_nbeg, _nend, nid, key)))
     sub("System Activity")
-    parts.append('<table class="t"><tr><th class="n">context switches/s</th>'
-                 '<th class="n">interrupts/s</th></tr>')
-    parts.append('<tr><td class="n">%.0f</td><td class="n">%.0f</td></tr>'
+    parts.append('<table class="t"><tr><th></th><th class="n" colspan="2">Per Second</th></tr>'
+                 '<tr><th></th><th class="n">Context Switches</th><th class="n">Interrupts</th></tr>')
+    parts.append('<tr><td></td><td class="n">%.0f</td><td class="n">%.0f</td></tr>'
                  % (osd.get("ctxt_per_sec", 0), osd.get("intr_per_sec", 0)))
     parts.append('</table>')
     sub("OS Memory Usage")
@@ -21367,10 +21367,10 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     if _dmeta:
         _dh += ('<th class="n">Size</th><th class="n">Type</th><th class="n">Rot</th>'
                 '<th class="n">Sched</th><th class="n">QDepth</th><th class="n">NR_RQ</th><th class="n">WC</th>')
-    _dh += ('<th class="n">read IOPS</th><th class="n">write IOPS</th><th class="n">read B/s</th>'
-            '<th class="n">written B/s</th>')
+    _dh += ('<th class="n">Reads per Sec</th><th class="n">Writes per Sec</th><th class="n">Read B per Sec</th>'
+            '<th class="n">Write B per Sec</th>')
     if osd.get("discard_supported"):
-        _dh += '<th class="n">dIOPS</th><th class="n">dB/s</th><th class="n">fIOPS</th>'
+        _dh += '<th class="n">Dscrd per Sec</th><th class="n">Dscrd B per Sec</th><th class="n">Flush per Sec</th>'
     _dh += '<th class="n">avg r_await (ms)</th><th class="n">avg w_await (ms)</th></tr>'
     parts.append('<table class="t"><tr>' + _dh)
     disks = osd.get("disks", [])
@@ -21399,7 +21399,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     def nrate(it, key):
         return it.get(key, 0.0) / dur_os
     _nmeta = osd.get("net_meta") or {}
-    _nh = '<th>Interface</th><th class="n">rx B/s</th><th class="n">tx B/s</th><th class="n">rx pkt/s</th><th class="n">tx pkt/s</th><th class="n">rx/tx errs (Δ)</th><th class="n">rx/tx drop (Δ)</th>'
+    _nh = '<th>Interface</th><th class="n">RX B per Sec</th><th class="n">TX B per Sec</th><th class="n">RX Pkt per Sec</th><th class="n">TX Pkt per Sec</th><th class="n">rx/tx errs (Δ)</th><th class="n">rx/tx drop (Δ)</th>'
     if _nmeta:
         _nh += '<th class="n">Speed</th><th class="n">Duplex</th><th class="n">Queues</th><th class="n">RX ring</th><th class="n">TX ring</th>'
     _nh += '</tr>'
@@ -21422,7 +21422,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     if osd.get("netstat_ok"):
         sub("Network Protocol Errors")
         parts.append('<table class="t"><tr><th>Protocol</th><th>Counter</th>'
-                     '<th class="n">&Delta; total</th><th class="n">/s</th></tr>')
+                     '<th class="n">Total</th><th class="n">Per Second</th></tr>')
         # Core rows
         dur_os = osd.get("dur", 1.0) or 1.0
         for proto, name, label, delta, ps in netstat_core_rows(win["os"], dur_os):
@@ -21477,7 +21477,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         note("WARNING: negative delta detected (cumulative counter end < begin) — possible counter reset/wraparound; values in this report may be unreliable.")
     parts.append('<table class="t"><tr><th>Metric</th>'
                  '<th class="n">Begin</th><th class="n">End</th>'
-                 '<th class="n">Δ Total</th><th class="n">Δ /s</th></tr>')
+                 '<th class="n">Δ Total</th><th class="n">Δ Per Second</th></tr>')
     def lp(label, col):
         _b = _dbsum("begin", col); _e = _dbsum("end", col); _d = _e - _b
         parts.append('<tr><td>%s</td><td class="n">%s</td><td class="n">%s</td>'
@@ -21881,38 +21881,40 @@ def render_awrdiff(win1, win2, metric, top_n, out_html):
     P1 | P2 | Δ (Δ = P2-P1; %Diff where sensible). Mirrors render_single_awr
     sections. metric unused (all 6 SQL orderings shown)."""
     CSS_AWR = """
-body { font-family: Verdana, Arial, Helvetica, sans-serif; font-size: 12px; color: #000; background: #fff; margin: 10px; }
-.rhead { border: 1px solid #999; margin-bottom: 8px; }
-.rhead .title { background: #ffcc66; color: #333; font-weight: bold; font-size: 15px; padding: 6px 8px; border-bottom: 1px solid #999; }
+body { font-family: Arial, Helvetica, Geneva, sans-serif; font-size: 13px; color: #000; background: #fff; margin: 10px; }
+.rhead { border: 1px solid #cccc99; margin-bottom: 8px; }
+.rhead .title { background: #fff; color: #336699; font-weight: bold; font-size: 26px; padding: 6px 2px; border-bottom: 1px solid #cccc99; }
 .rhead table { border-collapse: collapse; width: 100%; }
-.rhead td { border: 1px solid #d9c98a; padding: 4px 8px; font-size: 12px; background: #fffdf3; }
-.rhead td.k { background: #ffe9a8; font-weight: bold; width: 16%; }
-.sec { background: #336699; color: #fff; font-weight: bold; font-size: 15px; padding: 5px 10px; margin-top: 22px; border: 1px solid #284b6d; }
-.sec h2 { display: inline; margin: 0; font-size: 15px; color: inherit; font-weight: inherit; }
-.sec .totop { float: right; color: #fff; text-decoration: none; border: 1px solid rgba(255,255,255,.55);
-              border-radius: 3px; padding: 0 8px; font-size: 11px; font-weight: normal; }
-.sec .totop:hover { background: rgba(255,255,255,.18); }
-.sub { background: #d6e4f0; color: #1f3a5a; font-weight: bold; font-size: 12px; padding: 3px 6px; margin-top: 12px; border: 1px solid #b6cde3; }
-table.t { border-collapse: collapse; width: auto; max-width: 100%; border: 1px solid #999; margin-top: 2px; }
-table.t th { background: #cccccc; color: #000; font-weight: bold; padding: 3px 6px; border: 1px solid #999; text-align: center; font-size: 11px; }
-table.t td { padding: 3px 6px; border: 1px solid #d8d8d8; vertical-align: top; font-size: 12px; }
+.rhead td { border: 1px solid #cccc99; padding: 3px 8px; font-size: 12px; background: #fff; vertical-align: top; }
+.rhead td.k { background: #FFFFCC; font-weight: bold; width: 16%; }
+.sec { background: #fff; color: #336699; font-weight: bold; font-size: 24px; padding: 0; margin-top: 26px; border: none; }
+.sec h2 { display: inline; margin: 0; font-size: 24px; color: #336699; font-weight: bold; }
+.sec .totop { float: right; color: #663300; background: #fff; text-decoration: none; border: 1px solid #663300;
+              padding: 1px 10px; font-size: 12px; font-weight: bold; margin-top: 8px; }
+.sec .totop:hover { background: #FFFFCC; }
+.sub { background: #fff; color: #336699; font-weight: bold; font-size: 17px; padding: 0; margin-top: 16px; border: none; }
+table.t { border-collapse: collapse; width: auto; max-width: 100%; border: 1px solid #000; margin-top: 4px; }
+table.t th { background: #0066CC; color: #fff; font-weight: bold; padding: 3px 6px; border: 1px solid #0066CC; text-align: center; font-size: 11px; }
+table.t td { padding: 3px 6px; border: 1px solid #cccccc; vertical-align: top; font-size: 12px; background: #fff; }
 td.n, th.n { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
 td.b { font-weight: bold; }
-tr:nth-child(even) td { background: #f6f8fb; }
+tr:nth-child(even) td { background: #FFFFCC; }
+.sql { font-family: 'Courier New', Courier, monospace; font-size: 11px; max-width: 620px; word-break: break-all; }
 .note { color: #555; font-size: 11px; font-style: italic; margin: 2px 0 6px 0; }
 .bad { color: #c0392b; font-weight: bold; }
-.foot { color: #555; font-size: 11px; margin-top: 20px; border-top: 1px solid #ccc; padding-top: 8px; }
-.sqlid { font-weight: bold; color: #1f3a5a; font-size: 12px; margin-bottom: 4px; }
-.sqlfull { font-family: 'Courier New', Consolas, monospace; font-size: 11px; white-space: pre-wrap;
+.foot { color: #555; font-size: 11px; margin-top: 20px; border-top: 1px solid #cccc99; padding-top: 8px; }
+.sqlblock { border: 1px solid #cccc99; margin: 6px 0; padding: 6px 8px; background: #fff; }
+.sqlid { font-weight: bold; color: #336699; font-size: 12px; margin-bottom: 4px; }
+.sqlfull { font-family: 'Courier New', Courier, monospace; font-size: 11px; white-space: pre-wrap;
            word-break: break-all; margin: 0; color: #222; }
 table.params { table-layout: fixed; width: 100%; }
 table.params td { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 table.params td.wrap { white-space: normal; overflow: visible; text-overflow: clip; word-break: break-word; }
-.toc { border: 1px solid #999; background: #fffdf3; padding: 8px 12px; margin-bottom: 12px; font-size: 12px; }
+.toc { border: 1px solid #cccc99; background: #fff; padding: 8px 12px; margin-bottom: 12px; font-size: 12px; }
 .toc b { display: inline-block; margin-bottom: 4px; }
 .toc ul { margin: 0; padding-left: 20px; }
 .toc li { line-height: 1.7; }
-.toc a { color: #1f3a5a; text-decoration: none; }
+.toc a { color: #663300; text-decoration: none; }
 .toc a:hover { text-decoration: underline; }
 """
     m1, m2 = win1["meta"], win2["meta"]
@@ -22088,8 +22090,8 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             parts.append('<tr><td colspan="10" class="note">no data</td></tr>')
         parts.append('</table>')
     sub("System Activity (per second)")
-    parts.append('<table class="t"><tr><th></th><th class="n">context switches/s</th>'
-                 '<th class="n">interrupts/s</th></tr>')
+    parts.append('<table class="t"><tr><th></th><th class="n">Context Switches</th>'
+                 '<th class="n">Interrupts</th></tr>')
     parts.append('<tr><td class="k">P1</td><td class="n">%.0f</td><td class="n">%.0f</td></tr>'
                  % (osd1.get("ctxt_per_sec", 0), osd1.get("intr_per_sec", 0)))
     parts.append('<tr><td class="k">P2</td><td class="n">%.0f</td><td class="n">%.0f</td></tr>'
@@ -22129,13 +22131,13 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     if _dmeta:
         _dh += ('<th class="n">Size</th><th class="n">Type</th><th class="n">Rot</th>'
                 '<th class="n">Sched</th><th class="n">QDepth</th><th class="n">NR_RQ</th><th class="n">WC</th>')
-    _dh += ('<th class="n">P1 rIOPS</th><th class="n">P2 rIOPS</th>'
-            '<th class="n">P1 wIOPS</th><th class="n">P2 wIOPS</th>'
-            '<th class="n">P1 rB/s</th><th class="n">P2 rB/s</th>'
-            '<th class="n">P1 wB/s</th><th class="n">P2 wB/s</th>')
+    _dh += ('<th class="n">P1 Reads</th><th class="n">P2 Reads</th>'
+            '<th class="n">P1 Writes</th><th class="n">P2 Writes</th>'
+            '<th class="n">P1 Read B</th><th class="n">P2 Read B</th>'
+            '<th class="n">P1 Write B</th><th class="n">P2 Write B</th>')
     if _dsup:
-        _dh += ('<th class="n">P1 dIOPS</th><th class="n">P2 dIOPS</th>'
-                '<th class="n">P1 fIOPS</th><th class="n">P2 fIOPS</th>')
+        _dh += ('<th class="n">P1 Dscrd</th><th class="n">P2 Dscrd</th>'
+                '<th class="n">P1 Flush</th><th class="n">P2 Flush</th>')
     _dh += '</tr>'
     parts.append('<table class="t"><tr>' + _dh)
     _dnames = sorted(set(_d1) | set(_d2))
@@ -22165,7 +22167,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     _i1 = {it["name"]: it for it in osd1.get("ifaces", [])}
     _i2 = {it["name"]: it for it in osd2.get("ifaces", [])}
     _nmeta = osd2.get("net_meta") or osd1.get("net_meta") or {}
-    _nh = '<th>Interface</th><th class="n">P1 rx B/s</th><th class="n">P2 rx B/s</th><th class="n">P1 tx B/s</th><th class="n">P2 tx B/s</th><th class="n">P1 errs</th><th class="n">P2 errs</th>'
+    _nh = '<th>Interface</th><th class="n">P1 RX B</th><th class="n">P2 RX B</th><th class="n">P1 TX B</th><th class="n">P2 TX B</th><th class="n">P1 errs</th><th class="n">P2 errs</th>'
     if _nmeta:
         _nh += '<th class="n">Speed</th><th class="n">Duplex</th><th class="n">Queues</th><th class="n">RX ring</th><th class="n">TX ring</th>'
     _nh += '</tr>'
