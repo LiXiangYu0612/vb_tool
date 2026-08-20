@@ -19244,6 +19244,24 @@ _vtop_mem() {
     awk '/^(MemTotal|MemAvailable|SwapTotal|SwapFree):/{a[$1]=$2} END{print a["MemTotal:"], a["MemAvailable:"], a["SwapTotal:"], a["SwapFree:"]}' /proc/meminfo
 }
 
+_vtop_print_os() { # oratop-style coded-header sections; reads caller-scope vars
+    printf 'OS      CPUus   CPUsy   CPUid   CPUwa   MEMused       MEMav    SWAP    NETrx    NETtx\n'
+    printf '        %5.1f   %5.1f   %5.1f   %5.1f   %-13s %-7s  %-7s %7.1f  %7.1f\n' \
+        "$a_us" "$a_sy" "$a_id" "$a_wa" \
+        "$(_vtop_hum $((mt - ma)))/$(_vtop_hum "$mt")" "$(_vtop_hum "$ma")" \
+        "$(_vtop_hum $((mst - msf)))" "$n_rx" "$n_tx"
+    if [ -n "$dev" ]; then
+        local dpar dsz drot dsch dqd
+        read -r dpar dsz drot dsch dqd <<< "$devinfo"
+        printf 'DSK     %s @ %s   [%s %s  rot:%s  sched:%s  qd:%s]\n' "$dev" "$datadir" "$dpar" "$dsz" "$drot" "$dsch" "$dqd"
+        printf '        riops  rMB/s  ravms | wiops  wMB/s  wavms  util\n'
+        printf '        %5s  %6.1f  %6.1f | %5s  %6.1f  %6.1f  %5.0f\n' \
+            "$d_rops" "$d_rmb" "$d_rms" "$d_wops" "$d_wmb" "$d_wms" "$d_util"
+    else
+        printf 'DSK     (cannot map %s to a /proc/diskstats device)\n' "$datadir"
+    fi
+}
+
 _vtop_hum() { # kB -> human
     awk -v kb="$1" 'BEGIN{u="KMGTPE"; v=kb+0; i=1; while(v>=1024&&i<6){v/=1024;i++} printf (i==1)?"%d%s":"%.1f%s", v, substr(u,i,1)}'
 }
@@ -19362,21 +19380,6 @@ join pg_stat_activity a on a.sessionid::text = s.sid;"
         local mep
         mep=$(awk -v t="$mt" -v a="$ma" 'BEGIN{printf (t>0)?int((t-a)*100/t):0}')
 
-        printf '\033[2J\033[H'
-        printf 'vbtop   port:%s   refresh:%ds   %s\n' "${PGPORT:-5432}" "$interval" "$(date '+%F %T')"
-        printf 'CPU     us %5.1f%%  sy %5.1f%%  id %5.1f%%  wa %5.1f%%  st %5.1f%%   (%s cores)\n' "$a_us" "$a_sy" "$a_id" "$a_wa" "$a_st" "$cores"
-        printf 'NET     rx %8.1f MB/s      tx %8.1f MB/s\n' "$n_rx" "$n_tx"
-        printf 'MEM     used %s/%s (%d%%)   avail %s   swap %s\n' \
-            "$(_vtop_hum $((mt - ma)))" "$(_vtop_hum "$mt")" "$mep" "$(_vtop_hum "$ma")" "$(_vtop_hum $((mst - msf)))"
-        if [ -n "$dev" ]; then
-            local dpar dsz drot dsch dqd
-            read -r dpar dsz drot dsch dqd <<< "$devinfo"
-            printf 'DSK     %s @ %s   [%s %s  rot:%s  sched:%s  qd:%s]\n' "$dev" "$datadir" "$dpar" "$dsz" "$drot" "$dsch" "$dqd"
-            printf '        read %5s iops %6.1f MB/s  avg %6.1f ms  |  write %5s iops %6.1f MB/s  avg %6.1f ms  |  util %3.0f%%\n' \
-                "$d_rops" "$d_rmb" "$d_rms" "$d_wops" "$d_wmb" "$d_wms" "$d_util"
-        else
-            printf 'DSK     (cannot map %s to a /proc/diskstats device)\n' "$datadir"
-        fi
         # ---- DB sections ----
         local db section="" h_node h_ver h_up s_tot s_act s_iit s_idle s_ltx m_used m_max m_dyu m_dym m_dyp
         local r_sqlid r_cpu r_ns r_rn r_et r_st r_we r_sql ms_sid ms_usr ms_db ms_sz ms_sql
@@ -19419,7 +19422,10 @@ order by cpu desc, rn desc, ns desc, et desc nulls last
 limit ${topn};"
         db=$(printf '%s\n%s\n' "$VT_SQL" "$VT_TOP" | PGCONNECT_TIMEOUT=5 psql -d postgres -X -At -F'|' 2>/dev/null)
         if [ -z "$db" ]; then
-            printf 'DB      (unreachable -- OS sections only)\n'
+            printf '\033[2J\033[H'
+            printf 'vbtop: (db unreachable)   port %s   refresh %ds   %s cores   %s\n\n' \
+                "${PGPORT:-5432}" "$interval" "$cores" "$(date '+%F %T')"
+            _vtop_print_os
         else
             wtxt="" ctx_txt="" blk_raw=""
             while IFS= read -r line; do
@@ -19431,17 +19437,21 @@ limit ${topn};"
                     ===BLK)  section=BLK; continue;;
                     ===WAIT) section=WAIT; continue;;
                     ===MEMSES)
-                        if [ -n "$h_node" ]; then
-                            printf 'DB      %s  %s  up %s\n' "$h_node" "$h_ver" \
-                                "$(awk -v s="$h_up" 'BEGIN{printf "%dd%02dh%02dm", int(s/86400), int(s%86400/3600), int(s%3600/60)}')"
-                        fi
+                        printf '\033[2J\033[H'
+                        printf 'vbtop: %s  %s\n' "$h_node" "$h_ver"
+                        printf 'port %s   up %s   refresh %ds   %s cores   %s\n' \
+                            "${PGPORT:-5432}" \
+                            "$(awk -v s="$h_up" 'BEGIN{printf "%dd%02dh%02dm", int(s/86400), int(s%86400/3600), int(s%3600/60)}')" \
+                            "$interval" "$cores" "$(date '+%F %T')"
+                        _vtop_print_os
+                        printf '\n'
                         if [ -n "$m_used" ]; then
-                            printf 'DBMEM   proc %sG/%sG   dynamic %sG/%sG (peak %sG)\n' \
+                            printf 'DBMEM   proc %sG/%sG   dyn %sG/%sG (peak %sG)\n' \
                                 "$m_used" "$m_max" "$m_dyu" "$m_dym" "$m_dyp"
                         fi
                         [ -n "$ctx_txt" ] && printf 'MEMCTX  %s\n' "$ctx_txt"
                         if [ -n "$s_tot" ]; then
-                            printf 'SESS    total %s   active %s   idle %s   idle-in-tx %s   ltx>60s %s\n' \
+                            printf 'SESS    tot %s   act %s   idl %s   idtx %s   ltx60 %s\n' \
                                 "$s_tot" "$s_act" "$s_idle" "$s_iit" "$s_ltx"
                         fi
                         if [ -n "$blk_raw" ]; then
@@ -19449,19 +19459,19 @@ limit ${topn};"
                             while IFS='|' read -r b_sid b_user b_cnt; do
                                 [ -z "$b_sid" ] && continue
                                 if [ "$b_first" = "1" ]; then
-                                    printf 'BLOCK   sid %s (%s) blocks %s session(s)\n' "$b_sid" "$b_user" "$b_cnt"; b_first=0
+                                    printf 'BLOCK   sid %s (%s) blocks %s sess\n' "$b_sid" "$b_user" "$b_cnt"; b_first=0
                                 else
-                                    printf '        sid %s (%s) blocks %s session(s)\n' "$b_sid" "$b_user" "$b_cnt"
+                                    printf '        sid %s (%s) blocks %s sess\n' "$b_sid" "$b_user" "$b_cnt"
                                 fi
                             done <<< "$blk_raw"
                         else
                             printf 'BLOCK   none\n'
                         fi
                         [ -n "$wtxt" ] && printf 'WAIT    %s\n' "$(echo $wtxt)"
-                        printf 'MEMTOP  %-14s %-9s %-9s %9s %s\n' "SID" "USER" "DB" "MEM" "SQLTEXT"
+                        printf '\nMEM     %-14s %-9s %-9s %9s %s\n' "SID" "USER" "DB" "MEM" "SQLTEXT"
                         section=MEMSES; continue;;
                     ===TOP)
-                        printf '%-11s %6s %7s %5s %-5s %-19s %s\n' "SQLID" "CPU%" "RUN/TOT" "ET(s)" "ST" "WAIT_EVENT" "SQLTEXT"
+                        printf '\nSQL     %-11s %6s %7s %5s %-5s %-19s %s\n' "SQLID" "CPU%" "RUN/TOT" "ET(s)" "ST" "WAIT_EVENT" "SQLTEXT"
                         section=TOP; continue;;
                 esac
                 case "$section" in
@@ -19475,7 +19485,7 @@ limit ${topn};"
                     MEMSES) IFS='|' read -r ms_sid ms_usr ms_db ms_sz ms_sql <<< "$line"
                             printf '        %-14.14s %-9.9s %-9.9s %9s %.40s\n' "$ms_sid" "$ms_usr" "$ms_db" "$ms_sz" "$ms_sql";;
                     TOP)  IFS='|' read -r r_sqlid r_cpu r_ns r_rn r_et r_st r_we r_sql <<< "$line"
-                          printf '%-11.11s %6s %7s %5s %-5.5s %-19.19s %.44s\n' "$r_sqlid" "${r_cpu}%" "${r_rn}/${r_ns}" "$r_et" "$r_st" "$r_we" "$r_sql";;
+                          printf '        %-11.11s %6s %7s %5s %-5.5s %-19.19s %.44s\n' "$r_sqlid" "${r_cpu}%" "${r_rn}/${r_ns}" "$r_et" "$r_st" "$r_we" "$r_sql";;
                 esac
             done <<< "$db"
         fi
