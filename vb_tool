@@ -19265,8 +19265,10 @@ run_vtop() {
 
     # ---- one-time setup ----
     local datadir dev devinfo cores
-    datadir=$(PGCONNECT_TIMEOUT=5 psql -d postgres -tAc "show data_directory" 2>/dev/null | head -1 | tr -d ' ')
-    [ -z "$datadir" ] && datadir="${PGDATA:-}"
+    datadir="${PGDATA:-}"
+    if [ -z "$datadir" ] || [ ! -d "$datadir" ]; then
+        datadir=$(PGCONNECT_TIMEOUT=5 psql -d postgres -tAc "show data_directory" 2>/dev/null | head -1 | tr -d ' ')
+    fi
     dev=""
     if [ -n "$datadir" ] && [ -d "$datadir" ]; then
         dev=$(_vtop_disk_dev "$datadir")
@@ -19313,9 +19315,12 @@ order by cnt desc;"
     local mt ma mst msf
     t0=$(date +%s%3N)
     d0=$(_vtop_diskstats "$dev"); c0=$(_vtop_cpustat); n0=$(_vtop_net)
+    local first=1
     while :; do
         if [ "$once" = "1" ]; then
             sleep "$interval"
+        elif [ "$first" = "1" ]; then
+            sleep 1; first=0          # first frame lands fast on a 1s mini-window
         else
             IFS= read -r -t "$interval" -n 1 key
             [ "$key" = "q" ] && break
@@ -19352,8 +19357,8 @@ order by cnt desc;"
         local r_sqlid r_cpu r_ns r_rn r_et r_st r_we r_sql
         local cpupairs="0,0" VT_TOP
         if [ -n "$pm_pid" ]; then
-            cpupairs=$(top -b -n1 -H -p "$pm_pid" 2>/dev/null \
-                | awk '/^ *PID USER.*COMMAND$/ {getline; while (getline) print $1 "," $9}' \
+            cpupairs=$(top -b -d0.3 -n2 -H -p "$pm_pid" 2>/dev/null \
+                | awk '/^ *PID USER/ {n++; next} n==2 && /^ *[0-9]+ / {print $1 "," $9}' \
                 | paste -sd ';')
         fi
         [ -n "$cpupairs" ] || cpupairs="0,0"
