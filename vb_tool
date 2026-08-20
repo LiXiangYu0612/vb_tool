@@ -19165,8 +19165,9 @@ vtop_help() {
     echo "  Usage: vb_tool vtop [-i <sec>] [-n <topn>] [--once]"
     echo "  Description: real-time monitor -- CPU / memory / PGDATA disk IO"
     echo "               (iops, MB/s, avg latency; read and write split)"
-    echo "               + network / dbmem / top SQL (grouped by sqlid, ranked
-               by real CPU% from os threads) / wait distribution"
+    echo "               + network / dbmem (proc & dynamic, peak) / top-3 memory
+               contexts / top-5 mem sessions / block roots / top SQL
+               (grouped by sqlid, ranked by real CPU%) / wait distribution"
     echo "  -P <port>: database port (default: current \$PGPORT)"
     echo "    -i <sec>:   refresh interval, 1-60 (default 5)"
     echo "    -n <topn>:  top session rows, 1-50 (default 15)"
@@ -19293,8 +19294,22 @@ select (select count(*) from pg_stat_activity),
          and coalesce(application_name,'') not in ('JobScheduler','Asp','workload','WdrSnapshot'));
 \\echo ===DBM
 select round(coalesce(max(case when memorytype='process_used_memory' then memorymbytes end),0)/1024.0,1),
-       round(coalesce(max(case when memorytype='max_process_memory' then memorymbytes end),0)/1024.0,1)
+       round(coalesce(max(case when memorytype='max_process_memory' then memorymbytes end),0)/1024.0,1),
+       round(coalesce(max(case when memorytype='dynamic_used_memory' then memorymbytes end),0)/1024.0,1),
+       round(coalesce(max(case when memorytype='max_dynamic_memory' then memorymbytes end),0)/1024.0,1),
+       round(coalesce(max(case when memorytype='dynamic_peak_memory' then memorymbytes end),0)/1024.0,1)
 from dbe_perf.memory_node_detail;
+\echo ===CTX
+select string_agg(contextname||' '||pg_size_pretty(t.totalsize::numeric), ' | ' order by t.totalsize desc)
+from (select contextname, sum(totalsize) totalsize from dbe_perf.session_memory_detail group by contextname order by totalsize desc limit 3) t;
+\echo ===BLK
+select b.sessionid::text, coalesce(a.usename,'-'), count(*) cnt
+from dbe_perf.thread_wait_status w
+join dbe_perf.thread_wait_status b on w.block_sessionid = b.sessionid
+left join pg_stat_activity a on a.sessionid = b.sessionid
+where b.block_sessionid is null
+group by b.sessionid, coalesce(a.usename,'-')
+order by cnt desc limit 3;
 \\echo ===WAIT
 select class, cnt from (
   select CASE
@@ -19310,7 +19325,13 @@ select class, cnt from (
   from pg_stat_activity a
   left join dbe_perf.thread_wait_status w on a.sessionid = w.sessionid
   where a.state='active' group by class) t
-order by cnt desc;"
+order by cnt desc;
+\echo ===MEMSES
+select a.sessionid::text, coalesce(a.usename,'-'), coalesce(a.datname,'-'),
+       (select pg_size_pretty(sum(t2.totalsize)::numeric) from gs_session_memory_detail t2 where split_part(t2.sessid,'.',2)=a.sessionid::text),
+       coalesce(substr(regexp_replace(regexp_replace(a.query,'(\r|\n)+',' '),' {2,}',' '),1,40),'-')
+from (select split_part(sessid,'.',2) sid from gs_session_memory_detail group by split_part(sessid,'.',2) order by sum(totalsize) desc limit 5) s
+join pg_stat_activity a on a.sessionid::text = s.sid;"
 
     # ---- sampling loop ----
     local t0 t1 d0 d1 c0 c1 n0 n1 dt key wtxt
@@ -19357,8 +19378,8 @@ order by cnt desc;"
             printf 'DSK     (cannot map %s to a /proc/diskstats device)\n' "$datadir"
         fi
         # ---- DB sections ----
-        local db section="" h_node h_ver h_up s_tot s_act s_iit s_idle s_ltx m_used m_max
-        local r_sqlid r_cpu r_ns r_rn r_et r_st r_we r_sql
+        local db section="" h_node h_ver h_up s_tot s_act s_iit s_idle s_ltx m_used m_max m_dyu m_dym m_dyp
+        local r_sqlid r_cpu r_ns r_rn r_et r_st r_we r_sql ms_sid ms_usr ms_db ms_sz ms_sql
         local cpupairs="0,0" VT_TOP
         if [ -n "$pm_pid" ]; then
             cpupairs=$(top -b -d0.3 -n2 -H -p "$pm_pid" 2>/dev/null \
@@ -19400,34 +19421,59 @@ limit ${topn};"
         if [ -z "$db" ]; then
             printf 'DB      (unreachable -- OS sections only)\n'
         else
-            wtxt=""
+            wtxt="" ctx_txt="" blk_raw=""
             while IFS= read -r line; do
                 case "$line" in
                     ===HDR)  section=HDR; continue;;
                     ===SESS) section=SESS; continue;;
                     ===DBM)  section=DBM; continue;;
+                    ===CTX)  section=CTX; continue;;
+                    ===BLK)  section=BLK; continue;;
                     ===WAIT) section=WAIT; continue;;
-                    ===TOP)
+                    ===MEMSES)
                         if [ -n "$h_node" ]; then
-                            printf 'DB      %s  %s  up %s' "$h_node" "$h_ver" \
+                            printf 'DB      %s  %s  up %s\n' "$h_node" "$h_ver" \
                                 "$(awk -v s="$h_up" 'BEGIN{printf "%dd%02dh%02dm", int(s/86400), int(s%86400/3600), int(s%3600/60)}')"
-                            [ -n "$m_used" ] && printf '  dbmem %sG/%sG' "$m_used" "$m_max"
-                            printf '\n'
                         fi
+                        if [ -n "$m_used" ]; then
+                            printf 'DBMEM   proc %sG/%sG   dynamic %sG/%sG (peak %sG)\n' \
+                                "$m_used" "$m_max" "$m_dyu" "$m_dym" "$m_dyp"
+                        fi
+                        [ -n "$ctx_txt" ] && printf 'MEMCTX  %s\n' "$ctx_txt"
                         if [ -n "$s_tot" ]; then
                             printf 'SESS    total %s   active %s   idle %s   idle-in-tx %s   ltx>60s %s\n' \
                                 "$s_tot" "$s_act" "$s_idle" "$s_iit" "$s_ltx"
                         fi
+                        if [ -n "$blk_raw" ]; then
+                            local b_first=1 b_sid b_user b_cnt
+                            while IFS='|' read -r b_sid b_user b_cnt; do
+                                [ -z "$b_sid" ] && continue
+                                if [ "$b_first" = "1" ]; then
+                                    printf 'BLOCK   sid %s (%s) blocks %s session(s)\n' "$b_sid" "$b_user" "$b_cnt"; b_first=0
+                                else
+                                    printf '        sid %s (%s) blocks %s session(s)\n' "$b_sid" "$b_user" "$b_cnt"
+                                fi
+                            done <<< "$blk_raw"
+                        else
+                            printf 'BLOCK   none\n'
+                        fi
                         [ -n "$wtxt" ] && printf 'WAIT    %s\n' "$(echo $wtxt)"
+                        printf 'MEMTOP  %-14s %-9s %-9s %9s %s\n' "SID" "USER" "DB" "MEM" "SQLTEXT"
+                        section=MEMSES; continue;;
+                    ===TOP)
                         printf '%-11s %6s %7s %5s %-5s %-19s %s\n' "SQLID" "CPU%" "RUN/TOT" "ET(s)" "ST" "WAIT_EVENT" "SQLTEXT"
                         section=TOP; continue;;
                 esac
                 case "$section" in
                     HDR)  IFS='|' read -r h_node h_ver h_up <<< "$line";;
                     SESS) IFS='|' read -r s_tot s_act s_iit s_idle s_ltx <<< "$line";;
-                    DBM)  IFS='|' read -r m_used m_max <<< "$line";;
+                    DBM)  IFS='|' read -r m_used m_max m_dyu m_dym m_dyp <<< "$line";;
+                    CTX)  ctx_txt="$line";;
+                    BLK)  blk_raw="${blk_raw}${line}"$'\n';;
                     WAIT) IFS='|' read -r wc wn <<< "$line"
                           wtxt="${wtxt}${wc} ${wn}   ";;
+                    MEMSES) IFS='|' read -r ms_sid ms_usr ms_db ms_sz ms_sql <<< "$line"
+                            printf '        %-14.14s %-9.9s %-9.9s %9s %.40s\n' "$ms_sid" "$ms_usr" "$ms_db" "$ms_sz" "$ms_sql";;
                     TOP)  IFS='|' read -r r_sqlid r_cpu r_ns r_rn r_et r_st r_we r_sql <<< "$line"
                           printf '%-11.11s %6s %7s %5s %-5.5s %-19.19s %.44s\n' "$r_sqlid" "${r_cpu}%" "${r_rn}/${r_ns}" "$r_et" "$r_st" "$r_we" "$r_sql";;
                 esac
