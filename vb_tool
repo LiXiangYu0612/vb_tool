@@ -21010,9 +21010,10 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         parts.append(numa_html_table(_ntop,
                      lambda nid, key: _numa_stat_delta(_nbeg, _nend, nid, key)))
     sub("System Activity")
-    parts.append('<table class="t"><tr><th>Metric</th><th class="n">value</th></tr>')
-    parts.append('<tr><td>context switches/s</td><td class="n">%.0f</td></tr>' % osd.get("ctxt_per_sec", 0))
-    parts.append('<tr><td>interrupts/s</td><td class="n">%.0f</td></tr>' % osd.get("intr_per_sec", 0))
+    parts.append('<table class="t"><tr><th class="n">context switches/s</th>'
+                 '<th class="n">interrupts/s</th></tr>')
+    parts.append('<tr><td class="n">%.0f</td><td class="n">%.0f</td></tr>'
+                 % (osd.get("ctxt_per_sec", 0), osd.get("intr_per_sec", 0)))
     parts.append('</table>')
     sub("OS Memory Usage")
     _bm = parse_meminfo(win["os"].get(("begin", "meminfo"), ""))
@@ -21723,12 +21724,15 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             parts.append('<tr><td colspan="10" class="note">no data</td></tr>')
         parts.append('</table>')
     sub("System Activity (per second)")
-    parts.append('<table class="t"><tr><th>Metric</th><th class="n">P1</th>'
-                 '<th class="n">P2</th><th class="n">&Delta;</th></tr>')
-    for k, v1, v2 in [("context switches/s", osd1.get("ctxt_per_sec", 0), osd2.get("ctxt_per_sec", 0)),
-                      ("interrupts/s", osd1.get("intr_per_sec", 0), osd2.get("intr_per_sec", 0))]:
-        parts.append('<tr><td>%s</td><td class="n">%.0f</td><td class="n">%.0f</td>'
-                     '<td class="n">%+.0f</td></tr>' % (esc(k), v1, v2, v2 - v1))
+    parts.append('<table class="t"><tr><th></th><th class="n">context switches/s</th>'
+                 '<th class="n">interrupts/s</th></tr>')
+    parts.append('<tr><td class="k">P1</td><td class="n">%.0f</td><td class="n">%.0f</td></tr>'
+                 % (osd1.get("ctxt_per_sec", 0), osd1.get("intr_per_sec", 0)))
+    parts.append('<tr><td class="k">P2</td><td class="n">%.0f</td><td class="n">%.0f</td></tr>'
+                 % (osd2.get("ctxt_per_sec", 0), osd2.get("intr_per_sec", 0)))
+    parts.append('<tr><td class="k">&Delta;</td><td class="n">%+.0f</td><td class="n">%+.0f</td></tr>'
+                 % (osd2.get("ctxt_per_sec", 0) - osd1.get("ctxt_per_sec", 0),
+                    osd2.get("intr_per_sec", 0) - osd1.get("intr_per_sec", 0)))
     parts.append('</table>')
     sub("OS Memory (period-end snapshot, MB)")
     _m1 = parse_meminfo(win1["os"].get(("end", "meminfo"), ""))
