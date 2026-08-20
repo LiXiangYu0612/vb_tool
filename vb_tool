@@ -19407,7 +19407,7 @@ limit ${topn};"
                             printf '\n'
                         fi
                         [ -n "$wtxt" ] && printf 'WAIT    %s\n' "$wtxt"
-                        printf '%-11s %6s %5s %5s %-5s %-19s %s\n' "SQLID" "CPU%" "RN/NS" "ET(s)" "ST" "WAIT_EVENT" "SQLTEXT"
+                        printf '%-11s %6s %7s %5s %-5s %-19s %s\n' "SQLID" "CPU%" "RUN/TOT" "ET(s)" "ST" "WAIT_EVENT" "SQLTEXT"
                         section=TOP; continue;;
                 esac
                 case "$section" in
@@ -19417,7 +19417,7 @@ limit ${topn};"
                     WAIT) IFS='|' read -r wc wn <<< "$line"
                           wtxt="${wtxt}${wc}:${wn}  ";;
                     TOP)  IFS='|' read -r r_sqlid r_cpu r_ns r_rn r_et r_st r_we r_sql <<< "$line"
-                          printf '%-11.11s %6s %5s %5s %-5.5s %-19.19s %.44s\n' "$r_sqlid" "${r_cpu}%" "${r_rn}/${r_ns}" "$r_et" "$r_st" "$r_we" "$r_sql";;
+                          printf '%-11.11s %6s %7s %5s %-5.5s %-19.19s %.44s\n' "$r_sqlid" "${r_cpu}%" "${r_rn}/${r_ns}" "$r_et" "$r_st" "$r_we" "$r_sql";;
                 esac
             done <<< "$db"
         fi
