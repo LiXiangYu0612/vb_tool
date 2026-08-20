@@ -2,7 +2,7 @@
 #--------------------------------------------------------------------------------
 #-- File name:   vb_tool
 #-- Version  ：  v1.4.19
-#-- Commit at：  2026-08-18 21:30:00
+#-- Commit at：  2026-08-20 22:40:00
 #-- Purpose:     Vastbase Script Tool
 #-- Author:      MVS & Second-line Team 
 #--------------------------------------------------------------------------------
@@ -23732,8 +23732,9 @@ case "$1" in
         ;;
     lsds)
         if [[ "$2" == "-help" || "$2" == "--help" ]]; then
-            echo "Usage: vb_tool lsds"
+            echo "Usage: vb_tool lsds [--raw]"
             echo "Description: list block devices and metadata"
+            echo "Options: --raw  pipe-separated raw output (one line per device)"
             exit 0
         fi
         run_lsds "$@"
