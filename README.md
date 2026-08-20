@@ -59,7 +59,7 @@ vb_tool list
 | `tps` / `tabstat` / `tabsize` / `sqlstat` | 性能与对象统计 |
 | `lock_details` / `lockchain` | 锁等待分析 |
 | `sqlhc` | SQL 健康检查（支持 .log/.csv 及其 .gz 压缩日志） |
-| `vtop` | oratop 风格实时监控：CPU/MEM/NET/数据目录磁盘 IO + 会话/等待分布/Top SQL（`-i` 间隔 / `-n` 行数 / `--once` 单帧） |
+| `vtop` | oratop 风格实时监控：CPU/MEM/NET/数据目录磁盘 IO + 会话/等待分布/Top SQL（按 sqlid 汇总、真实 CPU% 倒序，多会话 CPU 求和；`-i` 间隔 / `-n` 行数 / `--once` 单帧） |
 
 完整命令见 `vb_tool list`。
 

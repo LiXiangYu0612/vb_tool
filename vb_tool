@@ -19165,8 +19165,8 @@ vtop_help() {
     echo "  Usage: vb_tool vtop [-i <sec>] [-n <topn>] [--once]"
     echo "  Description: real-time monitor -- CPU / memory / PGDATA disk IO"
     echo "               (iops, MB/s, avg latency; read and write split)"
-    echo "               + network / dbmem / top SQL (grouped by sqlid,
-               running-on-CPU first) / wait distribution"
+    echo "               + network / dbmem / top SQL (grouped by sqlid, ranked
+               by real CPU% from os threads) / wait distribution"
     echo "  -P <port>: database port (default: current \$PGPORT)"
     echo "    -i <sec>:   refresh interval, 1-60 (default 5)"
     echo "    -n <topn>:  top session rows, 1-50 (default 15)"
@@ -19275,6 +19275,8 @@ run_vtop() {
     devinfo=""
     [ -n "$dev" ] && devinfo=$(_vtop_devinfo "$dev")
     cores=$(nproc 2>/dev/null || grep -c ^processor /proc/cpuinfo)
+    local pm_pid=""
+    [ -f "$datadir/postmaster.pid" ] && pm_pid=$(head -1 "$datadir/postmaster.pid" 2>/dev/null | tr -d ' ')
     local VT_SQL="\\echo ===HDR
 select coalesce((select node_name from pg_node_env limit 1),'?'),
        coalesce(ltrim(split_part(vb_version(),') compiled',1),'('),'?'),
@@ -19302,26 +19304,7 @@ select class, cnt from (
   from pg_stat_activity a
   left join dbe_perf.thread_wait_status w on a.sessionid = w.sessionid
   where a.state='active' group by class) t
-order by cnt desc;
-\\echo ===TOP
-select k, ns, rn, et, st, we, sql from (
-  select k, count(*) ns, sum(rn) rn, max(et) et,
-         string_agg(distinct st,'/') st, max(we) we, max(sql) sql
-  from (
-    select coalesce(a.unique_sql_id::text,'pid:'||a.pid::text) k,
-           case when coalesce(w.wait_event,'-') = 'none' then 1 else 0 end rn,
-           extract(epoch from (now()-a.query_start))::bigint et,
-           decode(a.state,'active','a','idle in transaction','it','idle','i') st,
-           coalesce(w.wait_event,'-') we,
-           coalesce(substr(regexp_replace(regexp_replace(a.query,'(\r|\n)+',' '),' {2,}',' '),1,44),'-') sql
-    from pg_stat_activity a
-    left join dbe_perf.thread_wait_status w on a.sessionid = w.sessionid
-    where a.state <> 'idle' and a.datname is not null
-      and coalesce(a.application_name,'') not in ('JobScheduler','Asp','workload','WdrSnapshot')
-  ) t group by k
-) g
-order by rn desc, ns desc, et desc nulls last
-limit ${topn};"
+order by cnt desc;"
 
     # ---- sampling loop ----
     local t0 t1 d0 d1 c0 c1 n0 n1 dt key wtxt
@@ -19366,8 +19349,45 @@ limit ${topn};"
         fi
         # ---- DB sections ----
         local db section="" h_node h_ver h_up s_tot s_act s_ltx m_used m_max
-        local r_sqlid r_ns r_rn r_et r_st r_we r_sql
-        db=$(printf '%s\n' "$VT_SQL" | PGCONNECT_TIMEOUT=5 psql -d postgres -X -At -F'|' 2>/dev/null)
+        local r_sqlid r_cpu r_ns r_rn r_et r_st r_we r_sql
+        local cpupairs="0,0" VT_TOP
+        if [ -n "$pm_pid" ]; then
+            cpupairs=$(top -b -n1 -H -p "$pm_pid" 2>/dev/null \
+                | awk '/^ *PID USER.*COMMAND$/ {getline; while (getline) print $1 "," $9}' \
+                | paste -sd ';')
+        fi
+        [ -n "$cpupairs" ] || cpupairs="0,0"
+        VT_TOP="\echo ===TOP
+with cput as (
+  select split_part(result, ',', 1) lwpid, split_part(result, ',', 2)::numeric cpu_usage
+  from regexp_split_to_table('${cpupairs}', ';') as result),
+cpu as (
+  select coalesce(a.unique_sql_id::text,'pid:'||a.pid::text) k, round(sum(t.cpu_usage),1) cpu
+  from cput t
+  join pg_os_threads s on s.lwpid = t.lwpid
+  join pg_stat_activity a on s.pid = a.pid
+  group by coalesce(a.unique_sql_id::text,'pid:'||a.pid::text))
+select g.k, coalesce(cpu,0.0) cpu, g.ns, g.rn, g.et, g.st, g.we, g.sql
+from (
+  select k, count(*) ns, sum(rn) rn, max(et) et,
+         string_agg(distinct st,'/') st, max(we) we, max(sql) sql
+  from (
+    select coalesce(a.unique_sql_id::text,'pid:'||a.pid::text) k,
+           case when coalesce(w.wait_event,'-') = 'none' then 1 else 0 end rn,
+           extract(epoch from (now()-a.query_start))::bigint et,
+           decode(a.state,'active','a','idle in transaction','it','idle','i') st,
+           coalesce(w.wait_event,'-') we,
+           coalesce(substr(regexp_replace(regexp_replace(a.query,'(\r|\n)+',' '),' {2,}',' '),1,44),'-') sql
+    from pg_stat_activity a
+    left join dbe_perf.thread_wait_status w on a.sessionid = w.sessionid
+    where a.state <> 'idle' and a.datname is not null
+      and coalesce(a.application_name,'') not in ('JobScheduler','Asp','workload','WdrSnapshot')
+  ) t group by k
+) g
+left join cpu on cpu.k = g.k
+order by cpu desc, rn desc, ns desc, et desc nulls last
+limit ${topn};"
+        db=$(printf '%s\n%s\n' "$VT_SQL" "$VT_TOP" | PGCONNECT_TIMEOUT=5 psql -d postgres -X -At -F'|' 2>/dev/null)
         if [ -z "$db" ]; then
             printf 'DB      (unreachable -- OS sections only)\n'
         else
@@ -19387,7 +19407,7 @@ limit ${topn};"
                             printf '\n'
                         fi
                         [ -n "$wtxt" ] && printf 'WAIT    %s\n' "$wtxt"
-                        printf '%-11s %5s %5s %-5s %-19s %s\n' "SQLID" "RN/NS" "ET(s)" "ST" "WAIT_EVENT" "SQLTEXT"
+                        printf '%-11s %6s %5s %5s %-5s %-19s %s\n' "SQLID" "CPU%" "RN/NS" "ET(s)" "ST" "WAIT_EVENT" "SQLTEXT"
                         section=TOP; continue;;
                 esac
                 case "$section" in
@@ -19396,8 +19416,8 @@ limit ${topn};"
                     DBM)  IFS='|' read -r m_used m_max <<< "$line";;
                     WAIT) IFS='|' read -r wc wn <<< "$line"
                           wtxt="${wtxt}${wc}:${wn}  ";;
-                    TOP)  IFS='|' read -r r_sqlid r_ns r_rn r_et r_st r_we r_sql <<< "$line"
-                          printf '%-11.11s %5s %5s %-5.5s %-19.19s %.44s\n' "$r_sqlid" "${r_rn}/${r_ns}" "$r_et" "$r_st" "$r_we" "$r_sql";;
+                    TOP)  IFS='|' read -r r_sqlid r_cpu r_ns r_rn r_et r_st r_we r_sql <<< "$line"
+                          printf '%-11.11s %6s %5s %5s %-5.5s %-19.19s %.44s\n' "$r_sqlid" "${r_cpu}%" "${r_rn}/${r_ns}" "$r_et" "$r_st" "$r_we" "$r_sql";;
                 esac
             done <<< "$db"
         fi
