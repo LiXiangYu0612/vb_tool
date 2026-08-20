@@ -941,8 +941,22 @@ def main():
         row_str = "  ".join(f"{row.get(col, VALUE_MISSING):<{widths[col]}}" for col in selected_columns)
         print(row_str)
 
+RAW_COLUMNS = ["DEVNAME", "SIZE", "TYPE", "SCHED", "ROT", "QDEPTH", "NR_RQ", "WCACHE", "MODEL", "VENDOR"]
+
+def raw_dump():
+    # one line per device: name|size|type|sched|rot|qdepth|nr_rq|wcache|model|vendor
+    # values identical to the pretty-table cells ('-' when the sysfs attr is missing)
+    print("# " + "|".join(RAW_COLUMNS))
+    for dev in get_block_devices():
+        info = get_device_info(dev, RAW_COLUMNS)
+        cells = [str(info[c]["value"]) if c in info else VALUE_MISSING for c in RAW_COLUMNS]
+        print("|".join(cells))
+
 if __name__ == "__main__":
-    main()
+    if "--raw" in sys.argv[1:]:
+        raw_dump()
+    else:
+        main()
 PYTHON_EOF
 
     if ! command -v python3 &> /dev/null; then
@@ -951,7 +965,7 @@ PYTHON_EOF
         exit 1
     fi
 
-    python3 "$TEMP_SCRIPT"
+    python3 "$TEMP_SCRIPT" "$@"
     
     rm -f "$TEMP_SCRIPT"
 }
@@ -19303,6 +19317,8 @@ _awr_collect() {
     done
     if [ -r /proc/net/dev ]; then cp /proc/net/dev "$osd/net_dev" 2>/dev/null
     else echo "  [WARN] /proc/net/dev not readable" >&2; fi
+    if [ -r /proc/net/snmp ]; then cp /proc/net/snmp "$osd/net_snmp" 2>/dev/null; fi
+    if [ -r /proc/net/netstat ]; then cp /proc/net/netstat "$osd/net_netstat" 2>/dev/null; fi
     # ---- NUMA topology + numastat (per-node cumulative counters; renderer computes end-begin) ----
     # File format (one stanza per node, blank-line separated):
     #   node <id>
@@ -19324,6 +19340,40 @@ _awr_collect() {
         fi
     } > "$osd/numa" 2>/dev/null
     [ -s "$osd/numa" ] || echo "  [WARN] NUMA info unavailable (no /sys/devices/system/node or empty)" >&2
+    # ---- block-device / NIC / DMI identity (END-snap state; renderer joins by name) ----
+    # blockdev_meta: run_lsds --raw TSV (name|size|type|sched|rot|qdepth|nr_rq|wcache|model|vendor)
+    run_lsds --raw > "$osd/blockdev_meta" 2>/dev/null || rm -f "$osd/blockdev_meta"
+    # netdev_meta: iface|speed|duplex|nrxq|ntxq|rx_max|rx_cur|tx_max|tx_cur  ('-' = unavailable)
+    {
+        for _if in $(ls /sys/class/net 2>/dev/null | grep -vE '^(lo|vir)'); do
+            _p="/sys/class/net/$_if"
+            [ -d "$_p" ] || continue
+            _sp=$(cat "$_p/speed"  2>/dev/null) || _sp=-
+            _dp=$(cat "$_p/duplex" 2>/dev/null) || _dp=-
+            _nrx=$(ls -d "$_p/queues/rx-"* 2>/dev/null | wc -l)
+            _ntx=$(ls -d "$_p/queues/tx-"* 2>/dev/null | wc -l)
+            _rmax=-; _rcur=-; _tmax=-; _tcur=-
+            if command -v ethtool >/dev/null 2>&1; then
+                _ring=$(ethtool -g "$_if" 2>/dev/null | awk '
+                    /Pre-set maximums:/         {sec="max"; next}
+                    /Current hardware settings:/{sec="cur"; next}
+                    sec=="max" && /^RX:/ {rmax=$2}
+                    sec=="max" && /^TX:/ {tmax=$2}
+                    sec=="cur" && /^RX:/ {rcur=$2}
+                    sec=="cur" && /^TX:/ {tcur=$2}
+                    END { printf "%s|%s|%s|%s",
+                          (rmax==""?"-":rmax), (rcur==""?"-":rcur),
+                          (tmax==""?"-":tmax), (tcur==""?"-":tcur) }')
+                IFS='|' read -r _rmax _rcur _tmax _tcur <<< "$_ring"
+            fi
+            echo "$_if|$_sp|$_dp|$_nrx|$_ntx|$_rmax|$_rcur|$_tmax|$_tcur"
+        done
+    } > "$osd/netdev_meta" 2>/dev/null
+    # dmi: vendor/product lines (world-readable; absent on some ARM/containers -> empty file)
+    {
+        [ -r /sys/class/dmi/id/sys_vendor ]   && echo "vendor $(cat /sys/class/dmi/id/sys_vendor)"
+        [ -r /sys/class/dmi/id/product_name ] && echo "product $(cat /sys/class/dmi/id/product_name)"
+    } > "$osd/dmi" 2>/dev/null
     # ---- DB reachability probe + bounded timeouts ----
     # One cheap probe before ~30 psql invocations below (heredoc + per-db object
     # loops + meta queries): if the DB is unreachable, fail fast ONCE instead of
@@ -19639,7 +19689,7 @@ def load_window(d):
         except Exception:
             w["meta"] = {}
     for phase in ("begin", "end"):
-        for f in ("stat", "net_dev", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa"):
+        for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi"):
             p = os.path.join(d, "os", phase, f)
             w["os"][(phase, f)] = open(p).read() if os.path.isfile(p) else ""
         for t in ("statement", "wait_events", "instance_time", "database", "pagewriter",
@@ -19659,7 +19709,7 @@ def load_snap(d):
             s["meta"] = json.load(open(mp))
         except Exception:
             s["meta"] = {}
-    for f in ("stat", "net_dev", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa"):
+    for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi"):
         p = os.path.join(d, "os", f)
         s["os"][f] = open(p).read() if os.path.isfile(p) else ""
     for t in ("statement", "wait_events", "instance_time", "database", "pagewriter",
@@ -19676,7 +19726,7 @@ def build_window_from_snaps(begin_dir, end_dir):
     b = load_snap(begin_dir)
     e = load_snap(end_dir)
     win = {"meta": {}, "os": {}, "db": {}}
-    for f in ("stat", "net_dev", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa"):
+    for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi"):
         win["os"][("begin", f)] = b["os"].get(f, "")
         win["os"][("end", f)] = e["os"].get(f, "")
     for t in ("statement", "wait_events", "instance_time", "database", "pagewriter",
@@ -20068,7 +20118,7 @@ def proc_stat_extras(txt):
     return {"ctxt": ctxt, "intr": intr, "runq": runq}
 
 def proc_net_ifaces(txt):
-    """Per-interface counters from /proc/net/dev: rx/tx bytes/packets/errs/drop."""
+    """Per-interface counters from /proc/net/dev: rx/tx bytes/packets/errs/drop/fifo/frame/compressed/multicast/colls/carrier."""
     out = []
     for line in (txt or "").splitlines():
         if ":" not in line:
@@ -20092,7 +20142,8 @@ def proc_net_ifaces(txt):
     return out
 
 def proc_disk_devs(txt):
-    """Per-device diskstats: rd_ios/rd_sectors/rd_ticks/wr_ios/wr_sectors/wr_ticks/weighted_ticks (ms)."""
+    """Per-device diskstats: rd_ios/rd_sectors/rd_ticks/wr_ios/wr_sectors/wr_ticks/weighted_ticks (ms)
+    + discard/flush counters (kernel 4.18+; None on older kernels)."""
     out = []
     for line in (txt or "").splitlines():
         f = line.split()
@@ -20104,6 +20155,12 @@ def proc_disk_devs(txt):
                 "rd_ios": to_num(f[3]), "rd_sectors": to_num(f[5]), "rd_ticks": to_num(f[6]),
                 "wr_ios": to_num(f[7]), "wr_sectors": to_num(f[9]), "wr_ticks": to_num(f[10]),
                 "weighted_ticks": to_num(f[13]),
+                # kernel 4.18+ extra fields; None when the kernel does not report them
+                "dc_ios": to_num(f[14]) if len(f) > 14 else None,
+                "dc_sectors": to_num(f[16]) if len(f) > 16 else None,
+                "dc_ticks": to_num(f[17]) if len(f) > 17 else None,
+                "fl_ios": to_num(f[18]) if len(f) > 18 else None,
+                "fl_ticks": to_num(f[19]) if len(f) > 19 else None,
             })
         except Exception:
             pass
@@ -20118,6 +20175,231 @@ def proc_disk_devs(txt):
         return False
     out = [d for d in out if not _is_part(d["name"])]
     return out
+
+def parse_blockdev_meta(txt):
+    """os/blockdev_meta (run_lsds --raw): '# name|size|...' header + one line per device.
+    Returns {name: {size,type,sched,rot,qdepth,nr_rq,wcache,model,vendor}}; {} when absent."""
+    out = {}
+    for line in (txt or "").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        f = line.split("|")
+        if len(f) < 10:
+            continue
+        out[f[0]] = {"size": f[1], "type": f[2], "sched": f[3], "rot": f[4],
+                     "qdepth": f[5], "nr_rq": f[6], "wcache": f[7],
+                     "model": f[8], "vendor": f[9]}
+    return out
+
+def parse_netdev_meta(txt):
+    """os/netdev_meta: iface|speed|duplex|nrxq|ntxq|rx_max|rx_cur|tx_max|tx_cur.
+    Returns {iface: {...}}; {} when absent."""
+    out = {}
+    for line in (txt or "").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        f = line.split("|")
+        if len(f) < 9:
+            continue
+        out[f[0]] = {"speed": f[1], "duplex": f[2], "nrxq": f[3], "ntxq": f[4],
+                     "rx_max": f[5], "rx_cur": f[6], "tx_max": f[7], "tx_cur": f[8]}
+    return out
+
+VM_KEYWORDS = ("kvm", "qemu", "vmware", "openstack", "bochs", "xen", "hyper-v", "hyperv",
+               "virtualbox", "ovirt", "powerkvm", "powervm", "ldom", "parallels", "zvm",
+               "virtuozzo")
+
+def platform_label(dmi_txt, cpuinfo_txt):
+    """'Virtual (<dmi vendor+product>)' / 'Physical' / None (undeterminable).
+    dmi keyword match wins; else cpuinfo 'hypervisor' flag; dmi present w/o match -> Physical."""
+    dmi = {}
+    for line in (dmi_txt or "").splitlines():
+        f = line.split(None, 1)
+        if len(f) == 2 and f[0] in ("vendor", "product"):
+            dmi[f[0]] = f[1].strip()
+    hay = " ".join(dmi.values()).lower()
+    if hay:
+        for kw in VM_KEYWORDS:
+            if re.search(r'\b' + re.escape(kw) + r'\b', hay):
+                return "Virtual (%s)" % " ".join(
+                    dmi.get(k, "") for k in ("vendor", "product") if dmi.get(k)).strip()
+        return "Physical"
+    if "hypervisor" in (cpuinfo_txt or "").lower():
+        return "Virtual (hypervisor)"
+    return None
+
+def _dd(e, b, k):
+    """Delta of an optional counter (None on either side -> None)."""
+    ev, bv = e.get(k), b.get(k)
+    return None if (ev is None or bv is None) else ev - bv
+
+def _cell(m, k):
+    """Trimmed meta value; '-' for empty or literal '-'."""
+    v = (m.get(k) or "").strip()
+    return v if v and v != "-" else "-"
+
+def disk_meta_cells(name, meta):
+    """7 identity cells (Size/Type/Rot/Sched/QDepth/NR_RQ/WC); '-' when unavailable."""
+    m = meta.get(name)
+    if not m:
+        return ["-"] * 7
+    return [_cell(m, "size"), _cell(m, "type"), _cell(m, "rot"), _cell(m, "sched"),
+            _cell(m, "qdepth"), _cell(m, "nr_rq"), _cell(m, "wcache")]
+
+def net_meta_cells(name, meta):
+    """Speed/Duplex/Queues/RX ring/TX ring cells; ring as 'cur/max'; '-' when unavailable."""
+    m = meta.get(name)
+    if not m:
+        return ["-"] * 5
+    nrx, ntx = _cell(m, "nrxq"), _cell(m, "ntxq")
+    queues = nrx if nrx == ntx else "rx%s/tx%s" % (nrx, ntx)
+    rxr = "-" if (_cell(m, "rx_cur") == "-" and _cell(m, "rx_max") == "-") else "%s/%s" % (_cell(m, "rx_cur"), _cell(m, "rx_max"))
+    txr = "-" if (_cell(m, "tx_cur") == "-" and _cell(m, "tx_max") == "-") else "%s/%s" % (_cell(m, "tx_cur"), _cell(m, "tx_max"))
+    return [_cell(m, "speed"), _cell(m, "duplex"), queues, rxr, txr]
+
+# generic on purpose: "collapse"/"discard" catch resource-pressure counters (TCPBacklogCollapse, InDiscards) — intentional
+NET_ERR_KEYWORDS = ("err", "drop", "retrans", "timeout", "fail", "overflow", "abort",
+                    "reset", "rst", "lost", "prune", "collapse", "discard", "noroute")
+
+NET_ERR_CORE = [
+    ("Ip", "InHdrErrors", "InHdrErrors"), ("Ip", "InAddrErrors", "InAddrErrors"),
+    ("Ip", "InUnknownProtos", "InUnknownProtos"), ("Ip", "InDiscards", "InDiscards"),
+    ("Ip", "OutDiscards", "OutDiscards"), ("Ip", "OutNoRoutes", "OutNoRoutes"),
+    ("Ip", "ReasmFails", "ReasmFails"), ("Ip", "FragFails", "FragFails"),
+    ("Icmp", "InErrors", "InErrors"), ("Icmp", "OutErrors", "OutErrors"),
+    ("Tcp", "AttemptFails", "AttemptFails"), ("Tcp", "EstabResets", "EstabResets"),
+    ("Tcp", "RetransSegs", "RetransSegs"), ("Tcp", "InErrs", "InErrs"),
+    ("Tcp", "OutRsts", "OutRsts"),
+    ("Udp", "InErrors", "InErrors"), ("Udp", "RcvbufErrors", "RcvbufErrors"),
+    ("Udp", "SndbufErrors", "SndbufErrors"),
+    ("TcpExt", "ListenOverflows", "ListenOverflows"), ("TcpExt", "ListenDrops", "ListenDrops"),
+    ("TcpExt", "TCPTimeouts", "Timeouts"), ("TcpExt", "TCPLostRetransmit", "LostRetransmit"),
+    ("TcpExt", "TCPAbortOnData", "AbortOnData"), ("TcpExt", "TCPAbortOnClose", "AbortOnClose"),
+    ("TcpExt", "TCPAbortOnMemory", "AbortOnMemory"), ("TcpExt", "TCPAbortOnTimeout", "AbortOnTimeout"),
+    ("TcpExt", "TCPBacklogDrop", "BacklogDrop"), ("TcpExt", "TCPRcvCollapsed", "RcvCollapsed"),
+    ("TcpExt", "TCPSynRetrans", "SynRetrans"), ("TcpExt", "TCPFastRetrans", "FastRetrans"),
+]
+
+def parse_netstat_pairs(txt):
+    """/proc/net/{snmp,netstat}: paired lines 'X: n1 n2...' + 'X: v1 v2...' ->
+    {proto: {name: float}}; unpaired/trailing lines skipped; {} when empty."""
+    lines = [l for l in (txt or "").splitlines() if l.strip()]
+    out = {}
+    i = 0
+    while i + 1 < len(lines):
+        a, b = lines[i].split(None, 1), lines[i + 1].split(None, 1)
+        if len(a) == 2 and len(b) == 2 and a[0] == b[0] and a[0].endswith(":"):
+            keys = a[1].split(); vals = b[1].split()
+            if len(keys) == len(vals):
+                proto = a[0][:-1]
+                out.setdefault(proto, {}).update(
+                    {k: to_num(v) for k, v in zip(keys, vals)})
+                i += 2
+                continue
+        i += 1
+    return out
+
+# assumes disjoint proto names between snmp/netstat ("Ip"/"Tcp" vs "IpExt"/"TcpExt"); an overlap would silently update-merge
+def _netstat_merged(pairs):
+    """Merge (filekey, text) pairs into single {proto: {name: float}} dict."""
+    m = {}
+    for _k, txt in pairs:
+        for proto, kv in parse_netstat_pairs(txt).items():
+            m.setdefault(proto, {}).update(kv)
+    return m
+
+def netstat_core_cols(bm, em, dur):
+    """Core counter columns for horizontal rendering. Returns (cols, data) where:
+    cols = [{"proto","name","label"}] for counters present in at least one side
+    data = {proto: {name: {"delta": float|None, "per_sec": float|None}}}
+    A column appears if the counter exists in EITHER side; delta=None if missing from one side."""
+    cols = []
+    data = {}
+    for proto, raw_name, label in NET_ERR_CORE:
+        bv = bm.get(proto, {}).get(raw_name)
+        ev = em.get(proto, {}).get(raw_name)
+        if bv is None and ev is None:
+            continue  # omit if absent from BOTH sides
+        cols.append({"proto": proto, "name": raw_name, "label": label})
+        delta = (ev - bv) if (bv is not None and ev is not None) else None
+        per_sec = (delta / dur) if (dur and delta is not None) else None
+        if proto not in data:
+            data[proto] = {}
+        data[proto][raw_name] = {"delta": delta, "per_sec": per_sec}
+    return cols, data
+
+def netstat_core_rows(os_data, dur):
+    """Core counter rows for vertical rendering. Returns list of (proto, name, label, delta, per_sec)
+    tuples in NET_ERR_CORE fixed order for counters present in at least one side.
+    os_data: win["os"] dict with (phase, filename) keys."""
+    bm = _netstat_merged([("snmp", os_data.get(("begin", "net_snmp"), "")),
+                         ("netstat", os_data.get(("begin", "net_netstat"), ""))])
+    em = _netstat_merged([("snmp", os_data.get(("end", "net_snmp"), "")),
+                         ("netstat", os_data.get(("end", "net_netstat"), ""))])
+    rows = []
+    for proto, raw_name, label in NET_ERR_CORE:
+        bv = bm.get(proto, {}).get(raw_name)
+        ev = em.get(proto, {}).get(raw_name)
+        if bv is None and ev is None:
+            continue  # omit if absent from BOTH sides
+        delta = (ev - bv) if (bv is not None and ev is not None) else None
+        per_sec = (delta / dur) if (dur and delta is not None) else None
+        rows.append((proto, raw_name, label, delta, per_sec))
+    return rows
+
+def netstat_core_rows_awrdiff(os_data1, dur1, os_data2, dur2):
+    """Core counter rows for awrdiff vertical rendering. Returns list of (proto, name, label, delta1, delta2, delta_diff)
+    tuples in NET_ERR_CORE fixed order for counters present in at least one side of either period."""
+    bm1 = _netstat_merged([("snmp", os_data1.get(("begin", "net_snmp"), "")),
+                          ("netstat", os_data1.get(("begin", "net_netstat"), ""))])
+    em1 = _netstat_merged([("snmp", os_data1.get(("end", "net_snmp"), "")),
+                          ("netstat", os_data1.get(("end", "net_netstat"), ""))])
+    bm2 = _netstat_merged([("snmp", os_data2.get(("begin", "net_snmp"), "")),
+                          ("netstat", os_data2.get(("begin", "net_netstat"), ""))])
+    em2 = _netstat_merged([("snmp", os_data2.get(("end", "net_snmp"), "")),
+                          ("netstat", os_data2.get(("end", "net_netstat"), ""))])
+    rows = []
+    for proto, raw_name, label in NET_ERR_CORE:
+        bv1 = bm1.get(proto, {}).get(raw_name)
+        ev1 = em1.get(proto, {}).get(raw_name)
+        bv2 = bm2.get(proto, {}).get(raw_name)
+        ev2 = em2.get(proto, {}).get(raw_name)
+        if (bv1 is None and ev1 is None) and (bv2 is None and ev2 is None):
+            continue  # omit if absent from BOTH sides of BOTH periods
+        delta1 = (ev1 - bv1) if (bv1 is not None and ev1 is not None) else None
+        delta2 = (ev2 - bv2) if (bv2 is not None and ev2 is not None) else None
+        delta_diff = None
+        if delta1 is not None and delta2 is not None:
+            delta_diff = delta2 - delta1
+        rows.append((proto, raw_name, label, delta1, delta2, delta_diff))
+    return rows
+
+def netstat_err_deltas(begins, ends, dur):
+    """Error-class netstat counter deltas across the window.
+    begins/ends: [(filekey, text)] for ('snmp','netstat'); a counter needs BOTH sides
+    present. Returns [{'proto','name','delta','per_sec'}] filtered to delta != 0,
+    sorted by abs(delta) desc; empty list when nothing changed / files absent."""
+    bm, em = _netstat_merged(begins), _netstat_merged(ends)
+    core_names = {(proto, name) for proto, name, _ in NET_ERR_CORE}
+    rows = []
+    for proto, ekv in em.items():
+        for name, ev in ekv.items():
+            bv = bm.get(proto, {}).get(name)
+            if bv is None:
+                continue
+            if (proto, name) in core_names:
+                continue  # skip core counters (handled by horizontal table)
+            low = name.lower()
+            if not any(kw in low for kw in NET_ERR_KEYWORDS):
+                continue
+            d = ev - bv
+            if d != 0:
+                rows.append({"proto": proto, "name": name, "delta": d,
+                             "per_sec": d / dur if dur else 0.0})
+    rows.sort(key=lambda r: -abs(r["delta"]))
+    return rows
 
 def proc_vmstat(txt):
     """Key /proc/vmstat counters: pgpgin/pgpgout/pswpin/pswpout/pgfault/pgmajfault."""
@@ -20195,6 +20477,7 @@ def os_window_deltas(win):
     bd = {d["name"]: d for d in proc_disk_devs(win["os"].get(("begin", "diskstats"), ""))}
     ed = {d["name"]: d for d in proc_disk_devs(win["os"].get(("end", "diskstats"), ""))}
     disks = []
+    discard_seen = False
     rd_bytes = wr_bytes = 0.0
     for nm in sorted(set(bd) | set(ed)):
         e = ed.get(nm, {}); b = bd.get(nm, {})
@@ -20205,6 +20488,11 @@ def os_window_deltas(win):
         rd_tick_d = e.get("rd_ticks",0) - b.get("rd_ticks",0)
         wr_tick_d = e.get("wr_ticks",0) - b.get("wr_ticks",0)
         wtick_d  = e.get("weighted_ticks",0) - b.get("weighted_ticks",0)
+        dc_ios_d  = _dd(e, b, "dc_ios")
+        dc_sec_d  = _dd(e, b, "dc_sectors")
+        fl_ios_d  = _dd(e, b, "fl_ios")
+        if dc_ios_d is not None:
+            discard_seen = True
         ios_d = rd_ios_d + wr_ios_d
         if rd_sec_d == 0 and wr_sec_d == 0 and ios_d == 0:
             continue  # skip idle devices
@@ -20218,6 +20506,9 @@ def os_window_deltas(win):
             "await_ms":  await_ms,
             "r_await_ms": (rd_tick_d / rd_ios_d) if rd_ios_d > 0 else 0.0,
             "w_await_ms": (wr_tick_d / wr_ios_d) if wr_ios_d > 0 else 0.0,
+            "discard_iops":  (dc_ios_d / dur) if dc_ios_d is not None else None,
+            "discard_bytes": (dc_sec_d * 512) if dc_sec_d is not None else None,
+            "flush_iops":    (fl_ios_d / dur) if fl_ios_d is not None else None,
         })
         rd_bytes += rd_sec_d * 512
         wr_bytes += wr_sec_d * 512
@@ -20254,6 +20545,21 @@ def os_window_deltas(win):
         "disks": disks,
         "ifaces": ifaces,
         "softirqs": softirqs,
+        "discard_supported": discard_seen,
+        "disk_meta": parse_blockdev_meta(win["os"].get(("end", "blockdev_meta"), "")),
+        "net_meta": parse_netdev_meta(win["os"].get(("end", "netdev_meta"), "")),
+        "platform": platform_label(win["os"].get(("end", "dmi"), ""),
+                                   win["os"].get(("end", "cpuinfo"), "")
+                                   or win["os"].get(("begin", "cpuinfo"), "")),
+        "netstat_errs": netstat_err_deltas(
+            [("snmp", win["os"].get(("begin", "net_snmp"), "")),
+             ("netstat", win["os"].get(("begin", "net_netstat"), ""))],
+            [("snmp", win["os"].get(("end", "net_snmp"), "")),
+             ("netstat", win["os"].get(("end", "net_netstat"), ""))], dur),
+        "netstat_ok": bool(win["os"].get(("begin", "net_snmp"), "") or
+                           win["os"].get(("begin", "net_netstat"), "")) and
+                      bool(win["os"].get(("end", "net_snmp"), "") or
+                           win["os"].get(("end", "net_netstat"), "")),
     }
 
 # -----------------------------------------------------------------------------
@@ -20264,8 +20570,11 @@ body { font-family: -apple-system, 'Segoe UI', Arial, sans-serif; margin: 0; col
        background: #f5f7fa; font-size: 14px; }
 .wrap { max-width: 1280px; margin: 0 auto; padding: 24px; }
 h1 { font-size: 22px; margin: 0 0 4px 0; }
-h2 { font-size: 16px; margin: 28px 0 10px 0; padding-bottom: 6px; border-bottom: 2px solid #dfe3e8;
-     color: #243b53; }
+h2 { font-size: 19px; margin: 34px 0 12px 0; padding-bottom: 8px; border-bottom: 3px solid #243b53;
+     color: #1f2933; }
+.totop { float: right; font-size: 12px; color: #486581; text-decoration: none;
+         border: 1px solid #dfe3e8; border-radius: 4px; padding: 2px 9px; margin-top: 4px; }
+.totop:hover { background: #f0f3f7; }
 h3.sub { font-size: 13px; margin: 16px 0 6px 0; color: #486581; text-transform: uppercase;
          letter-spacing: .03em; }
 .meta { color: #627d98; font-size: 13px; margin-bottom: 6px; }
@@ -20772,8 +21081,8 @@ def render_single(window_dir, metric, top_n, out_html):
     dur = osd.get("dur", 1.0) or 1.0
     parts.append("<table><tr><th>Interface</th><th class='num'>rx B/s</th>"
                  "<th class='num'>tx B/s</th><th class='num'>rx pkt/s</th>"
-                 "<th class='num'>tx pkt/s</th><th class='num'>rx/tx errs (total)</th>"
-                 "<th class='num'>rx/tx drop (total)</th></tr>")
+                 "<th class='num'>tx pkt/s</th><th class='num'>rx/tx errs (Δ)</th>"
+                 "<th class='num'>rx/tx drop (Δ)</th></tr>")
     ifaces = osd.get("ifaces", [])
     if not ifaces:
         parts.append("<tr><td colspan='7' class='muted'>no network interfaces</td></tr>")
@@ -20858,7 +21167,11 @@ body { font-family: Verdana, Arial, Helvetica, sans-serif; font-size: 12px; colo
 .rhead table { border-collapse: collapse; width: 100%; }
 .rhead td { border: 1px solid #d9c98a; padding: 4px 8px; font-size: 12px; background: #fffdf3; }
 .rhead td.k { background: #ffe9a8; font-weight: bold; width: 16%; }
-.sec { background: #336699; color: #fff; font-weight: bold; font-size: 13px; padding: 4px 8px; margin-top: 18px; border: 1px solid #284b6d; }
+.sec { background: #336699; color: #fff; font-weight: bold; font-size: 15px; padding: 5px 10px; margin-top: 22px; border: 1px solid #284b6d; }
+.sec h2 { display: inline; margin: 0; font-size: 15px; color: inherit; font-weight: inherit; }
+.sec .totop { float: right; color: #fff; text-decoration: none; border: 1px solid rgba(255,255,255,.55);
+              border-radius: 3px; padding: 0 8px; font-size: 11px; font-weight: normal; }
+.sec .totop:hover { background: rgba(255,255,255,.18); }
 .sub { background: #d6e4f0; color: #1f3a5a; font-weight: bold; font-size: 12px; padding: 3px 6px; margin-top: 12px; border: 1px solid #b6cde3; }
 table.t { border-collapse: collapse; width: auto; max-width: 100%; border: 1px solid #999; margin-top: 2px; }
 table.t th { background: #cccccc; color: #000; font-weight: bold; padding: 3px 6px; border: 1px solid #999; text-align: center; font-size: 11px; }
@@ -20947,7 +21260,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     def sec(t):
         _id = _slug(t)
         _toc.append((t, _id))
-        parts.append('<div class="sec" id="%s">%s</div>' % (_id, esc(t)))
+        parts.append('<div class="sec" id="%s"><h2>%s <a class="totop" href="#toc">↑ Top</a></h2></div>' % (_id, esc(t)))
     def sub(t):
         parts.append('<div class="sub">%s</div>' % esc(t))
     def note(t):
@@ -20991,6 +21304,8 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         if _ci["freq_avg_mhz"]:
             parts.append('<tr><td>Freq (min / avg / max MHz)</td><td class="n">%.0f / %.0f / %.0f</td></tr>'
                          % (_ci["freq_min_mhz"], _ci["freq_avg_mhz"], _ci["freq_max_mhz"]))
+        if osd.get("platform"):
+            parts.append('<tr><td>Platform</td><td>%s</td></tr>' % esc(osd["platform"]))
         parts.append('</table>')
     sub("CPU utilization (%)")
     # horizontal layout: components as columns, one value row (busy bolded)
@@ -21047,43 +21362,79 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     vmrow("major fault (pgmajfault)", "pgmajfault")
     parts.append('</table>')
     sub("Disk I/O per device")
-    parts.append('<table class="t"><tr><th>Device</th><th class="n">read IOPS</th>'
-                 '<th class="n">write IOPS</th><th class="n">read B/s</th><th class="n">written B/s</th>'
-                 '<th class="n">avg r_await (ms)</th><th class="n">avg w_await (ms)</th></tr>')
+    _dmeta = osd.get("disk_meta") or {}
+    _dh = '<th>Device</th>'
+    if _dmeta:
+        _dh += ('<th class="n">Size</th><th class="n">Type</th><th class="n">Rot</th>'
+                '<th class="n">Sched</th><th class="n">QDepth</th><th class="n">NR_RQ</th><th class="n">WC</th>')
+    _dh += ('<th class="n">read IOPS</th><th class="n">write IOPS</th><th class="n">read B/s</th>'
+            '<th class="n">written B/s</th>')
+    if osd.get("discard_supported"):
+        _dh += '<th class="n">dIOPS</th><th class="n">dB/s</th><th class="n">fIOPS</th>'
+    _dh += '<th class="n">avg r_await (ms)</th><th class="n">avg w_await (ms)</th></tr>'
+    parts.append('<table class="t"><tr>' + _dh)
     disks = osd.get("disks", [])
     ddur = osd.get("dur", 1.0) or 1.0
     if not disks:
-        parts.append('<tr><td colspan="7" class="note">no active disk devices</td></tr>')
+        _ncols = 1 + (7 if _dmeta else 0) + 4 + (3 if osd.get("discard_supported") else 0) + 2
+        parts.append('<tr><td colspan="%d" class="note">no active disk devices</td></tr>' % _ncols)
     for d in disks:
         ra = "-" if d.get("read_iops", 0) <= 0 else "%.2f" % d.get("r_await_ms", 0.0)
         wa = "-" if d.get("write_iops", 0) <= 0 else "%.2f" % d.get("w_await_ms", 0.0)
-        parts.append('<tr><td>%s</td><td class="n">%.1f</td><td class="n">%.1f</td>'
-                     '<td class="n">%s</td><td class="n">%s</td>'
-                     '<td class="n">%s</td><td class="n">%s</td></tr>' % (
-                         esc(d["name"]), d.get("read_iops", 0), d.get("write_iops", 0),
-                         fmt_bytes(d.get("read_bytes", 0) / ddur),
-                         fmt_bytes(d.get("write_bytes", 0) / ddur),
-                         ra, wa))
+        row = '<tr><td>%s</td>' % esc(d["name"])
+        if _dmeta:
+            row += ''.join('<td class="n">%s</td>' % esc(c) for c in disk_meta_cells(d["name"], _dmeta))
+        row += ('<td class="n">%.1f</td><td class="n">%.1f</td><td class="n">%s</td><td class="n">%s</td>'
+                % (d.get("read_iops", 0), d.get("write_iops", 0),
+                   fmt_bytes(d.get("read_bytes", 0) / ddur), fmt_bytes(d.get("write_bytes", 0) / ddur)))
+        if osd.get("discard_supported"):
+            row += '<td class="n">%.1f</td><td class="n">%s</td><td class="n">%.1f</td>' % (
+                   d.get("discard_iops") or 0.0, fmt_bytes((d.get("discard_bytes") or 0) / ddur),
+                   d.get("flush_iops") or 0.0)
+        row += '<td class="n">%s</td><td class="n">%s</td></tr>' % (ra, wa)
+        parts.append(row)
     parts.append('</table>')
     sub("Network per interface")
     dur_os = osd.get("dur", 1.0) or 1.0
     def nrate(it, key):
         return it.get(key, 0.0) / dur_os
-    parts.append('<table class="t"><tr><th>Interface</th><th class="n">rx B/s</th>'
-                 '<th class="n">tx B/s</th><th class="n">rx pkt/s</th><th class="n">tx pkt/s</th>'
-                 '<th class="n">rx/tx errs (total)</th><th class="n">rx/tx drop (total)</th></tr>')
+    _nmeta = osd.get("net_meta") or {}
+    _nh = '<th>Interface</th><th class="n">rx B/s</th><th class="n">tx B/s</th><th class="n">rx pkt/s</th><th class="n">tx pkt/s</th><th class="n">rx/tx errs (Δ)</th><th class="n">rx/tx drop (Δ)</th>'
+    if _nmeta:
+        _nh += '<th class="n">Speed</th><th class="n">Duplex</th><th class="n">Queues</th><th class="n">RX ring</th><th class="n">TX ring</th>'
+    _nh += '</tr>'
+    parts.append('<table class="t"><tr>' + _nh)
     ifaces = osd.get("ifaces", [])
     if not ifaces:
-        parts.append('<tr><td colspan="7" class="note">no network interfaces</td></tr>')
+        parts.append('<tr><td colspan="%d" class="note">no network interfaces</td></tr>' % (7 + (5 if _nmeta else 0)))
     for it in ifaces:
-        parts.append('<tr><td>%s</td><td class="n">%.0f</td><td class="n">%.0f</td>'
-                     '<td class="n">%.1f</td><td class="n">%.1f</td>'
-                     '<td class="n">%.0f / %.0f</td><td class="n">%.0f / %.0f</td></tr>' % (
+        row = '<tr><td>%s</td><td class="n">%.0f</td><td class="n">%.0f</td><td class="n">%.1f</td><td class="n">%.1f</td><td class="n">%.0f / %.0f</td><td class="n">%.0f / %.0f</td>' % (
                          esc(it["name"]), nrate(it, "rx_bytes"), nrate(it, "tx_bytes"),
                          nrate(it, "rx_packets"), nrate(it, "tx_packets"),
                          it.get("rx_errs", 0.0), it.get("tx_errs", 0.0),
-                         it.get("rx_drop", 0.0), it.get("tx_drop", 0.0)))
+                         it.get("rx_drop", 0.0), it.get("tx_drop", 0.0))
+        if _nmeta:
+            row += ''.join('<td class="n">%s</td>' % esc(c) for c in net_meta_cells(it["name"], _nmeta))
+        row += '</tr>'
+        parts.append(row)
     parts.append('</table>')
+
+    if osd.get("netstat_ok"):
+        sub("Network Protocol Errors")
+        parts.append('<table class="t"><tr><th>Protocol</th><th>Counter</th>'
+                     '<th class="n">&Delta; total</th><th class="n">/s</th></tr>')
+        # Core rows
+        dur_os = osd.get("dur", 1.0) or 1.0
+        for proto, name, label, delta, ps in netstat_core_rows(win["os"], dur_os):
+            _m = " class=\"n muted\"" if not delta else " class=\"n\""
+            parts.append('<tr><td>%s</td><td>%s</td><td%s>%+.0f</td><td%s>%.3f</td></tr>'
+                         % (esc(proto), esc(label), _m, delta or 0, _m, ps or 0.0))
+        # Tail rows (non-core counters)
+        for r in osd.get("netstat_errs", [])[:20]:
+            _m = " class=\"n muted\"" if not r["delta"] else " class=\"n\""
+            parts.append('<tr><td>%s</td><td>%s</td><td%s>%+.0f</td><td%s>%.3f</td></tr>'
+                         % (esc(r["proto"]), esc(r["name"]), _m, r["delta"], _m, r["per_sec"]))
+        parts.append('</table>')
 
     # ================= Time Model System Stats =================
     sec("Time Model System Stats")
@@ -21324,9 +21675,13 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             hdr.append('<th class="n">%s</th>' % dim_header)
         if dim_mode == "total_pe":
             hdr.append('<th class="n">%s/exec</th>' % dim_header)
-        hdr += ['<th class="n">CPU Time (s)</th>',
-                '<th class="n">IO Time (s)</th>',
-                '<th class="n">logical reads/exec</th>',
+        # the table's own dim column already shows cpu/io time when it IS the dim --
+        # skip the static copy then, otherwise the column appears twice
+        if dim_header != "CPU Time (s)":
+            hdr.append('<th class="n">CPU Time (s)</th>')
+        if dim_header != "IO Time (s)":
+            hdr.append('<th class="n">IO Time (s)</th>')
+        hdr += ['<th class="n">logical reads/exec</th>',
                 '<th class="n">physical reads/exec</th>',
                 '<th class="n">rows/exec</th>',
                 '<th class="n">% Total</th>',
@@ -21352,9 +21707,11 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                 cells.append('<td class="n">%s</td>' % dim_fmt(v))
             if dim_mode == "total_pe":
                 cells.append('<td class="n">%s</td>' % dim_fmt(v / calls))
-            cells += ['<td class="n">%s</td>' % s_of(d.get("cpu_time", 0.0)),
-                      '<td class="n">%s</td>' % s_of(d.get("data_io_time", 0.0)),
-                      '<td class="n">%s</td>' % fmt_int(log_r / calls),
+            if dim_header != "CPU Time (s)":
+                cells.append('<td class="n">%s</td>' % s_of(d.get("cpu_time", 0.0)))
+            if dim_header != "IO Time (s)":
+                cells.append('<td class="n">%s</td>' % s_of(d.get("data_io_time", 0.0)))
+            cells += ['<td class="n">%s</td>' % fmt_int(log_r / calls),
                       '<td class="n">%s</td>' % fmt_int(phys_r / calls),
                       '<td class="n">%s</td>' % fmt_int(d.get("n_returned_rows", 0.0) / calls),
                       '<td class="n">%.2f%%</td>' % pct(v, pct_base),
@@ -21498,7 +21855,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                          % (esc(_n), esc(_n), esc(_s), esc(_s), esc(_c), esc(_d)))
     parts.append('</table>')
 
-    _toc_html = '<div class="toc"><b>Contents</b><ul>' + "".join(
+    _toc_html = '<div class="toc" id="toc"><b>Contents</b><ul>' + "".join(
         '<li><a href="#%s">%s</a></li>' % (_id, esc(t)) for t, _id in _toc) + '</ul></div>'
     parts.insert(_toc_pos, _toc_html)
 
@@ -21530,7 +21887,11 @@ body { font-family: Verdana, Arial, Helvetica, sans-serif; font-size: 12px; colo
 .rhead table { border-collapse: collapse; width: 100%; }
 .rhead td { border: 1px solid #d9c98a; padding: 4px 8px; font-size: 12px; background: #fffdf3; }
 .rhead td.k { background: #ffe9a8; font-weight: bold; width: 16%; }
-.sec { background: #336699; color: #fff; font-weight: bold; font-size: 13px; padding: 4px 8px; margin-top: 18px; border: 1px solid #284b6d; }
+.sec { background: #336699; color: #fff; font-weight: bold; font-size: 15px; padding: 5px 10px; margin-top: 22px; border: 1px solid #284b6d; }
+.sec h2 { display: inline; margin: 0; font-size: 15px; color: inherit; font-weight: inherit; }
+.sec .totop { float: right; color: #fff; text-decoration: none; border: 1px solid rgba(255,255,255,.55);
+              border-radius: 3px; padding: 0 8px; font-size: 11px; font-weight: normal; }
+.sec .totop:hover { background: rgba(255,255,255,.18); }
 .sub { background: #d6e4f0; color: #1f3a5a; font-weight: bold; font-size: 12px; padding: 3px 6px; margin-top: 12px; border: 1px solid #b6cde3; }
 table.t { border-collapse: collapse; width: auto; max-width: 100%; border: 1px solid #999; margin-top: 2px; }
 table.t th { background: #cccccc; color: #000; font-weight: bold; padding: 3px 6px; border: 1px solid #999; text-align: center; font-size: 11px; }
@@ -21611,7 +21972,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         _used.add(slug); return slug
     def sec(t):
         _id = _slug(t); _toc.append((t, _id))
-        parts.append('<div class="sec" id="%s">%s</div>' % (_id, esc(t)))
+        parts.append('<div class="sec" id="%s"><h2>%s <a class="totop" href="#toc">↑ Top</a></h2></div>' % (_id, esc(t)))
     def sub(t):
         parts.append('<div class="sub">%s</div>' % esc(t))
     def note(t):
@@ -21660,6 +22021,9 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         if _ci["freq_avg_mhz"]:
             parts.append('<tr><td>Freq (min / avg / max MHz)</td><td class="n">%.0f / %.0f / %.0f</td></tr>'
                          % (_ci["freq_min_mhz"], _ci["freq_avg_mhz"], _ci["freq_max_mhz"]))
+        _plat = osd2.get("platform") or osd1.get("platform")
+        if _plat:
+            parts.append('<tr><td>Platform</td><td>%s</td></tr>' % esc(_plat))
         parts.append('</table>')
     sub("CPU utilization (%)")
     # horizontal layout: components as columns, P1 / P2 / delta as rows
@@ -21759,43 +22123,109 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     sub("Disk I/O per device (per second)")
     _d1 = {d["name"]: d for d in osd1.get("disks", [])}
     _d2 = {d["name"]: d for d in osd2.get("disks", [])}
-    parts.append('<table class="t"><tr><th>Device</th><th class="n">P1 rIOPS</th>'
-                 '<th class="n">P2 rIOPS</th><th class="n">P1 wIOPS</th><th class="n">P2 wIOPS</th>'
-                 '<th class="n">P1 rB/s</th><th class="n">P2 rB/s</th>'
-                 '<th class="n">P1 wB/s</th><th class="n">P2 wB/s</th></tr>')
+    _dmeta = osd2.get("disk_meta") or osd1.get("disk_meta") or {}
+    _dsup = bool(osd1.get("discard_supported") or osd2.get("discard_supported"))
+    _dh = '<th>Device</th>'
+    if _dmeta:
+        _dh += ('<th class="n">Size</th><th class="n">Type</th><th class="n">Rot</th>'
+                '<th class="n">Sched</th><th class="n">QDepth</th><th class="n">NR_RQ</th><th class="n">WC</th>')
+    _dh += ('<th class="n">P1 rIOPS</th><th class="n">P2 rIOPS</th>'
+            '<th class="n">P1 wIOPS</th><th class="n">P2 wIOPS</th>'
+            '<th class="n">P1 rB/s</th><th class="n">P2 rB/s</th>'
+            '<th class="n">P1 wB/s</th><th class="n">P2 wB/s</th>')
+    if _dsup:
+        _dh += ('<th class="n">P1 dIOPS</th><th class="n">P2 dIOPS</th>'
+                '<th class="n">P1 fIOPS</th><th class="n">P2 fIOPS</th>')
+    _dh += '</tr>'
+    parts.append('<table class="t"><tr>' + _dh)
     _dnames = sorted(set(_d1) | set(_d2))
     if not _dnames:
-        parts.append('<tr><td colspan="9" class="note">no active disk devices</td></tr>')
+        _ncols = 1 + (7 if _dmeta else 0) + 8 + (4 if _dsup else 0)
+        parts.append('<tr><td colspan="%d" class="note">no active disk devices</td></tr>' % _ncols)
     ddur1 = osd1.get("dur", 1.0) or 1.0; ddur2 = osd2.get("dur", 1.0) or 1.0
     for name in _dnames:
         a = _d1.get(name, {}); b = _d2.get(name, {})
-        parts.append('<tr><td>%s</td><td class="n">%.1f</td><td class="n">%.1f</td>'
-                     '<td class="n">%.1f</td><td class="n">%.1f</td>'
-                     '<td class="n">%s</td><td class="n">%s</td><td class="n">%s</td><td class="n">%s</td></tr>' % (
-                         esc(name), a.get("read_iops", 0), b.get("read_iops", 0),
-                         a.get("write_iops", 0), b.get("write_iops", 0),
-                         fmt_bytes(a.get("read_bytes", 0) / ddur1), fmt_bytes(b.get("read_bytes", 0) / ddur2),
-                         fmt_bytes(a.get("write_bytes", 0) / ddur1), fmt_bytes(b.get("write_bytes", 0) / ddur2)))
+        row = '<tr><td>%s</td>' % esc(name)
+        if _dmeta:
+            row += ''.join('<td class="n">%s</td>' % esc(c) for c in disk_meta_cells(name, _dmeta))
+        row += ('<td class="n">%.1f</td><td class="n">%.1f</td><td class="n">%.1f</td><td class="n">%.1f</td>'
+                '<td class="n">%s</td><td class="n">%s</td><td class="n">%s</td><td class="n">%s</td>' % (
+                    a.get("read_iops", 0), b.get("read_iops", 0),
+                    a.get("write_iops", 0), b.get("write_iops", 0),
+                    fmt_bytes(a.get("read_bytes", 0) / ddur1), fmt_bytes(b.get("read_bytes", 0) / ddur2),
+                    fmt_bytes(a.get("write_bytes", 0) / ddur1), fmt_bytes(b.get("write_bytes", 0) / ddur2)))
+        if _dsup:
+            row += ('<td class="n">%.1f</td><td class="n">%.1f</td><td class="n">%.1f</td><td class="n">%.1f</td>'
+                    % (a.get("discard_iops") or 0.0, b.get("discard_iops") or 0.0,
+                       a.get("flush_iops") or 0.0, b.get("flush_iops") or 0.0))
+        row += '</tr>'
+        parts.append(row)
     parts.append('</table>')
     sub("Network per interface (per second)")
     _i1 = {it["name"]: it for it in osd1.get("ifaces", [])}
     _i2 = {it["name"]: it for it in osd2.get("ifaces", [])}
-    parts.append('<table class="t"><tr><th>Interface</th><th class="n">P1 rx B/s</th>'
-                 '<th class="n">P2 rx B/s</th><th class="n">P1 tx B/s</th><th class="n">P2 tx B/s</th>'
-                 '<th class="n">P1 errs</th><th class="n">P2 errs</th></tr>')
+    _nmeta = osd2.get("net_meta") or osd1.get("net_meta") or {}
+    _nh = '<th>Interface</th><th class="n">P1 rx B/s</th><th class="n">P2 rx B/s</th><th class="n">P1 tx B/s</th><th class="n">P2 tx B/s</th><th class="n">P1 errs</th><th class="n">P2 errs</th>'
+    if _nmeta:
+        _nh += '<th class="n">Speed</th><th class="n">Duplex</th><th class="n">Queues</th><th class="n">RX ring</th><th class="n">TX ring</th>'
+    _nh += '</tr>'
+    parts.append('<table class="t"><tr>' + _nh)
     _inames = sorted(set(_i1) | set(_i2))
     if not _inames:
-        parts.append('<tr><td colspan="7" class="note">no network interfaces</td></tr>')
+        parts.append('<tr><td colspan="%d" class="note">no network interfaces</td></tr>' % (7 + (5 if _nmeta else 0)))
     du1 = osd1.get("dur", 1.0) or 1.0; du2 = osd2.get("dur", 1.0) or 1.0
     for name in _inames:
         a = _i1.get(name, {}); b = _i2.get(name, {})
-        parts.append('<tr><td>%s</td><td class="n">%.0f</td><td class="n">%.0f</td>'
-                     '<td class="n">%.0f</td><td class="n">%.0f</td>'
-                     '<td class="n">%.0f</td><td class="n">%.0f</td></tr>' % (
+        row = '<tr><td>%s</td><td class="n">%.0f</td><td class="n">%.0f</td><td class="n">%.0f</td><td class="n">%.0f</td><td class="n">%.0f</td><td class="n">%.0f</td>' % (
                          esc(name), a.get("rx_bytes", 0) / du1, b.get("rx_bytes", 0) / du2,
                          a.get("tx_bytes", 0) / du1, b.get("tx_bytes", 0) / du2,
-                         a.get("rx_errs", 0) + a.get("tx_errs", 0), b.get("rx_errs", 0) + b.get("tx_errs", 0)))
+                         a.get("rx_errs", 0) + a.get("tx_errs", 0), b.get("rx_errs", 0) + b.get("tx_errs", 0))
+        if _nmeta:
+            row += ''.join('<td class="n">%s</td>' % esc(c) for c in net_meta_cells(name, _nmeta))
+        row += '</tr>'
+        parts.append(row)
     parts.append('</table>')
+
+    if osd1.get("netstat_ok") or osd2.get("netstat_ok"):
+        sub("Network Protocol Errors")
+        parts.append('<table class="t"><tr><th>Protocol</th><th>Counter</th>'
+                     '<th class="n">P1 &Delta;</th><th class="n">P2 &Delta;</th><th class="n">&Delta;</th></tr>')
+        # Core rows in fixed order
+        dur1 = osd1.get("dur", 1.0) or 1.0
+        dur2 = osd2.get("dur", 1.0) or 1.0
+        for proto, name, label, d1, d2, d_diff in netstat_core_rows_awrdiff(win1["os"], dur1, win2["os"], dur2):
+            _m = " class=\"n muted\"" if (not d1 and not d2) else " class=\"n\""
+            parts.append('<tr><td>%s</td><td>%s</td><td%s>%s</td><td%s>%s</td><td%s>%s</td></tr>'
+                         % (esc(proto), esc(label),
+                            _m, ("%.0f" % d1) if d1 is not None else "-",
+                            _m, ("%.0f" % d2) if d2 is not None else "-",
+                            _m, ("%.0f" % d_diff) if d_diff is not None else "-"))
+        # Tail rows (union of non-core counters with nonzero in either period)
+        tail1 = netstat_err_deltas(
+            [("snmp", win1["os"].get(("begin", "net_snmp"), "")),
+             ("netstat", win1["os"].get(("begin", "net_netstat"), ""))],
+            [("snmp", win1["os"].get(("end", "net_snmp"), "")),
+             ("netstat", win1["os"].get(("end", "net_netstat"), ""))], osd1.get("dur", 1.0) or 1.0)
+        tail2 = netstat_err_deltas(
+            [("snmp", win2["os"].get(("begin", "net_snmp"), "")),
+             ("netstat", win2["os"].get(("begin", "net_netstat"), ""))],
+            [("snmp", win2["os"].get(("end", "net_snmp"), "")),
+             ("netstat", win2["os"].get(("end", "net_netstat"), ""))], osd2.get("dur", 1.0) or 1.0)
+        if tail1 or tail2:
+            _e1 = {(r["proto"], r["name"]): r for r in tail1}
+            _e2 = {(r["proto"], r["name"]): r for r in tail2}
+            _keys = sorted(set(_e1) | set(_e2),
+                           key=lambda k: -max(abs(_e1.get(k, {}).get("delta", 0)),
+                                              abs(_e2.get(k, {}).get("delta", 0))))[:20]
+            for k in _keys:
+                d1 = _e1.get(k, {}).get("delta"); d2 = _e2.get(k, {}).get("delta")
+                _m = " class=\"n muted\"" if (not d1 and not d2) else " class=\"n\""
+                parts.append('<tr><td>%s</td><td>%s</td><td%s>%s</td><td%s>%s</td><td%s>%s</td></tr>'
+                             % (esc(k[0]), esc(k[1]),
+                                _m, ("%.0f" % d1) if d1 is not None else "-",
+                                _m, ("%.0f" % d2) if d2 is not None else "-",
+                                _m, ("%.0f" % (d2 - d1)) if (d1 is not None and d2 is not None) else "-"))
+        parts.append('</table>')
 
     # ================= Time Model System Stats =================
     sec("Time Model System Stats")
@@ -22124,7 +22554,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             note("%d GUC parameter(s) changed between Period 1 and Period 2." % len(_changed))
     parts.append('</table>')
 
-    _toc_html = '<div class="toc"><b>Contents</b><ul>' + "".join(
+    _toc_html = '<div class="toc" id="toc"><b>Contents</b><ul>' + "".join(
         '<li><a href="#%s">%s</a></li>' % (_id, esc(t)) for t, _id in _toc) + '</ul></div>'
     parts.insert(_toc_pos, _toc_html)
 
@@ -22855,7 +23285,6 @@ run_awr() {
         *) echo "Error: unknown awr subcommand '$sub'" >&2; awr_help; return 1;;
     esac
 }
-
 case "$1" in
     -V|-v|version)
         echo "$VB_TOOL_VERSION"; exit 0;;
@@ -23305,7 +23734,7 @@ case "$1" in
             echo "Description: list block devices and metadata"
             exit 0
         fi
-        run_lsds
+        run_lsds "$@"
         ;;
     planbyline)
         if [[ "$2" == "-help" || "$2" == "--help" || -z "$2" ]]; then
