@@ -1,13 +1,13 @@
 #!/bin/bash
 #--------------------------------------------------------------------------------
 #-- File name:   vb_tool
-#-- Version  ：  v1.4.17
+#-- Version  ：  v1.4.18
 #-- Commit at：  2026-08-18 21:30:00
 #-- Purpose:     Vastbase Script Tool
 #-- Author:      MVS & Second-line Team 
 #--------------------------------------------------------------------------------
 set -o pipefail
-VB_TOOL_VERSION="v1.4.17"
+VB_TOOL_VERSION="v1.4.18"
 show_help() {
     echo "Vastbase Script Tool (vb_tool)"
     echo ""
@@ -125,7 +125,7 @@ show_help() {
 }
 
 show_list() {
-    echo "Vastbase Script Tool (vb_tool) v1.4.17"
+    echo "Vastbase Script Tool (vb_tool) v1.4.18"
     echo ""
     echo "Usage Summary:"
     echo "  vb_tool <command> [options]"
@@ -19191,7 +19191,8 @@ counter delta between two snapshots (end - begin).
                             that whole day
   show                      awr overview: run status (crontab entries),
                             sampling interval, retention, oldest/newest
-                            snapshot, snapshot count
+                            snapshot, snapshot count; while ENABLED also
+                            last-snap age (ok / STALE liveness hint)
   delete  until <time>      delete snapshots (by ts), html reports (by mtime) and
                             old repl_*.log (by whole day) older than <time>;
                             e.g. '2026-08-11' or '2026-08-11 12:00:00'
@@ -22395,7 +22396,11 @@ _awr_enable() {
     # Wrap in `bash -lc` so cron's minimal env sources the user's login profile
     # (psql + PG* vars). Without this, cron-fired `awr create` can't reach the DB
     # (verified on 204: bare cron => db_name=? / empty csvs; bash -lc => connects).
-    local entry="*/$mins * * * * /bin/bash -lc '$self awr create >/dev/null 2>&1'  $marker"
+    # '*/60' in the minute field draws a cron install warning (step > 59);
+    # express 60 min as plain '0' (hourly at :00) instead
+    local minspec="*/$mins"
+    [ "$mins" -eq 60 ] && minspec="0"
+    local entry="$minspec * * * * /bin/bash -lc '$self awr create >/dev/null 2>&1'  $marker"
     local rentry="* * * * * /bin/bash -lc '$self awr _repl-sample >/dev/null 2>&1'  $rmarker"
     ( crontab -l 2>/dev/null | grep -v "$rmarker" | grep -v "$marker"; echo "$rentry"; echo "$entry" ) | crontab -
     echo "awr enable: capturing a snapshot every ${mins}min (see 'awr config interval') + replication sample every 1min via crontab"
@@ -22514,6 +22519,33 @@ PY
     [ "$days" -eq 0 ] && purge="off (retention = 0, keep forever)"
     local rdesc="${days} day(s)"
     [ "$days" -eq 0 ] && rdesc="0 (never purge)"
+    # last-snap freshness (shown only while ENABLED): with interval N min a snap
+    # lands every ~N min, so anything older than N + 10 min slack means periodic
+    # capture is not landing (script moved/renamed, crontab broken, DB down) --
+    # the crontab entries would still SAY enabled, this line is the liveness tell
+    local ageline=""
+    if [ -n "$snapent" ] || [ -n "$replent" ]; then
+        if [ "$n" -gt 0 ] && [ -n "$nts" ]; then
+            local now_ep snap_ep age thr human
+            now_ep=$(date +%s)
+            snap_ep=$(date -d "$nts" +%s 2>/dev/null)
+            if [ -n "$snap_ep" ] && [ -n "$now_ep" ]; then
+                age=$(( now_ep - snap_ep )); [ "$age" -lt 0 ] && age=0
+                thr=$(( mins * 60 + 600 ))
+                if   [ "$age" -lt 90 ];    then human="${age} sec"
+                elif [ "$age" -lt 7200 ];  then human="$(( age / 60 )) min"
+                elif [ "$age" -lt 172800 ]; then human="$(( age / 3600 )) hour(s)"
+                else human="$(( age / 86400 )) day(s)"; fi
+                if [ "$age" -le "$thr" ]; then
+                    ageline="last snap age : ${human} (ok)"
+                else
+                    ageline="last snap age : ${human} (STALE -- periodic capture not landing; check script path, crontab and DB)"
+                fi
+            fi
+        else
+            ageline="last snap age : (no snapshots yet; first cron capture lands within ${mins} min of enable)"
+        fi
+    fi
     echo "==> awr show"
     if [ -z "$snapent" ] && [ -z "$replent" ]; then
         echo "status        : DISABLED (no periodic snapshot / sampler crontab entries)"
@@ -22523,6 +22555,7 @@ PY
         else echo "  snapshot:          (entry missing -- re-run 'awr enable' to fix)"; fi
         if [ -n "$replent" ]; then echo "  replication sampler: $replent"
         else echo "  replication sampler: (entry missing -- re-run 'awr enable' to fix)"; fi
+        [ -n "$ageline" ] && echo "$ageline"
     fi
     cat <<EOF
 interval      : ${mins} min
@@ -22717,7 +22750,9 @@ _awr_config() {
                 local self; self=$(readlink -f "$0" 2>/dev/null || echo "$0")
                 local marker="# vb_tool_awr"
                 local rmarker="# vb_tool_awr_repl"
-                local entry="*/$val * * * * /bin/bash -lc '$self awr create >/dev/null 2>&1'  $marker"
+                local minspec="*/$val"
+                [ "$val" -eq 60 ] && minspec="0"
+                local entry="$minspec * * * * /bin/bash -lc '$self awr create >/dev/null 2>&1'  $marker"
                 local rentry="* * * * * /bin/bash -lc '$self awr _repl-sample >/dev/null 2>&1'  $rmarker"
                 ( crontab -l 2>/dev/null | grep -v "$rmarker" | grep -v "$marker"; echo "$rentry"; echo "$entry" ) | crontab -
                 echo "awr config: periodic capture is ENABLED -- crontab entry rewritten to every ${val}min"
