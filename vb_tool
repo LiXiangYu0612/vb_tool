@@ -19223,7 +19223,7 @@ counter delta between two snapshots (end - begin).
                             1-60, cron minute-field limit). If periodic capture
                             is enabled the crontab entry is rewritten at once.
 
-Storage (per snapshot):
+Storage (per snapshot; <root> = $VB_TOOL_HOME/awrs/<port>, per instance):
   snapshot:   <root>/snap_<id>/{meta.json, os/<proc files>, db/<views>.csv}
   sequence:   <root>/sequence            (next snap_id to allocate)
   retention:  <root>/retention           (days to keep; default 30, 0 = forever)
@@ -19235,16 +19235,39 @@ Storage (per snapshot):
               (ts,slot,plugin,type,db,active,xmin,cat_xmin,restart_lsn,dummy,conf_flush;
                no slot -> ts,null)
 
-Env: VB_TOOL_HOME  root dir (default ~/.vb_tool); snaps under $VB_TOOL_HOME/awrs/snap_<id>/
+Env: VB_TOOL_HOME  base dir (default ~/.vb_tool); snaps under $VB_TOOL_HOME/awrs/<port>/snap_<id>/
 Port:   -P <port> anywhere on the command line selects the instance (default: current $PGPORT)
+Multi-instance: storage, config and crontab entries are all PER PORT -- each
+        instance gets its own snap_id sequence / retention / interval / repl
+        logs and its own crontab pair (port pinned via PGPORT= in the entry),
+        so several instances can be enabled side by side; enable/disable/show/
+        list/config always operate on the current port only.
 
 Requirements: dbe_perf + gs_instance_time (same as `workload`). Not on PG-only
 kernels lacking dbe_perf (e.g. E100/v0).
 EOF
 }
 
+# _awr_root  -- per-PORT storage root: <VB_TOOL_HOME>/awrs/<port>/. Every awr
+# subcommand (create/list/show/reports/purge/config) operates on the instance
+# the CURRENT port points at (from $PGPORT, or -P which exports it), so several
+# instances can run awr side by side without sharing snap_ids, config or logs.
+# Migrates the pre-multi-instance flat layout once, under a lock.
 _awr_root() {
-    echo "${VB_TOOL_HOME:-$HOME/.vb_tool}/awrs"
+    local base="${VB_TOOL_HOME:-$HOME/.vb_tool}/awrs"
+    local port="${PGPORT:-5432}"
+    local root="$base/$port"
+    if [ -d "$base" ] && [ ! -d "$root" ] && ls "$base"/snap_* >/dev/null 2>&1; then
+        (
+            flock -n 9 || exit 0
+            [ ! -d "$root" ] && ls "$base"/snap_* >/dev/null 2>&1 || exit 0
+            mkdir -p "$root"
+            mv "$base"/snap_* "$base"/sequence "$base"/retention "$base"/interval \
+               "$base"/repl_*.log "$base"/slot_*.log "$root"/ 2>/dev/null
+            echo "awr: migrated existing snapshots/config into per-port layout $root" >&2
+        ) 9>"$base/.migrate.lock"
+    fi
+    echo "$root"
 }
 
 # _awr_next_id  -- atomically allocate and return the next snap_id.
@@ -19388,7 +19411,7 @@ _awr_write_meta() {
     [ -z "$m_dbver" ] && m_dbver="unavailable"
     [ -z "$m_dbname" ] && m_dbname="?"
     python3 -c "
-import json, sys
+import json, sys, os
 def _int(v):
     v = str(v).strip()
     return int(v) if v.isdigit() else v
@@ -19401,6 +19424,7 @@ print(json.dumps({
   'db_version': sys.argv[6],
   'db_start_time': sys.argv[7],
   'vb_tool_version': sys.argv[8],
+  'port': _int(os.environ.get('PGPORT') or 5432),
 }, indent=2, ensure_ascii=False))
 " "$sid" "$ts" "$ts_ep" "$m_host" "$m_dbname" "$m_dbver" "$m_start" "${VB_TOOL_VERSION:-unknown}" > "$dir/meta.json"
 }
@@ -22400,51 +22424,59 @@ _awr_enable() {
         esac
     done
     command -v crontab >/dev/null 2>&1 || { echo "Error: crontab not found on PATH" >&2; return 1; }
-    # Refuse to double-enable: if any of our marker entries is already installed,
-    # error out instead of silently rewriting (user must disable first, so an
-    # accidental second 'enable' can never change the interval unnoticed).
-    if crontab -l 2>/dev/null | grep -qF '# vb_tool_awr_repl' || \
-       crontab -l 2>/dev/null | grep -F '# vb_tool_awr' | grep -qvF '# vb_tool_awr_repl'; then
-        echo "Error: awr periodic capture is already ENABLED -- run 'awr disable' first" >&2
+    local port="${PGPORT:-5432}"
+    local marker="# vb_tool_awr_p$port"
+    local rmarker="# vb_tool_awr_repl_p$port"
+    # Refuse to double-enable THIS port (other ports may run awr in parallel);
+    # also refuse while legacy port-less entries from an older vb_tool are
+    # still installed -- they follow the login profile's PGPORT and cannot be
+    # attributed to any port.
+    if crontab -l 2>/dev/null | grep -qF "$rmarker" || crontab -l 2>/dev/null | grep -qF "$marker"; then
+        echo "Error: awr periodic capture is already ENABLED for port $port -- run 'awr disable' first" >&2
         echo "Current entries:" >&2
         crontab -l 2>/dev/null | grep -F '# vb_tool_awr' >&2
         return 2
     fi
+    if crontab -l 2>/dev/null | grep -Eq '# vb_tool_awr(_repl)? *$'; then
+        echo "Error: legacy awr crontab entries (older vb_tool, no port pinning) found --" >&2
+        echo "       run 'awr disable' once to remove them, then re-enable" >&2
+        return 2
+    fi
     local mins; mins=$(_awr_interval_read)
     local self; self=$(readlink -f "$0" 2>/dev/null || echo "$0")
-    local marker="# vb_tool_awr"
-    local rmarker="# vb_tool_awr_repl"
     # Wrap in `bash -lc` so cron's minimal env sources the user's login profile
-    # (psql + PG* vars). Without this, cron-fired `awr create` can't reach the DB
-    # (verified on 204: bare cron => db_name=? / empty csvs; bash -lc => connects).
+    # (psql + PG* vars); PGPORT=<port> pins THIS instance so the entry keeps
+    # capturing the same database even if the profile's PGPORT later changes.
     # '*/60' in the minute field draws a cron install warning (step > 59);
     # express 60 min as plain '0' (hourly at :00) instead
     local minspec="*/$mins"
     [ "$mins" -eq 60 ] && minspec="0"
-    local entry="$minspec * * * * /bin/bash -lc '$self awr create >/dev/null 2>&1'  $marker"
-    local rentry="* * * * * /bin/bash -lc '$self awr _repl-sample >/dev/null 2>&1'  $rmarker"
-    ( crontab -l 2>/dev/null | grep -v "$rmarker" | grep -v "$marker"; echo "$rentry"; echo "$entry" ) | crontab -
-    echo "awr enable: capturing a snapshot every ${mins}min (see 'awr config interval') + replication sample every 1min via crontab"
+    local entry="$minspec * * * * /bin/bash -lc 'PGPORT=$port $self awr create >/dev/null 2>&1'  $marker"
+    local rentry="* * * * * /bin/bash -lc 'PGPORT=$port $self awr _repl-sample >/dev/null 2>&1'  $rmarker"
+    ( crontab -l 2>/dev/null | grep -vF "$rmarker" | grep -vF "$marker"; echo "$rentry"; echo "$entry" ) | crontab -
+    echo "awr enable: port $port, capturing a snapshot every ${mins}min (see 'awr config interval') + replication sample every 1min via crontab"
     echo "  $entry"
     echo "  $rentry"
-    echo "  (run 'awr disable' to stop both)"
+    echo "  (run 'awr disable' to stop both; other ports keep their own entries)"
     _awr_purge_expired
     return 0
 }
 
 # awr disable  -- remove BOTH the periodic-snapshot and replication-sampler crontab entries.
+# awr disable  -- remove the periodic crontab entries of THIS port (plus any
+# legacy port-less ones from an older vb_tool). Other ports' entries stay.
 _awr_disable() {
-    local marker="# vb_tool_awr"
-    local rmarker="# vb_tool_awr_repl"
+    local port="${PGPORT:-5432}"
     local removed=0
-    if crontab -l 2>/dev/null | grep -q "$rmarker\|$marker"; then
-        crontab -l 2>/dev/null | grep -v "$rmarker" | grep -v "$marker" | crontab -
+    if crontab -l 2>/dev/null | { grep -qF "# vb_tool_awr_p$port" || grep -qF "# vb_tool_awr_repl_p$port" || grep -Eq '# vb_tool_awr(_repl)? *$'; }; then
+        crontab -l 2>/dev/null | grep -vF "# vb_tool_awr_repl_p$port" | grep -vF "# vb_tool_awr_p$port" \
+            | grep -vE '# vb_tool_awr(_repl)? *$' | crontab -
         removed=1
     fi
     if [ "$removed" -eq 1 ]; then
-        echo "awr disable: removed periodic snapshot + replication sampler crontab entries"
+        echo "awr disable: removed periodic snapshot + replication sampler crontab entries for port $port"
     else
-        echo "awr disable: no periodic snapshot / sampler entries found (nothing to remove)"
+        echo "awr disable: no periodic snapshot / sampler entries found for port $port (nothing to remove)"
     fi
     return 0
 }
@@ -22499,13 +22531,16 @@ _awr_show() {
     local root; root=$(_awr_root)
     local days; days=$(_awr_retention_read)
     local mins; mins=$(_awr_interval_read)
-    # run status: read the SAME markers enable/disable use, so what show reports
-    # is always consistent with what disable would remove
-    local snapent="" replent=""
+    # run status: read the SAME per-port markers enable/disable use, so what
+    # show reports is always consistent with what disable would remove; also
+    # surface other ports that have awr enabled (multi-instance overview)
+    local port="${PGPORT:-5432}"
+    local snapent="" replent="" others=""
     if command -v crontab >/dev/null 2>&1; then
         local out; out=$(crontab -l 2>/dev/null)
-        snapent=$(printf '%s\n' "$out" | grep -F '# vb_tool_awr' | grep -vF '# vb_tool_awr_repl')
-        replent=$(printf '%s\n' "$out" | grep -F '# vb_tool_awr_repl')
+        snapent=$(printf '%s\n' "$out" | grep -F "# vb_tool_awr_p$port")
+        replent=$(printf '%s\n' "$out" | grep -F "# vb_tool_awr_repl_p$port")
+        others=$(printf '%s\n' "$out" | grep -oE '# vb_tool_awr_p[0-9]+' | sed 's/# vb_tool_awr_p//' | sort -un | grep -vx "$port" | tr '\n' ' ')
     fi
     local nextid; nextid=$(cat "$root/sequence" 2>/dev/null)
     case "$nextid" in ''|*[!0-9]*) nextid=1;; esac
@@ -22569,7 +22604,7 @@ PY
     fi
     echo "==> awr show"
     if [ -z "$snapent" ] && [ -z "$replent" ]; then
-        echo "status        : DISABLED (no periodic snapshot / sampler crontab entries)"
+        echo "status        : DISABLED (no periodic snapshot / sampler crontab entries for port $port)"
     else
         echo "status        : ENABLED"
         if [ -n "$snapent" ]; then echo "  snapshot:          $snapent"
@@ -22578,7 +22613,9 @@ PY
         else echo "  replication sampler: (entry missing -- re-run 'awr enable' to fix)"; fi
         [ -n "$ageline" ] && echo "$ageline"
     fi
+    [ -n "$others" ] && echo "other ports   : awr also enabled on: $others"
     cat <<EOF
+port           : $port
 interval      : ${mins} min
 retention     : $rdesc
 auto-purge    : $purge
@@ -22764,19 +22801,19 @@ _awr_config() {
             mkdir -p "$root" 2>/dev/null || { echo "Error: cannot create $root" >&2; return 1; }
             echo "$val" > "$root/interval" || { echo "Error: cannot write $root/interval" >&2; return 1; }
             echo "awr config: interval ${oldi} -> ${val} min"
-            # take effect immediately when already enabled: rewrite our entries
-            # (same generator as enable; keeps sampler entry, heals half-open)
-            if crontab -l 2>/dev/null | grep -qF '# vb_tool_awr_repl' || \
-               crontab -l 2>/dev/null | grep -F '# vb_tool_awr' | grep -qvF '# vb_tool_awr_repl'; then
+            # take effect immediately when already enabled: rewrite THIS port's
+            # entries (same generator as enable; keeps sampler entry and other
+            # ports' entries, heals half-open)
+            local cport="${PGPORT:-5432}"
+            if crontab -l 2>/dev/null | grep -qF "# vb_tool_awr_repl_p$cport" || \
+               crontab -l 2>/dev/null | grep -qF "# vb_tool_awr_p$cport"; then
                 local self; self=$(readlink -f "$0" 2>/dev/null || echo "$0")
-                local marker="# vb_tool_awr"
-                local rmarker="# vb_tool_awr_repl"
                 local minspec="*/$val"
                 [ "$val" -eq 60 ] && minspec="0"
-                local entry="$minspec * * * * /bin/bash -lc '$self awr create >/dev/null 2>&1'  $marker"
-                local rentry="* * * * * /bin/bash -lc '$self awr _repl-sample >/dev/null 2>&1'  $rmarker"
-                ( crontab -l 2>/dev/null | grep -v "$rmarker" | grep -v "$marker"; echo "$rentry"; echo "$entry" ) | crontab -
-                echo "awr config: periodic capture is ENABLED -- crontab entry rewritten to every ${val}min"
+                local entry="$minspec * * * * /bin/bash -lc 'PGPORT=$cport $self awr create >/dev/null 2>&1'  # vb_tool_awr_p$cport"
+                local rentry="* * * * * /bin/bash -lc 'PGPORT=$cport $self awr _repl-sample >/dev/null 2>&1'  # vb_tool_awr_repl_p$cport"
+                ( crontab -l 2>/dev/null | grep -vF "# vb_tool_awr_repl_p$cport" | grep -vF "# vb_tool_awr_p$cport"; echo "$rentry"; echo "$entry" ) | crontab -
+                echo "awr config: periodic capture is ENABLED on port $cport -- crontab entry rewritten to every ${val}min"
                 echo "  $entry"
             fi
             return 0
