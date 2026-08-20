@@ -19286,6 +19286,8 @@ select coalesce((select node_name from pg_node_env limit 1),'?'),
 \\echo ===SESS
 select (select count(*) from pg_stat_activity),
        (select count(*) from pg_stat_activity where state='active'),
+       (select count(*) from pg_stat_activity where state like 'idle in transaction%'),
+       (select count(*) from pg_stat_activity where state='idle'),
        (select count(*) from pg_stat_activity where state<>'idle' and now()-xact_start>interval '60 seconds');
 \\echo ===DBM
 select round(coalesce(max(case when memorytype='process_used_memory' then memorymbytes end),0)/1024.0,1),
@@ -19353,7 +19355,7 @@ order by cnt desc;"
             printf 'DSK     (cannot map %s to a /proc/diskstats device)\n' "$datadir"
         fi
         # ---- DB sections ----
-        local db section="" h_node h_ver h_up s_tot s_act s_ltx m_used m_max
+        local db section="" h_node h_ver h_up s_tot s_act s_iit s_idle s_ltx m_used m_max
         local r_sqlid r_cpu r_ns r_rn r_et r_st r_we r_sql
         local cpupairs="0,0" VT_TOP
         if [ -n "$pm_pid" ]; then
@@ -19407,9 +19409,12 @@ limit ${topn};"
                         if [ -n "$h_node" ]; then
                             printf 'DB      %s  %s  up %s' "$h_node" "$h_ver" \
                                 "$(awk -v s="$h_up" 'BEGIN{printf "%dd%02dh%02dm", int(s/86400), int(s%86400/3600), int(s%3600/60)}')"
-                            [ -n "$s_tot" ] && printf '  sess %s tot/%s act  ltx>60s %s' "$s_tot" "$s_act" "$s_ltx"
                             [ -n "$m_used" ] && printf '  dbmem %sG/%sG' "$m_used" "$m_max"
                             printf '\n'
+                        fi
+                        if [ -n "$s_tot" ]; then
+                            printf 'SESS    total %s   active %s   idle %s   idle-in-tx %s   ltx>60s %s\n' \
+                                "$s_tot" "$s_act" "$s_idle" "$s_iit" "$s_ltx"
                         fi
                         [ -n "$wtxt" ] && printf 'WAIT    %s\n' "$(echo $wtxt)"
                         printf '%-11s %6s %7s %5s %-5s %-19s %s\n' "SQLID" "CPU%" "RUN/TOT" "ET(s)" "ST" "WAIT_EVENT" "SQLTEXT"
@@ -19417,7 +19422,7 @@ limit ${topn};"
                 esac
                 case "$section" in
                     HDR)  IFS='|' read -r h_node h_ver h_up <<< "$line";;
-                    SESS) IFS='|' read -r s_tot s_act s_ltx <<< "$line";;
+                    SESS) IFS='|' read -r s_tot s_act s_iit s_idle s_ltx <<< "$line";;
                     DBM)  IFS='|' read -r m_used m_max <<< "$line";;
                     WAIT) IFS='|' read -r wc wn <<< "$line"
                           wtxt="${wtxt}${wc} ${wn}   ";;
