@@ -330,9 +330,10 @@ kill_help() {
     echo ""
 }
 
-redundant_index_help() {
-    echo "Options for redundant_index:"
-    echo "  Usage: [OPTIONS]"
+index_check_help() {
+    echo "Options for index_check:"
+    echo "  Usage: vb_tool index_check [-d database]"
+    echo "  Description: display redundant/unused/unusable/novalid index"
     echo "  Options:"
     echo "    -d: database name"
     echo ""
@@ -415,9 +416,6 @@ lockchain_help() {
     echo "Options for lockchain:"
     echo "  Usage: None"
     echo "  Description: display lock wait chain"
-    echo "  state labels: 2pc = holder is a prepared transaction (no live"
-    echo "                 backend); gone = holder has no pg_stat_activity row"
-    echo "                 (just exited, or hidden by privilege)"
     echo ""
 }
 
@@ -529,7 +527,7 @@ sqlstat_help() {
 }
 
 sqltext_help() {
-    echo "Options for text:"
+    echo "Options for sqltext:"
     echo "  Usage: vb_tool sqltext [unique_query_id]"
     echo "  Description: display sqltext from postgresql slow log"
     echo ""
@@ -4560,7 +4558,7 @@ EOF
 
 run_redundant_index() {
     if [ $# -eq 0 ]; then
-        redundant_index_help
+        index_check_help
         return 1
     fi
 	
@@ -22906,7 +22904,7 @@ case "$1" in
         ;;
     index_check)
         if [[ "$2" == "-help" || "$2" == "--help" ]]; then
-            echo "Usage: vb_tool index_check [options]"
+            index_check_help
             exit 0
         fi
         if ! run_redundant_index "${@:2}"; then
@@ -23241,6 +23239,7 @@ case "$1" in
     lsds)
         if [[ "$2" == "-help" || "$2" == "--help" ]]; then
             echo "Usage: vb_tool lsds"
+            echo "Description: list block devices and metadata"
             exit 0
         fi
         run_lsds
