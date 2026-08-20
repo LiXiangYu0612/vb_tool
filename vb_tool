@@ -63,6 +63,7 @@ show_help() {
     echo "  workload        collect workload information"
     echo "  xlogcom         analyze WAL commits per second"
     echo "  xloghc          display xlog health check information"
+    echo "  vtop            real-time monitor (CPU/MEM/NET/PGDATA-disk IO/sessions)"
     echo ""
     echo "Run 'vb_tool <command> -help' for detailed usage."
 }
@@ -117,6 +118,7 @@ show_list() {
     echo "  workload        collect workload information"
     echo "  xlogcom         analyze WAL commits per second"
     echo "  xloghc          display xlog health check information"
+    echo "  vtop            real-time monitor (CPU/MEM/NET/PGDATA-disk IO/sessions)"
     echo ""
 }
 
@@ -19157,8 +19159,253 @@ ORDER BY CASE WHEN short_desc LIKE '%planner%' THEN 'planner' ELSE short_desc EN
 PSQLEOF
 }
 
+# ================== vtop: oratop-style real-time view ==================
+vtop_help() {
+    echo "Options for vtop:"
+    echo "  Usage: vb_tool vtop [-i <sec>] [-n <topn>] [--once]"
+    echo "  Description: real-time monitor -- CPU / memory / PGDATA disk IO"
+    echo "               (iops, MB/s, avg latency; read and write split)"
+    echo "               + network / dbmem / top SQL (grouped by sqlid,
+               running-on-CPU first) / wait distribution"
+    echo "  -P <port>: database port (default: current \$PGPORT)"
+    echo "    -i <sec>:   refresh interval, 1-60 (default 5)"
+    echo "    -n <topn>:  top session rows, 1-50 (default 15)"
+    echo "    --once:     print one frame and exit (non-interactive)"
+    echo "    keys:       q = quit; any other key = refresh immediately"
+    echo ""
+}
 
+# _vtop_disk_dev <dir> -> name as it appears in /proc/diskstats (exact
+# partition if present, else its parent disk; dm/md/loop kept as-is)
+_vtop_disk_dev() {
+    local src try i
+    src=$(df -P "$1" 2>/dev/null | awk 'NR==2{print $1}')
+    [ -z "$src" ] && return 1
+    try="${src#/dev/}"
+    i=0
+    while [ "$i" -lt 4 ]; do
+        if awk -v d="$try" '$3==d{f=1} END{exit !f}' /proc/diskstats 2>/dev/null; then
+            echo "$try"; return 0
+        fi
+        case "$try" in
+            dm-*|md[0-9]*|loop[0-9]*|sr[0-9]*) return 1;;
+            *p[0-9]) try="${try%p*}";;
+            *[0-9])  try="${try%[0-9]}";;
+            *) return 1;;
+        esac
+        i=$((i+1))
+    done
+    return 1
+}
 
+# r_ops r_sec r_ms w_ops w_sec w_ms io_ticks
+_vtop_diskstats() {
+    awk -v d="$1" '$3==d{print $4, $6, $7, $8, $10, $11, $13; exit}' /proc/diskstats 2>/dev/null
+}
+
+# parent disk for sysfs queue attributes (vda1 -> vda, nvme0n1p2 -> nvme0n1)
+_vtop_parent_dev() {
+    case "$1" in
+        dm-*|md[0-9]*|loop[0-9]*) echo "$1"; return;;
+        *p[0-9]) echo "${1%p*}"; return;;
+        *[0-9])  local p="${1%[0-9]}"; [ -n "$p" ] && echo "$p" || echo "$1"; return;;
+        *) echo "$1"; return;;
+    esac
+}
+
+# "<parent> <size> <rot> <sched> <qd>" for the device holding PGDATA
+_vtop_devinfo() {
+    local p sz rot sch qd base
+    p=$(_vtop_parent_dev "$1")
+    base="/sys/class/block/$p"
+    [ -d "$base" ] || { p="$1"; base="/sys/class/block/$p"; }
+    sz=$(awk -v s="$(cat "$base/size" 2>/dev/null)" 'BEGIN{if(s>0) printf "%.0fG", s*512/1000000000; else printf "?"}')
+    rot=$(cat "$base/queue/rotational" 2>/dev/null); [ -n "$rot" ] || rot="?"
+    sch=$(cat "$base/queue/scheduler" 2>/dev/null | sed 's/.*\[//;s/\].*//')
+    [ -z "$sch" ] && sch=$(awk '{print $1}' "$base/queue/scheduler" 2>/dev/null)
+    [ -n "$sch" ] || sch="?"
+    qd=$(cat "$base/queue/nr_requests" 2>/dev/null); [ -n "$qd" ] || qd="?"
+    echo "$p $sz $rot $sch $qd"
+}
+
+# total user sys idle iowait steal (ticks)
+_vtop_cpustat() {
+    head -n1 /proc/stat | awk '{print $2+$3+$4+$5+$6+$7+$8+$9, $2, $4, $5, $6, $9}'
+}
+
+# rx_bytes tx_bytes (sum of physical-ish interfaces)
+_vtop_net() {
+    awk 'NR>2 && $1 !~ /^(lo|veth|br-|docker|virbr|tap)[0-9:a-z]*:?$/ {sub(":","",$1); r+=$2; t+=$10} END{print r+0, t+0}' /proc/net/dev
+}
+
+# MemTotal MemAvailable SwapTotal SwapFree (kB)
+_vtop_mem() {
+    awk '/^(MemTotal|MemAvailable|SwapTotal|SwapFree):/{a[$1]=$2} END{print a["MemTotal:"], a["MemAvailable:"], a["SwapTotal:"], a["SwapFree:"]}' /proc/meminfo
+}
+
+_vtop_hum() { # kB -> human
+    awk -v kb="$1" 'BEGIN{u="KMGTPE"; v=kb+0; i=1; while(v>=1024&&i<6){v/=1024;i++} printf (i==1)?"%d%s":"%.1f%s", v, substr(u,i,1)}'
+}
+
+run_vtop() {
+    local interval=5 topn=15 once=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -i)       interval="${2:-}"; shift 2;;
+            -n)       topn="${2:-}"; shift 2;;
+            --once)   once=1; shift;;
+            -h|--help) vtop_help; return 0;;
+            *)        echo "Error: unknown option '$1' (usage: vb_tool vtop [-i sec] [-n topn] [--once])" >&2; return 2;;
+        esac
+    done
+    case "$interval" in ''|*[!0-9]*) echo "Error: -i expects seconds (1-60)" >&2; return 2;; esac
+    if [ "$interval" -lt 1 ] || [ "$interval" -gt 60 ]; then echo "Error: -i must be 1-60" >&2; return 2; fi
+    case "$topn" in ''|*[!0-9]*) echo "Error: -n expects a row count (1-50)" >&2; return 2;; esac
+    if [ "$topn" -lt 1 ] || [ "$topn" -gt 50 ]; then echo "Error: -n must be 1-50" >&2; return 2; fi
+
+    # ---- one-time setup ----
+    local datadir dev devinfo cores
+    datadir=$(PGCONNECT_TIMEOUT=5 psql -d postgres -tAc "show data_directory" 2>/dev/null | head -1 | tr -d ' ')
+    [ -z "$datadir" ] && datadir="${PGDATA:-}"
+    dev=""
+    if [ -n "$datadir" ] && [ -d "$datadir" ]; then
+        dev=$(_vtop_disk_dev "$datadir")
+    fi
+    datadir="${datadir:-unknown}"
+    devinfo=""
+    [ -n "$dev" ] && devinfo=$(_vtop_devinfo "$dev")
+    cores=$(nproc 2>/dev/null || grep -c ^processor /proc/cpuinfo)
+    local VT_SQL="\\echo ===HDR
+select coalesce((select node_name from pg_node_env limit 1),'?'),
+       coalesce(ltrim(split_part(vb_version(),') compiled',1),'('),'?'),
+       (extract(epoch from (now()-pg_postmaster_start_time())))::bigint;
+\\echo ===SESS
+select (select count(*) from pg_stat_activity),
+       (select count(*) from pg_stat_activity where state='active'),
+       (select count(*) from pg_stat_activity where state<>'idle' and now()-xact_start>interval '60 seconds');
+\\echo ===DBM
+select round(coalesce(max(case when memorytype='process_used_memory' then memorymbytes end),0)/1024.0,1),
+       round(coalesce(max(case when memorytype='max_process_memory' then memorymbytes end),0)/1024.0,1)
+from dbe_perf.memory_node_detail;
+\\echo ===WAIT
+select class, cnt from (
+  select CASE
+           when w.wait_event like 'LWLock%' then 'LWLock'
+           when lower(coalesce(w.wait_event,'')) like '%lock%' then 'Lock'
+           when coalesce(w.wait_event,'') = 'none' then 'CPU'
+           when coalesce(w.wait_event,'') = 'wait cmd' then 'Client'
+           when lower(coalesce(w.wait_event,'')) like '%read%'
+                or lower(coalesce(w.wait_event,'')) like '%write%'
+                or lower(coalesce(w.wait_event,'')) like '%io%' then 'IO'
+           else 'Other' end class,
+         count(*) cnt
+  from pg_stat_activity a
+  left join dbe_perf.thread_wait_status w on a.sessionid = w.sessionid
+  where a.state='active' group by class) t
+order by cnt desc;
+\\echo ===TOP
+select k, ns, rn, et, st, we, sql from (
+  select k, count(*) ns, sum(rn) rn, max(et) et,
+         string_agg(distinct st,'/') st, max(we) we, max(sql) sql
+  from (
+    select coalesce(a.unique_sql_id::text,'pid:'||a.pid::text) k,
+           case when coalesce(w.wait_event,'-') = 'none' then 1 else 0 end rn,
+           extract(epoch from (now()-a.query_start))::bigint et,
+           decode(a.state,'active','a','idle in transaction','it','idle','i') st,
+           coalesce(w.wait_event,'-') we,
+           coalesce(substr(regexp_replace(regexp_replace(a.query,'(\r|\n)+',' '),' {2,}',' '),1,44),'-') sql
+    from pg_stat_activity a
+    left join dbe_perf.thread_wait_status w on a.sessionid = w.sessionid
+    where a.state <> 'idle' and a.datname is not null
+      and coalesce(a.application_name,'') not in ('JobScheduler','Asp','workload','WdrSnapshot')
+  ) t group by k
+) g
+order by rn desc, ns desc, et desc nulls last
+limit ${topn};"
+
+    # ---- sampling loop ----
+    local t0 t1 d0 d1 c0 c1 n0 n1 dt key wtxt
+    local a_us a_sy a_id a_wa a_st
+    local d_rops d_rmb d_rms d_wops d_wmb d_wms d_util n_rx n_tx
+    local mt ma mst msf
+    t0=$(date +%s%3N)
+    d0=$(_vtop_diskstats "$dev"); c0=$(_vtop_cpustat); n0=$(_vtop_net)
+    while :; do
+        if [ "$once" = "1" ]; then
+            sleep "$interval"
+        else
+            IFS= read -r -t "$interval" -n 1 key
+            [ "$key" = "q" ] && break
+        fi
+        t1=$(date +%s%3N); d1=$(_vtop_diskstats "$dev"); c1=$(_vtop_cpustat); n1=$(_vtop_net)
+        dt=$(( t1 - t0 )); [ "$dt" -le 0 ] && dt=1
+        read -r a_us a_sy a_id a_wa a_st <<< "$(awk -v a="$c0" -v b="$c1" 'BEGIN{split(a,x);split(b,y);d=y[1]-x[1];if(d<=0)d=1;printf "%.1f %.1f %.1f %.1f %.1f", (y[2]-x[2])*100/d, (y[3]-x[3])*100/d, (y[4]-x[4])*100/d, (y[5]-x[5])*100/d, (y[6]-x[6])*100/d}')"
+        read -r d_rops d_rmb d_rms d_wops d_wmb d_wms d_util <<< "$(awk -v a="$d0" -v b="$d1" -v ms="$dt" 'BEGIN{split(a,x);split(b,y);for(i=1;i<=7;i++){if(x[i]=="")x[i]=0;if(y[i]=="")y[i]=0}
+            ro=y[1]-x[1]; rs=(y[2]-x[2])*512; rt=y[3]-x[3]; wo=y[4]-x[4]; ws=(y[5]-x[5])*512; wt=y[6]-x[6]; it=y[7]-x[7];
+            s=ms/1000; rl=(ro>0)?rt/ro:0; wl=(wo>0)?wt/wo:0; u=(it*100/ms); if(u>100)u=100;
+            printf "%.0f %.1f %.1f %.0f %.1f %.1f %.0f", ro/s, rs/1048576/s, rl, wo/s, ws/1048576/s, wl, u}')"
+        read -r n_rx n_tx <<< "$(awk -v a="$n0" -v b="$n1" -v ms="$dt" 'BEGIN{split(a,x);split(b,y);s=ms/1000; printf "%.1f %.1f", (y[1]-x[1])/1048576/s, (y[2]-x[2])/1048576/s}')"
+        read -r mt ma mst msf <<< "$(_vtop_mem)"
+        local mep
+        mep=$(awk -v t="$mt" -v a="$ma" 'BEGIN{printf (t>0)?int((t-a)*100/t):0}')
+
+        printf '\033[2J\033[H'
+        printf 'vbtop   port:%s   refresh:%ds   %s\n' "${PGPORT:-5432}" "$interval" "$(date '+%F %T')"
+        printf 'CPU     us %5.1f%%  sy %5.1f%%  id %5.1f%%  wa %5.1f%%  st %5.1f%%  (%s cores)' "$a_us" "$a_sy" "$a_id" "$a_wa" "$a_st" "$cores"
+        printf '      NET     rx %7.1f MB/s   tx %7.1f MB/s\n' "$n_rx" "$n_tx"
+        printf 'MEM     used %s / %s (%d%%)   avail %s   swap %s\n' \
+            "$(_vtop_hum $((mt - ma)))" "$(_vtop_hum "$mt")" "$mep" "$(_vtop_hum "$ma")" "$(_vtop_hum $((mst - msf)))"
+        if [ -n "$dev" ]; then
+            local dpar dsz drot dsch dqd
+            read -r dpar dsz drot dsch dqd <<< "$devinfo"
+            printf 'DSK     %s @ %s   [%s %s  rot:%s  sched:%s  qd:%s]\n' "$dev" "$datadir" "$dpar" "$dsz" "$drot" "$dsch" "$dqd"
+            printf '        read %6s iops %8.1f MB/s  avg %5.1f ms   |   write %6s iops %8.1f MB/s  avg %5.1f ms   |   util %3.0f%%\n' \
+                "$d_rops" "$d_rmb" "$d_rms" "$d_wops" "$d_wmb" "$d_wms" "$d_util"
+        else
+            printf 'DSK     (cannot map %s to a /proc/diskstats device)\n' "$datadir"
+        fi
+        # ---- DB sections ----
+        local db section="" h_node h_ver h_up s_tot s_act s_ltx m_used m_max
+        local r_sqlid r_ns r_rn r_et r_st r_we r_sql
+        db=$(printf '%s\n' "$VT_SQL" | PGCONNECT_TIMEOUT=5 psql -d postgres -X -At -F'|' 2>/dev/null)
+        if [ -z "$db" ]; then
+            printf 'DB      (unreachable -- OS sections only)\n'
+        else
+            wtxt=""
+            while IFS= read -r line; do
+                case "$line" in
+                    ===HDR)  section=HDR; continue;;
+                    ===SESS) section=SESS; continue;;
+                    ===DBM)  section=DBM; continue;;
+                    ===WAIT) section=WAIT; continue;;
+                    ===TOP)
+                        if [ -n "$h_node" ]; then
+                            printf 'DB      node:%s   ver:%s   up %s' "$h_node" "$h_ver" \
+                                "$(awk -v s="$h_up" 'BEGIN{printf "%dd%02dh%02dm", int(s/86400), int(s%86400/3600), int(s%3600/60)}')"
+                            [ -n "$s_tot" ] && printf '   sessions %s total / %s active   long-tx(>60s) %s' "$s_tot" "$s_act" "$s_ltx"
+                            [ -n "$m_used" ] && printf '   dbmem %sG / %sG' "$m_used" "$m_max"
+                            printf '\n'
+                        fi
+                        [ -n "$wtxt" ] && printf 'WAIT    %s\n' "$wtxt"
+                        printf '%-11s %5s %5s %-5s %-19s %s\n' "SQLID" "RN/NS" "ET(s)" "ST" "WAIT_EVENT" "SQLTEXT"
+                        section=TOP; continue;;
+                esac
+                case "$section" in
+                    HDR)  IFS='|' read -r h_node h_ver h_up <<< "$line";;
+                    SESS) IFS='|' read -r s_tot s_act s_ltx <<< "$line";;
+                    DBM)  IFS='|' read -r m_used m_max <<< "$line";;
+                    WAIT) IFS='|' read -r wc wn <<< "$line"
+                          wtxt="${wtxt}${wc}:${wn}  ";;
+                    TOP)  IFS='|' read -r r_sqlid r_ns r_rn r_et r_st r_we r_sql <<< "$line"
+                          printf '%-11.11s %5s %5s %-5.5s %-19.19s %.44s\n' "$r_sqlid" "${r_rn}/${r_ns}" "$r_et" "$r_st" "$r_we" "$r_sql";;
+                esac
+            done <<< "$db"
+        fi
+        [ "$once" = "1" ] && break
+        t0=$t1; d0=$d1; c0=$c1; n0=$n1
+    done
+    return 0
+}
 
 # ---- global -P <port>: multi-instance support (all database commands) ------
 # Resolved ONCE here (before dispatch) and exported as PGPORT for this process
@@ -23540,6 +23787,13 @@ case "$1" in
             wdr_event_help
             exit 1
         fi
+        ;;
+    vtop)
+        if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
+            vtop_help
+            exit 0
+        fi
+        run_vtop "${@:2}"
         ;;
     lockchain)
         if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
