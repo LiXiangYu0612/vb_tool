@@ -60,68 +60,7 @@ show_help() {
     echo "  osw_netstat <interface> <file|dir>   analyze OSWbb oswnetstat archive (RX/TX + retrans deltas)"
     echo "  flamegraph [-p <pid>] [-s <seconds>] generate CPU flame graph (default: sample 10s)"
     echo ""
-    echo "Options for analyze_log:"
-    echo "  Usage: -f <file> [-b <begin>] [-e <end>] [-t <type>] [-o <output>]"
-    echo "  Options:"
-    echo "    -f: log file name (required)"
-    echo "    -b: start time (optional)"
-    echo "    -e: end time (optional)"
-    echo "    -t: analysis type (plan or slow, default: slow)"
-    echo "    -o: output format (html, csv, txt, default: html)"
-    echo ""
-    echo "Options for asp:"
-    echo "  Usage: asp <type> -b <begin_time> -e <end_time>"
-    echo "  Types:"
-    echo "    cnt        active session count statistics"
-    echo "    event      event analysis"
-    echo "    waitchain  wait chain analysis"
-    echo "    sql        running sql"
-    echo "  Options:"
-    echo "    -b: start time (format: 'YYYY-MM-DD HH24:MI:SS')"
-    echo "    -e: end time (format: 'YYYY-MM-DD HH24:MI:SS')"
-    echo ""
-    echo "Options for dead_tups:"
-    echo "  Usage: [-d <database>] [-s <schema>] [-t <table>]"
-    echo "  Options:"
-    echo "    -d: database name"
-    echo "    -s: schema name"
-    echo "    -t: table name"
-    echo ""
-    echo "Options for kill:"
-    echo "  Usage: [OPTIONS] [SQL_OPTIONS]"
-    echo "  Options:"
-    echo "    -a              ALL Exclude background sessions"
-    echo "    -d appname      Filter by application name"
-    echo "    -i ip           Filter by client IP"
-    echo "    -p pid          Filter by session ID"
-    echo "    -q sqlid        Filter by unique SQL ID"
-    echo "    -s state        Filter by session state"
-    echo "    -t interval(s)  Filter transactions running longer than interval(seconds)"
-    echo "    -u name         Filter by username"
-    echo ""
-    echo "Options for priv:"
-    echo "  Usage: [-u <user>] [-d <database>] [-s <schema>] [-t <table>]"
-    echo "  Options:"
-    echo "    -u: user name"
-    echo "    -d: database name"
-    echo "    -s: schema name"
-    echo "    -t: table name"
-    echo ""
-    echo "Options for tabsize:"
-    echo "  Usage: -a <all> -n <top number>  or -d <database> -s <schema> -t <table> -n <top number>"
-    echo "  Options:"
-    echo "    -a: if need get tablesizes from all databases(optional, -a all)"
-    echo "    -d: database name (optinal)"
-    echo "    -s: schema name (optional)"
-    echo "    -t: table name (optional)"
-    echo "    -n: top number (required)"    
-    echo ""
-    echo "Options for tabstat:"
-    echo "  Usage: -d <database> -s <schema> -t <table>"
-    echo "  Options:"
-    echo "    -d: database name (default: postgres)"
-    echo "    -s: schema name (required)"
-    echo "    -t: table name (required)"
+    echo "Run 'vb_tool <command> -help' for detailed usage."
 }
 
 show_list() {
@@ -185,7 +124,8 @@ as_help() {
 
 recover_table_help() {
     echo "Options for recover_table:"
-    echo "  Usage: -d <database> -s <schema> -t <table> [-n <rows_per_page>]"
+    echo "  Usage: vb_tool recover_table -d <database> -s <schema> -t <table> [-n <rows_per_page>]"
+    echo "  Description: recover table data by ctid scan (skip corrupted rows)"
     echo "  Options:"
     echo "    -d: database name (required)"
     echo "    -s: schema name (required)"
@@ -196,7 +136,8 @@ recover_table_help() {
 
 analyze_log_help() {
     echo "Options for analyze_log:"
-    echo "  Usage: -f <file> [-b <begin>] [-e <end>] [-t <type>] [-o <output>]"
+    echo "  Usage: vb_tool analyze_log -f <file> [-b <begin>] [-e <end>] [-t <type>] [-o <output>]"
+    echo "  Description: analyze database logs (slow queries or plans)"
     echo "  Options:"
     echo "    -f: log file name (required)"
     echo "    -b: start time (optional)"
@@ -208,7 +149,8 @@ analyze_log_help() {
 
 asp_help() {
     echo "Options for asp:"
-    echo "  Usage: asp <type> -b <begin_time> -e <end_time>"
+    echo "  Usage: vb_tool asp <type> -b <begin_time> -e <end_time>"
+    echo "  Description: analyze active session profile"
     echo "  Types:"
     echo "    cnt        active session count statistics"
     echo "    event      event analysis"
@@ -227,7 +169,8 @@ planbyline_help() {
 }
 
 collect_log_help() {
-    echo "Usage: collect_log -b <begin_time> -e <end_time> [-n <max_xlog>] [-u <db_user>] [-g] [-z <backup_path>]"
+    echo "Usage: vb_tool collect_log -b <begin_time> -e <end_time> [-n <max_xlog>] [-u <db_user>] [-g] [-z <backup_path>]"
+    echo "Description: collect logs for cluster or single node"
     echo ""
     echo "Options:"
     echo "    -b    Begin time (format: 'YYYY-MM-DD HH:MM:SS'). Required."
@@ -278,7 +221,8 @@ workload_help() {
 
 sqlhc_help() {
     echo "Options for sqlhc:"
-    echo "  Usage: [-o] [-s <seconds>] <unique_id>"
+    echo "  Usage: vb_tool sqlhc [-o] [-s <seconds>] <unique_id>"
+    echo "  Description: display sql health check (performance plan & sqlstat & tabstat)"
     echo "  Options:"
     echo "    -o: write output "
     echo "    -s: duration threshold in seconds (default 300), use EXPLAIN if duration >= threshold"
@@ -287,9 +231,10 @@ sqlhc_help() {
 }
 
 ssh_setup_help() {
-    echo "Usage:"
+    echo "Usage: vb_tool ssh_setup (two modes)"
     echo "  Setup mode:   $0 ssh_setup -setup -user <username> -hosts \"host1 host2\" [options]"
     echo "  Verify mode:  $0 ssh_setup -verify -user <username> -hosts \"host1 host2\" [options]"
+    echo "  Description: setup SSH connectivity between hosts"
     echo ""
     echo "Common options:"
     echo "  -hosts \"<space separated hostlist>\""
@@ -307,7 +252,8 @@ ssh_setup_help() {
 
 dead_tups_help() {
     echo "Options for dead_tups:"
-    echo "  Usage: [-d <database>] [-s <schema>] [-t <table>]"
+    echo "  Usage: vb_tool dead_tups [-d <database>] [-s <schema>] [-t <table>]"
+    echo "  Description: display dead tuples information"
     echo "  Options:"
     echo "    -d: database name"
     echo "    -s: schema name"
@@ -317,7 +263,8 @@ dead_tups_help() {
 
 kill_help() {
     echo "Options for kill:"
-    echo "  Usage: [OPTIONS] [SQL_OPTIONS]"
+    echo "  Usage: vb_tool kill [OPTIONS] [SQL_OPTIONS]"
+    echo "  Description: terminate sessions by conditions"
     echo "  Options:"
     echo "    -a              ALL Exclude background sessions"
     echo "    -d appname      Filter by application name"
@@ -341,7 +288,8 @@ index_check_help() {
 
 priv_help() {
     echo "Options for priv:"
-    echo "  Usage: [-u <user>] [-d <database>] [-s <schema>] [-t <table>]"
+    echo "  Usage: vb_tool priv [-u <user>] [-d <database>] [-s <schema>] [-t <table>]"
+    echo "  Description: display privileges for users/tables/databases/schemas"
     echo "  Options:"
     echo "    -u: user name"
     echo "    -d: database name"
@@ -352,8 +300,9 @@ priv_help() {
 
 analyze_log_v2_help() {
     echo "Options for analyze_log_v2:"
-    echo "  Usage: -f <file> [-b <begin>] [-e <end>] [--diff <interval>] [-p <prefix>]"
-    echo "         [-d <days>] [-v] [-m <mode>] [-o <output>]"
+    echo "  Usage: vb_tool analyze_log_v2 -f <file> [-b <begin>] [-e <end>] [--diff <interval>]"
+    echo "         [-p <prefix>] [-d <days>] [-v] [-m <mode>] [-o <output>]"
+    echo "  Description: analyze database logs (slow queries) output html report (enhanced version)"
     echo "  Options:"
     echo "    -f: log file name (supports multiple files and wildcards; if omitted, auto-detect from database, analyze last 2 days)"
     echo "    -b: start time (optional, format: 'YYYY-MM-DD HH:MM:SS' or 'YYYY-MM-DD')"
@@ -392,7 +341,8 @@ analyze_log_v2_help() {
 
 tabsize_help() {
     echo "Options for tabsize:"
-    echo "  Usage: -a <all> -n <top number>  or -d <database> -s <schema> -t <table> -n <top number>"
+    echo "  Usage: vb_tool tabsize -a <all> -n <top number>  or -d <database> -s <schema> -t <table> -n <top number>"
+    echo "  Description: display top number size of tables (including all indexes)"
     echo "  Options:"
     echo "    -a: if need get tablesizes from all databases(optional, -a all)"
     echo "    -d: database name (optinal)"
@@ -404,7 +354,8 @@ tabsize_help() {
 
 tabstat_help() {
     echo "Options for tabstat:"
-    echo "  Usage: -d <database> -s <schema> -t <table>"
+    echo "  Usage: vb_tool tabstat -d <database> -s <schema> -t <table>"
+    echo "  Description: display table statistics"
     echo "  Options:"
     echo "    -d: database name (default: postgres)"
     echo "    -s: schema name (required)"
@@ -414,14 +365,14 @@ tabstat_help() {
 
 lockchain_help() {
     echo "Options for lockchain:"
-    echo "  Usage: None"
+    echo "  Usage: vb_tool lockchain"
     echo "  Description: display lock wait chain"
     echo ""
 }
 
 lock_details_help() {
     echo "Options for lock_details:"
-    echo "  Usage: None"
+    echo "  Usage: vb_tool lock_details"
     echo "  Description: display detailed lock information (holders & waiters)"
     echo ""
 }
@@ -471,21 +422,21 @@ memhist_help() {
 
 relxlog_help() {
     echo "Options for relxlog:"
-    echo "  Usage: [START_WAL] [END_WAL]"
+    echo "  Usage: vb_tool relxlog [START_WAL] [END_WAL]"
     echo "  Description: analyze WAL records for relations"
     echo ""
 }
 
 xlogcom_help() {
     echo "Options for xlogcom:"
-    echo "  Usage: [START_WAL] [END_WAL]"
+    echo "  Usage: vb_tool xlogcom [START_WAL] [END_WAL]"
     echo "  Description: analyze WAL commits per second"
     echo ""
 }
 
 repl_help() {
     echo "Options for repl:"
-    echo "  Usage: None"
+    echo "  Usage: vb_tool repl"
     echo "  Description: display Streaming Replication lag"
     echo ""
 }
