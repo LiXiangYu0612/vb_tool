@@ -23291,7 +23291,7 @@ case "$1" in
     -V|-v|version)
         echo "$VB_TOOL_VERSION"; exit 0;;
     as)
-        if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+        if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
             as_help
             exit 0
         fi
@@ -23306,7 +23306,7 @@ case "$1" in
         fi
         ;;
     sp)
-        if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+        if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
             sp_help
             exit 0
         fi
@@ -23321,7 +23321,7 @@ case "$1" in
         fi
         ;;
     st)
-        if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+        if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
             st_help
             exit 0
         fi
@@ -23336,7 +23336,7 @@ case "$1" in
         fi
         ;;
     slow)
-        if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+        if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
             slow_help
             exit 0
         fi
@@ -23346,7 +23346,7 @@ case "$1" in
         fi
         ;;
     xloghc)
-        if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+        if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
             xloghc_help
             exit 0
         fi
@@ -23356,7 +23356,7 @@ case "$1" in
         fi
         ;;
     analyze_log)
-        if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+        if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
             analyze_log_help
             exit 0
         fi
@@ -23371,7 +23371,7 @@ case "$1" in
         fi
         ;;
 	analyze_log_v2)
-        if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+        if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
             analyze_log_v2_help
             exit 0
         fi
@@ -23387,7 +23387,7 @@ case "$1" in
         fi
         ;;
     kill)
-        if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+        if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
             kill_help
             exit 0
         fi
@@ -23397,7 +23397,7 @@ case "$1" in
         fi
         ;;
     index_check)
-        if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+        if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
             index_check_help
             exit 0
         fi
@@ -23406,7 +23406,7 @@ case "$1" in
         fi
         ;;
     tabstat)
-        if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+        if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
             tabstat_help
             exit 0
         fi
@@ -23421,7 +23421,7 @@ case "$1" in
         fi
         ;;
     tabsize)
-        if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+        if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
             tabsize_help
             exit 0
         fi
@@ -23436,7 +23436,7 @@ case "$1" in
         fi
         ;;
     sqlstat)
-        if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+        if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
             sqlstat_help
             exit 0
         fi
@@ -23451,7 +23451,7 @@ case "$1" in
         fi
         ;;
     awr)
-        if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+        if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
             awr_help
             exit 0
         fi
@@ -23461,7 +23461,7 @@ case "$1" in
         fi
         ;;
     workload)
-    if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+    if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
         workload_help
         exit 0
     fi
@@ -23472,7 +23472,7 @@ case "$1" in
     fi
     ;;
     flamegraph)
-        if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+        if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
             flamegraph_help
             exit 0
         fi
@@ -23482,7 +23482,7 @@ case "$1" in
         fi
         ;;
     osw_netstat)
-        if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+        if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
             osw_netstat_help
             exit 0
         fi
@@ -23492,7 +23492,7 @@ case "$1" in
         fi
         ;;
     wdr_topsql)
-        if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+        if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
             wdr_topsql_help
             exit 0
         fi
@@ -23502,7 +23502,7 @@ case "$1" in
         fi
         ;;
     wdr_tabstat)
-        if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+        if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
             wdr_tabstat_help
             exit 0
         fi
@@ -23512,7 +23512,7 @@ case "$1" in
         fi
         ;;
     recover_table)
-        if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+        if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
             recover_table_help
             exit 0
         fi
@@ -23522,7 +23522,7 @@ case "$1" in
         fi
         ;;
     wdr_summary)
-        if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+        if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
             wdr_summary_help
             exit 0
         fi
@@ -23532,7 +23532,7 @@ case "$1" in
         fi
         ;;
     wdr_event)
-        if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+        if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
             wdr_event_help
             exit 0
         fi
@@ -23542,7 +23542,7 @@ case "$1" in
         fi
         ;;
     lockchain)
-        if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+        if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
             lockchain_help
             exit 0
         fi
@@ -23552,7 +23552,7 @@ case "$1" in
         fi
         ;;
     lock_details)
-        if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+        if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
             lock_details_help
             exit 0
         fi
@@ -23562,7 +23562,7 @@ case "$1" in
         fi
         ;;
     priv)
-        if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+        if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
             priv_help
             exit 0
         fi
@@ -23572,7 +23572,7 @@ case "$1" in
         fi
         ;;
     mem)
-        if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+        if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
             mem_help
             exit 0
         fi
@@ -23582,7 +23582,7 @@ case "$1" in
         fi
         ;;
     net)
-        if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+        if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
             net_help
             exit 0
         fi
@@ -23592,7 +23592,7 @@ case "$1" in
         fi
         ;;
     tps)
-        if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+        if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
             tps_help
             exit 0
         fi
@@ -23602,7 +23602,7 @@ case "$1" in
         fi
         ;;
     repl)
-        if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+        if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
             repl_help
             exit 0
         fi
@@ -23612,7 +23612,7 @@ case "$1" in
         fi
         ;;
     relxlog)
-        if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+        if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
             relxlog_help
             exit 0
         fi
@@ -23627,7 +23627,7 @@ case "$1" in
         fi
         ;;
     xlogcom)
-        if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+        if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
             xlogcom_help
             exit 0
         fi
@@ -23642,7 +23642,7 @@ case "$1" in
         fi
         ;;
     memhist)
-        if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+        if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
             memhist_help
             exit 0
         fi
@@ -23652,7 +23652,7 @@ case "$1" in
         fi
         ;;
     asp)
-        if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+        if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
             asp_help
             exit 0
         fi
@@ -23667,7 +23667,7 @@ case "$1" in
         fi
         ;;
       sqltext)
-            if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+            if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
                 sqltext_help
                 exit 0
             fi
@@ -23681,7 +23681,7 @@ case "$1" in
             fi
             ;;
 	    sqlhc)
-            if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+            if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
                 sqlhc_help
                 exit 0
             fi
@@ -23695,7 +23695,7 @@ case "$1" in
             fi
             ;;
     dead_tups)
-        if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+        if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
             dead_tups_help
             exit 0
         fi
@@ -23708,10 +23708,15 @@ case "$1" in
         show_help
         ;;
     list)
+        if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
+            echo "Usage: vb_tool list"
+            echo "Description: list all commands with one-line descriptions"
+            exit 0
+        fi
         show_list
         ;;
     redo)
-        if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+        if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
             redo_help
             exit 0
         fi
@@ -23721,7 +23726,7 @@ case "$1" in
         fi
         ;;
     ssh_setup)
-        if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+        if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
             ssh_setup_help
             exit 0
         fi
@@ -23731,7 +23736,7 @@ case "$1" in
         fi
         ;;
     lsds)
-        if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+        if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
             echo "Usage: vb_tool lsds [--raw]"
             echo "Description: list block devices and metadata"
             echo "Options: --raw  pipe-separated raw output (one line per device)"
@@ -23740,7 +23745,7 @@ case "$1" in
         run_lsds "$@"
         ;;
     planbyline)
-        if [[ "$2" == "-help" || "$2" == "--help" || -z "$2" ]]; then
+        if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" || -z "$2" ]]; then
             planbyline_help
             exit 0
         fi
@@ -23750,14 +23755,14 @@ case "$1" in
         fi
         ;;
     osw)
-        if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+        if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
             osw_help
             exit 0
         fi
         run_osw "${@:2}"
         ;;
     collect_log)
-        if [[ "$2" == "-help" || "$2" == "--help" ]]; then
+        if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
             collect_log_help
             exit 0
         fi
