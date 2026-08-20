@@ -415,6 +415,9 @@ lockchain_help() {
     echo "Options for lockchain:"
     echo "  Usage: None"
     echo "  Description: display lock wait chain"
+    echo "  state labels: 2pc = holder is a prepared transaction (no live"
+    echo "                 backend); gone = holder has no pg_stat_activity row"
+    echo "                 (just exited, or hidden by privilege)"
     echo ""
 }
 
@@ -4505,47 +4508,52 @@ run_lockchain() {
 \echo 'lock chain analysis'
 \echo '=========================='
 WITH RECURSIVE l AS (
-  SELECT sessionid, locktype, granted, virtualtransaction,
-    ROW(locktype,database,relation,page,tuple,virtualxid,transactionid,classid,objid,objsubid) obj
+  SELECT sessionid, pid, locktype, granted, virtualtransaction,
+    ROW(locktype,database,relation,page,tuple,virtualxid,transactionid,classid,objid,objsubid) obj,
+    /* structural 2PC signature (VastBase): lock row with no live backend --
+       pid IS NULL and vxid '-1/<xid>' (InvalidBackendId, xid parked in lxid).
+       Live sessions always carry pid; sessionid alone is unreliable (thread
+       id, reused after the prepared session exits). */
+    CASE WHEN pid IS NULL AND virtualtransaction LIKE '-1/%'
+         THEN 'P:' || split_part(virtualtransaction, '/', 2)
+         ELSE COALESCE(sessionid::text, 'pid:' || pid::text) END AS holder
   FROM pg_locks
 ), pairs AS (
-  SELECT DISTINCT w.sessionid waiter, l.sessionid locker, l.obj::text
+  SELECT DISTINCT w.holder waiter, l.holder locker, l.obj::text
   FROM l w
-  JOIN l ON l.obj IS NOT DISTINCT FROM w.obj AND l.locktype=w.locktype 
-        AND NOT l.sessionid=w.sessionid AND l.granted
+  JOIN l ON l.obj IS NOT DISTINCT FROM w.obj AND l.locktype=w.locktype
+        AND l.holder IS NOT NULL AND w.holder IS NOT NULL
+        AND l.holder IS DISTINCT FROM w.holder AND l.granted
   WHERE NOT w.granted
 ), tree AS (
-  SELECT l.locker sessionid, l.locker root, NULL::text obj, 0 lvl, 
-         locker::text w_chain, array_agg(l.locker) OVER () all_pids
+  SELECT l.locker holder, l.locker root, NULL::text obj, 0 lvl,
+         l.locker w_chain, array_agg(l.locker) OVER () all_pids
   FROM ( SELECT DISTINCT locker FROM pairs l WHERE NOT EXISTS (SELECT 1 FROM pairs WHERE waiter=l.locker) ) l
   UNION ALL
-  SELECT w.waiter, tree.root, w.obj, tree.lvl+1, 
+  SELECT w.waiter, tree.root, w.obj, tree.lvl+1,
          tree.w_chain||'.'||w.waiter, all_pids || array_agg(w.waiter) OVER ()
-  FROM tree JOIN pairs w ON tree.sessionid=w.locker AND NOT w.waiter = ANY (all_pids)
+  FROM tree JOIN pairs w ON tree.holder=w.locker AND NOT w.waiter = ANY (all_pids)
 )
 SELECT
   (clock_timestamp() - COALESCE(a.xact_start, px.prepared))::interval(3) AS ts_age,
-  COALESCE(replace(a.state, 'idle in transaction', 'idletx'), '2pc') AS state,
+  CASE WHEN tree.holder LIKE 'P:%' THEN '2pc'
+       WHEN a.sessionid IS NOT NULL THEN COALESCE(replace(a.state, 'idle in transaction', 'idletx'), 'unknown')
+       ELSE 'gone' END AS state,
   (clock_timestamp() - COALESCE(a.state_change, px.prepared))::interval(3) AS change_age,
   COALESCE(a.datname, px.database) AS datname,
-  tree.sessionid,
+  CASE WHEN tree.holder LIKE 'P:%' THEN NULL ELSE tree.holder END AS sessionid,
   COALESCE(a.usename, px.owner) AS usename,
   a.client_addr,
   lvl,
-  (SELECT virtualtransaction FROM pg_locks WHERE sessionid=tree.sessionid AND granted LIMIT 1) AS virtualtransaction,
+  (SELECT l2.virtualtransaction FROM l l2 WHERE l2.holder = tree.holder AND l2.granted ORDER BY 1 LIMIT 1) AS virtualtransaction,
   (SELECT count(*) FROM tree p WHERE p.w_chain ~ ('^'||tree.w_chain) AND NOT p.w_chain=tree.w_chain) blocked,
   COALESCE(
     substr(REGEXP_REPLACE(REGEXP_REPLACE(a.query, '(\r|\n)+', ' '),' {2,}', ' '), 1, 50),
-    '[prepared xact] ' || px.gid
+    CASE WHEN tree.holder LIKE 'P:%' THEN '[prepared xact] ' || px.gid END
   ) AS query
 FROM tree
-LEFT JOIN pg_stat_activity a ON a.sessionid = tree.sessionid
-LEFT JOIN pg_prepared_xacts px
-  ON a.sessionid IS NULL
-  AND split_part(
-        (SELECT virtualtransaction FROM pg_locks WHERE sessionid=tree.sessionid AND granted LIMIT 1),
-        '/', 2
-      ) = px.transaction::text
+LEFT JOIN pg_stat_activity a ON a.sessionid::text = tree.holder
+LEFT JOIN pg_prepared_xacts px ON tree.holder = 'P:' || px.transaction::text
 ORDER BY w_chain;
 EOF
 }
