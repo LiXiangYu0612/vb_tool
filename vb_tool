@@ -19421,6 +19421,11 @@ ORDER BY blocked DESC, age_s DESC LIMIT 5;
 select type, event, wait, total_wait_time
 from dbe_perf.wait_events
 where wait > 0
+  -- 'wait cmd' (idle: waiting for the client's next command) dominates the
+  -- cumulative totals and squeezes real waits out of the top-12; 'none' =
+  -- running. Busy STATUS rows (flush data / HashAgg / Sort ...) are NOT idle
+  -- and stay visible.
+  and event not in ('none', 'wait cmd')
 order by total_wait_time desc limit 12;
 \echo ===LTX
 select a.sessionid::text, coalesce(a.usename,'-'), coalesce(a.datname,'-'),
