@@ -1,13 +1,13 @@
 #!/bin/bash
 #--------------------------------------------------------------------------------
 #-- File name:   vb_tool
-#-- Version  ：  v1.4.20
-#-- Commit at：  2026-08-21 15:00:00
+#-- Version  ：  v2.0.0
+#-- Commit at：  2026-08-21 22:46:15
 #-- Purpose:     Vastbase Script Tool
 #-- Author:      MVS & Second-line Team 
 #--------------------------------------------------------------------------------
 set -o pipefail
-VB_TOOL_VERSION="v1.4.20"
+VB_TOOL_VERSION="v2.0.0"
 show_help() {
     echo "Vastbase Script Tool (vb_tool)"
     echo ""
@@ -69,7 +69,7 @@ show_help() {
 }
 
 show_list() {
-    echo "Vastbase Script Tool (vb_tool) v1.4.20"
+    echo "Vastbase Script Tool (vb_tool) v2.0.0"
     echo ""
     echo "Usage Summary:"
     echo "  vb_tool <command> [options]"
@@ -19277,10 +19277,12 @@ _vtop_print_os() { # oratop-style coded-header sections; reads caller-scope vars
 }
 
 _vtop_fmt_rate() { awk -v v="$1" 'BEGIN{
+    if (v<0) v=0
     if (v<1000)         printf "%d", v
     else if (v<1000000) printf "%.1fK", v/1000
     else                printf "%.1fM", v/1000000}'; }
 _vtop_fmt_b() { awk -v v="$1" 'BEGIN{
+    if (v<0) v=0
     if (v<1024)            printf "%dB", v
     else if (v<1048576)    printf "%.1fKB", v/1024
     else if (v<1073741824) printf "%.1fMB", v/1048576
@@ -19448,7 +19450,7 @@ join pg_stat_activity a on a.sessionid::text = s.sid;"
     local prev_xc="" prev_xr="" prev_br="" prev_bh="" prev_tb="" prev_lsn="" ist_txt=
 
     # ---- sampling loop ----
-    local t0 t1 d0 d1 c0 c1 n0 n1 dt key wtxt
+    local t0 t1 d0 d1 c0 c1 n0 n1 dt key wtxt rrc
     local a_us a_sy a_id a_wa a_st
     local d_rops d_rmb d_rms d_wops d_wmb d_wms d_util n_rx n_tx
     local mt ma mst msf
@@ -19462,7 +19464,13 @@ join pg_stat_activity a on a.sessionid::text = s.sid;"
             sleep 1; first=0          # first frame lands fast on a 1s mini-window
         else
             IFS= read -r -t "$interval" -n 1 key
+            rrc=$?
             [ "$key" = "q" ] && break
+            # stdin at EOF (nohup / </dev/null / scheduler): read returns 1
+            # IMMEDIATELY instead of waiting. Without this guard the loop spins
+            # at full speed hammering the DB (refresh timeout returns >128,
+            # EOF returns 1 -- only EOF needs the manual sleep).
+            [ "$rrc" -eq 1 ] && sleep "$interval"
         fi
         t1=$(date +%s%3N); d1=$(_vtop_diskstats "$dev"); c1=$(_vtop_cpustat); n1=$(_vtop_net)
         dt=$(( t1 - t0 )); [ "$dt" -le 0 ] && dt=1
@@ -19594,7 +19602,8 @@ limit ${topn};"
                     HDR)  IFS='|' read -r h_node h_ver h_up <<< "$line";;
                     SESS) IFS='|' read -r s_tot s_act s_iit s_idle s_ltx <<< "$line";;
                     ISTAT) IFS='|' read -r i_xc i_xr i_br i_bh i_tb i_lsn <<< "$line"
-                          if [ -n "$prev_lsn" ] && [ "$dt" -gt 0 ] 2>/dev/null; then
+                          # counters restart at 0 on instance restart: negative deltas -> treat as first frame
+                          if [ -n "$prev_lsn" ] && [ "$dt" -gt 0 ] && [ "$i_lsn" -ge "$prev_lsn" ] 2>/dev/null; then
                               _tps=$(( (i_xc - prev_xc + i_xr - prev_xr) * 1000 / dt ))
                               _rb=$(( (i_xr - prev_xr) * 1000 / dt ))
                               _lg=$(( (i_br - prev_br + i_bh - prev_bh) * 1000 / dt * 8192 ))
@@ -19924,20 +19933,22 @@ PSQL
     elif [ "$(wc -l < "$dbd/replication_slots.csv")" -le 1 ]; then
         echo "null" >> "$dbd/replication_slots.csv"
     fi
-    # ---- object stats across all databases (cumulative counters; renderer computes end-begin) ----
+    # ---- object stats across all databases (cumulative counters; renderer computes end-begin).
+    # Per-db psql carries the SAME connect/statement timeouts as the rest: a hung
+    # database or a huge pg_class must not stretch one create into hours. ----
     local _odbs _odb
     _odbs=$(PGCONNECT_TIMEOUT=$_ct PGOPTIONS="$_st" psql -d postgres -tAc "select datname from pg_database where datallowconn and not datistemplate order by 1" 2>/dev/null)
     { echo "dbname,schema,object,seq_scan,seq_tup_read,idx_scan,idx_tup_fetch,n_tup_ins,n_tup_upd,n_tup_del,n_tup_hot_upd,n_live_tup,n_dead_tup"
       for _odb in $_odbs; do
-          psql -d "$_odb" -tAF',' -c "select '$_odb',schemaname,relname,coalesce(seq_scan,0),coalesce(seq_tup_read,0),coalesce(idx_scan,0),coalesce(idx_tup_fetch,0),coalesce(n_tup_ins,0),coalesce(n_tup_upd,0),coalesce(n_tup_del,0),coalesce(n_tup_hot_upd,0),coalesce(n_live_tup,0),coalesce(n_dead_tup,0) from pg_stat_user_tables" 2>/dev/null
+          PGCONNECT_TIMEOUT=$_ct PGOPTIONS="$_st" psql -d "$_odb" -tAF',' -c "select '$_odb',schemaname,relname,coalesce(seq_scan,0),coalesce(seq_tup_read,0),coalesce(idx_scan,0),coalesce(idx_tup_fetch,0),coalesce(n_tup_ins,0),coalesce(n_tup_upd,0),coalesce(n_tup_del,0),coalesce(n_tup_hot_upd,0),coalesce(n_live_tup,0),coalesce(n_dead_tup,0) from pg_stat_user_tables" 2>/dev/null
       done; } > "$dbd/object_tables.csv"
     { echo "dbname,schema,object,index,idx_scan,idx_tup_read,idx_tup_fetch"
       for _odb in $_odbs; do
-          psql -d "$_odb" -tAF',' -c "select '$_odb',schemaname,relname,indexrelname,coalesce(idx_scan,0),coalesce(idx_tup_read,0),coalesce(idx_tup_fetch,0) from pg_stat_user_indexes" 2>/dev/null
+          PGCONNECT_TIMEOUT=$_ct PGOPTIONS="$_st" psql -d "$_odb" -tAF',' -c "select '$_odb',schemaname,relname,indexrelname,coalesce(idx_scan,0),coalesce(idx_tup_read,0),coalesce(idx_tup_fetch,0) from pg_stat_user_indexes" 2>/dev/null
       done; } > "$dbd/object_indexes.csv"
     { echo "dbname,schema,object,table_age,relpages,reltuples,n_dml_tup,n_live_tup,n_dead_tup"
       for _odb in $_odbs; do
-          psql -d "$_odb" -tAF',' -c "select '$_odb',n.nspname,c.relname,age(c.relfrozenxid64),c.relpages,c.reltuples,coalesce(pg_stat_get_tuples_changed(c.oid),0),coalesce(pg_stat_get_live_tuples(c.oid),0),coalesce(pg_stat_get_dead_tuples(c.oid),0) from pg_class c left join pg_namespace n on n.oid=c.relnamespace where c.relkind in ('r','t','m')" 2>/dev/null
+          PGCONNECT_TIMEOUT=$_ct PGOPTIONS="$_st" psql -d "$_odb" -tAF',' -c "select '$_odb',n.nspname,c.relname,age(c.relfrozenxid64),c.relpages,c.reltuples,coalesce(pg_stat_get_tuples_changed(c.oid),0),coalesce(pg_stat_get_live_tuples(c.oid),0),coalesce(pg_stat_get_dead_tuples(c.oid),0) from pg_class c left join pg_namespace n on n.oid=c.relnamespace where c.relkind in ('r','t','m')" 2>/dev/null
       done; } > "$dbd/object_dead.csv"
     # compress all db csv in place; renderer reads .csv.gz with plain-text fallback
     gzip -f "$dbd"/*.csv 2>/dev/null
@@ -19983,6 +19994,7 @@ print(json.dumps({
 # _awr_render <args...> -- write the python renderer to a temp file and run it.
 # python body is the verbatim compare_render.py; quoted heredoc => no shell expansion.
 _awr_render() {
+    umask 077   # reports carry SQL literals: same 0600 rule as the snapshots
     local tmp; tmp=$(mktemp /tmp/vb_tool_awr_render.XXXXXX.py) 2>/dev/null
     if [ -z "$tmp" ]; then echo "  [ERROR] mktemp failed" >&2; return 1; fi
     cat > "$tmp" <<'VB_BL_COMPARE_PY'
@@ -20729,7 +20741,9 @@ def platform_label(dmi_txt, cpuinfo_txt):
 
     def _tag(lbl):
         return "%s / %s" % (_arch, lbl) if _arch else lbl
-    hay = " ".join(dmi.get(k, "") for k in ("vendor", "product")).lower()
+    # .strip() matters: joining two empty strings yields " " (truthy), which
+    # would fall into the Physical branch and never reach the cpuinfo fallback
+    hay = " ".join(dmi.get(k, "") for k in ("vendor", "product")).strip().lower()
     if hay:
         for kw in VM_KEYWORDS:
             if re.search(r'\b' + re.escape(kw) + r'\b', hay):
@@ -23195,6 +23209,7 @@ VB_BL_COMPARE_PY
 # Always returns 0 (cron-friendly; failures are data, not exit codes).
 _awr_repl_sample() {
     local root; root=$(_awr_root)
+    umask 077   # per-minute logs carry standby addrs/LSNs: 0600 like snapshots
     mkdir -p "$root" 2>/dev/null || return 0
     local f ts out sf
     f="$root/repl_$(date +%Y%m%d).log"
@@ -23235,6 +23250,7 @@ _awr_repl_sample() {
 # _awr_snap [--root <dir>]  -- allocate snap_id, collect, write meta. The core
 # primitive used by both manual `create` and the cron-fired `create`.
 _awr_snap() {
+    umask 077   # snapshots carry SQL literals: force 0700/0600 regardless of caller umask
     local root_override=""
     if [ "${1:-}" = "--root" ]; then root_override="${2:-}"; shift 2; fi
     local root; root="${root_override:-$(_awr_root)}"
@@ -23607,7 +23623,18 @@ for d in sorted(glob.glob(os.path.join(root, "snap_*"))):
     try:
         tep = int(time.mktime(time.strptime(ts, "%Y-%m-%d %H:%M:%S")))
     except ValueError:
-        print("WARN snap %s has unparseable ts %r, skipped" % (os.path.basename(d), ts), file=sys.stderr)
+        # no/unreadable meta.json = create died mid-collection (kill/reboot):
+        # judge by the DIRECTORY mtime so orphans cannot accumulate forever
+        # (a live in-flight create's dir is minutes old, never past until_ep)
+        try:
+            m_ep = int(os.path.getmtime(d))
+        except OSError:
+            m_ep = None
+        if m_ep is not None and m_ep < until_ep:
+            print("WARN orphan snap %s (no parseable meta) deleted by dir mtime" % os.path.basename(d), file=sys.stderr)
+            print(d)
+        else:
+            print("WARN snap %s has unparseable ts %r, skipped" % (os.path.basename(d), ts), file=sys.stderr)
         continue
     if tep < until_ep:
         print(d)
