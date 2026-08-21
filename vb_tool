@@ -2,7 +2,7 @@
 #--------------------------------------------------------------------------------
 #-- File name:   vb_tool
 #-- Version  ：  v1.4.19
-#-- Commit at：  2026-08-20 22:40:00
+#-- Commit at：  2026-05-25 19:00:00
 #-- Purpose:     Vastbase Script Tool
 #-- Author:      MVS & Second-line Team 
 #--------------------------------------------------------------------------------
@@ -968,7 +968,7 @@ PYTHON_EOF
     fi
 
     python3 "$TEMP_SCRIPT" "$@"
-    
+
     rm -f "$TEMP_SCRIPT"
 }
 
@@ -2939,7 +2939,6 @@ osw_netstat_help() {
 
 # _osw_netstat_one <interface> <file>  -- analyze ONE oswnetstat archive file.
 # Prints the delta table for the given interface. Returns 1 on format/interface error.
-
 _osw_netstat_one() {
     local INTERFACE="$1"
     local LOG_FILE="$2"
@@ -10134,7 +10133,7 @@ run_sqltext() {
     local unique_id="$1"
 
     local gauss_log
-    gauss_log=${GAUSSLOG:-}
+    gauss_log=$(env | grep -iw GAUSSLOG | cut -d'=' -f2)
     if [[ -z "$gauss_log" ]]; then
         echo "Error: not found GAUSSLOG path" >&2
         return 1
@@ -17997,7 +17996,7 @@ local output_to_file=0
     fi
 
     local gauss_log
-    gauss_log=${GAUSSLOG:-}
+    gauss_log=$(env | grep -iw GAUSSLOG | cut -d'=' -f2)
     if [[ -z "$gauss_log" ]]; then
         echo "Error: not found GAUSSLOG path" >&2
         return 1
@@ -19159,6 +19158,9 @@ ORDER BY CASE WHEN short_desc LIKE '%planner%' THEN 'planner' ELSE short_desc EN
 PSQLEOF
 }
 
+
+
+
 # ================== vtop: oratop-style real-time view ==================
 vtop_help() {
     echo "Options for vtop:"
@@ -19170,7 +19172,7 @@ vtop_help() {
                (grouped by sqlid, ranked by real CPU%) / wait distribution"
     echo "  -P <port>: database port (default: current \$PGPORT)"
     echo "    -i <sec>:   refresh interval, 1-60 (default 5)"
-    echo "    -n <topn>:  top session rows, 1-50 (default 15)"
+    echo "    -n <topn>:  top session rows, 1-50 (default 10)"
     echo "    --once:     print one frame and exit (non-interactive)"
     echo "    keys:       q = quit; any other key = refresh immediately"
     echo ""
@@ -19260,18 +19262,38 @@ _vtop_print_os() { # oratop-style coded-header sections; reads caller-scope vars
         local dpar dsz drot dsch dqd
         read -r dpar dsz drot dsch dqd <<< "$devinfo"
         printf 'DSK     %s @ %s   [%s %s  rot:%s  sched:%s  qd:%s]\n' "$dev" "$datadir" "$dpar" "$dsz" "$drot" "$dsch" "$dqd"
-        printf '        %5s %6s %6s | %5s %6s %6s %5s\n' riops rMB/s ravms wiops wMB/s wavms util
-        printf '        ----- ------ ------ | ----- ------ ------ -----\n'
+        printf '        %5s %6s %6s  %5s %6s %6s %5s\n' riops rMB/s ravms wiops wMB/s wavms util
+        printf '        ----- ------ ------  ----- ------ ------ -----\n'
         local dsk_col=""
         if awk -v u="$d_util" -v r="$d_rms" -v w="$d_wms" 'BEGIN{exit !(u>=90 || r>20 || w>20)}'; then dsk_col=$c_red
         elif awk -v u="$d_util" 'BEGIN{exit !(u>=70)}'; then dsk_col=$c_ylw; fi
         printf '%s' "$dsk_col"
-        printf '        %5s %6.1f %6.1f | %5s %6.1f %6.1f %5.0f\n' \
+        printf '        %5s %6.1f %6.1f  %5s %6.1f %6.1f %5.0f\n' \
             "$d_rops" "$d_rmb" "$d_rms" "$d_wops" "$d_wmb" "$d_wms" "$d_util"
         printf '%s' "$c_off"
     else
         printf 'DSK     (cannot map %s to a /proc/diskstats device)\n' "$datadir"
     fi
+}
+
+_vtop_fmt_rate() { awk -v v="$1" 'BEGIN{
+    if (v<1000)         printf "%d", v
+    else if (v<1000000) printf "%.1fK", v/1000
+    else                printf "%.1fM", v/1000000}'; }
+_vtop_fmt_b() { awk -v v="$1" 'BEGIN{
+    if (v<1024)            printf "%dB", v
+    else if (v<1048576)    printf "%.1fKB", v/1024
+    else if (v<1073741824) printf "%.1fMB", v/1048576
+    else                   printf "%.1fGB", v/1073741824}'; }
+
+_vtop_fmt_us() { # microseconds -> oratop style: u / m(ms) / s / M(min) / h
+    awk -v u="$1" 'BEGIN{
+        if (u<0) u=0
+        if (u<1000)            printf "%dus", u
+        else if (u<1000000)    printf "%.0fms", u/1000
+        else if (u<60000000)   printf "%.1fs", u/1000000
+        else if (u<3600000000) printf "%.1fmin", u/60000000
+        else                   printf "%.1fh", u/3600000000}'
 }
 
 _vtop_rule_cols() { # $1=indent rest=col widths -> per-column dashed ruler
@@ -19288,7 +19310,7 @@ _vtop_hum() { # kB -> human
 }
 
 run_vtop() {
-    local interval=5 topn=15 once=0
+    local interval=5 topn=10 once=0
     while [ $# -gt 0 ]; do
         case "$1" in
             -i)       interval="${2:-}"; shift 2;;
@@ -19317,6 +19339,12 @@ run_vtop() {
     devinfo=""
     [ -n "$dev" ] && devinfo=$(_vtop_devinfo "$dev")
     cores=$(nproc 2>/dev/null || grep -c ^processor /proc/cpuinfo)
+    local l_soc l_cor l_thr
+    l_soc=$(lscpu 2>/dev/null | awk -F: '$1=="Socket(s)"{gsub(/^[ \t]+/,"",$2); print $2+0}')
+    l_cor=$(lscpu 2>/dev/null | awk -F: '$1=="Core(s) per socket"{gsub(/^[ \t]+/,"",$2); print $2+0}')
+    l_thr=$(lscpu 2>/dev/null | awk -F: '$1=="Thread(s) per core"{gsub(/^[ \t]+/,"",$2); print $2+0}')
+    l_soc=${l_soc:-1}; l_cor=${l_cor:-1}; l_thr=${l_thr:-1}
+    cores="${l_soc} sockets / $((l_soc*l_cor)) cores / ${l_thr} threads/core / $cores lcpu"
     local pm_pid=""
     [ -f "$datadir/postmaster.pid" ] && pm_pid=$(head -1 "$datadir/postmaster.pid" 2>/dev/null | tr -d ' ')
     local VT_SQL="\\echo ===HDR
@@ -19331,6 +19359,11 @@ select (select count(*) from pg_stat_activity),
        (select count(*) from pg_stat_activity where state in ('active','idle in transaction')
          and now()-xact_start>interval '60 seconds'
          and coalesce(application_name,'') not in ('JobScheduler','Asp','workload','WdrSnapshot'));
+\echo ===ISTAT
+select coalesce(sum(xact_commit),0), coalesce(sum(xact_rollback),0),
+       coalesce(sum(blks_read),0), coalesce(sum(blks_hit),0), coalesce(sum(temp_bytes),0),
+       pg_xlog_location_diff(pg_current_xlog_location(), '0/0')::bigint
+from pg_stat_database;
 \\echo ===DBM
 select round(coalesce(max(case when memorytype='process_used_memory' then memorymbytes end),0)/1024.0,1),
        round(coalesce(max(case when memorytype='max_process_memory' then memorymbytes end),0)/1024.0,1),
@@ -19344,29 +19377,49 @@ from dbe_perf.memory_node_detail;
 select string_agg(contextname||' '||pg_size_pretty(t.totalsize::numeric)||' ('||t.cnt||')', ' | ' order by t.totalsize desc)
 from (select contextname, count(*) cnt, sum(totalsize) totalsize from dbe_perf.session_memory_detail group by contextname order by totalsize desc limit 3) t;
 \echo ===BLK
-select b.sessionid::text, coalesce(a.usename,'-'), count(*) cnt
-from dbe_perf.thread_wait_status w
-join dbe_perf.thread_wait_status b on w.block_sessionid = b.sessionid
-left join pg_stat_activity a on a.sessionid = b.sessionid
-where b.block_sessionid is null
-group by b.sessionid, coalesce(a.usename,'-')
-order by cnt desc limit 3;
+WITH RECURSIVE l AS (
+  SELECT sessionid, pid, locktype, granted, virtualtransaction,
+    ROW(locktype,database,relation,page,tuple,virtualxid,transactionid,classid,objid,objsubid) obj,
+    CASE WHEN pid IS NULL AND virtualtransaction LIKE '-1/%'
+         THEN 'P:' || split_part(virtualtransaction, '/', 2)
+         ELSE COALESCE(sessionid::text, 'pid:' || pid::text) END AS holder
+  FROM pg_locks
+), pairs AS (
+  SELECT DISTINCT w.holder waiter, l.holder locker, l.obj::text
+  FROM l w
+  JOIN l ON l.obj IS NOT DISTINCT FROM w.obj AND l.locktype=w.locktype
+        AND l.holder IS NOT NULL AND w.holder IS NOT NULL
+        AND l.holder IS DISTINCT FROM w.holder AND l.granted
+  WHERE NOT w.granted
+), tree AS (
+  SELECT l.locker holder, l.locker root, NULL::text obj, 0 lvl,
+         l.locker w_chain, array_agg(l.locker) OVER () all_pids
+  FROM ( SELECT DISTINCT locker FROM pairs l WHERE NOT EXISTS (SELECT 1 FROM pairs WHERE waiter=l.locker) ) l
+  UNION ALL
+  SELECT w.waiter, tree.root, w.obj, tree.lvl+1,
+         tree.w_chain||'.'||w.waiter, all_pids || array_agg(w.waiter) OVER ()
+  FROM tree JOIN pairs w ON tree.holder=w.locker AND NOT w.waiter = ANY (all_pids)
+)
+SELECT lvl,
+  CASE WHEN tree.holder LIKE 'P:%' THEN '2pc'
+       WHEN a.sessionid IS NOT NULL THEN COALESCE(replace(a.state,'idle in transaction','idletx'),'unknown')
+       ELSE 'gone' END AS state,
+  tree.holder AS sid,
+  COALESCE(a.usename, px.owner, '-') AS usename,
+  (SELECT count(*) FROM tree p WHERE p.w_chain ~ ('^'||tree.w_chain) AND NOT p.w_chain=tree.w_chain) blocked,
+  extract(epoch from (clock_timestamp() - COALESCE(a.xact_start, px.prepared)))::bigint age_s,
+  COALESCE(substr(regexp_replace(regexp_replace(a.query,'(\r|\n)+',' '),' {2,}',' '),1,40),
+           CASE WHEN tree.holder LIKE 'P:%' THEN '[prepared] '||px.gid END) AS query
+FROM tree
+LEFT JOIN pg_stat_activity a ON a.sessionid::text = tree.holder
+LEFT JOIN pg_prepared_xacts px ON tree.holder = 'P:' || px.transaction::text
+WHERE lvl = 0
+ORDER BY blocked DESC, age_s DESC LIMIT 5;
 \\echo ===WAIT
-select class, cnt from (
-  select CASE
-           when w.wait_event like 'LWLock%' then 'LWLock'
-           when lower(coalesce(w.wait_event,'')) like '%lock%' then 'Lock'
-           when coalesce(w.wait_event,'') = 'none' then 'CPU'
-           when coalesce(w.wait_event,'') = 'wait cmd' then 'Client'
-           when lower(coalesce(w.wait_event,'')) like '%read%'
-                or lower(coalesce(w.wait_event,'')) like '%write%'
-                or lower(coalesce(w.wait_event,'')) like '%io%' then 'IO'
-           else 'Other' end class,
-         count(*) cnt
-  from pg_stat_activity a
-  left join dbe_perf.thread_wait_status w on a.sessionid = w.sessionid
-  where a.state='active' group by class) t
-order by cnt desc;
+select type, event, wait, total_wait_time
+from dbe_perf.wait_events
+where wait > 0
+order by total_wait_time desc limit 12;
 \echo ===LTX
 select a.sessionid::text, coalesce(a.usename,'-'), coalesce(a.datname,'-'),
        decode(a.state,'active','act','idle in transaction','idle-tx','?') st,
@@ -19383,13 +19436,15 @@ order by age_s desc limit 3;
 select a.sessionid::text, coalesce(a.usename,'-'), coalesce(a.datname,'-'),
        decode(a.state,'active','act','idle in transaction','idle-tx','idle','idle','?') st,
        (select pg_size_pretty(sum(t2.totalsize)::numeric) from gs_session_memory_detail t2 where split_part(t2.sessid,'.',2)=a.sessionid::text),
-       coalesce(substr(regexp_replace(regexp_replace(a.query,'(\r|\n)+',' '),' {2,}',' '),1,40),'-')
+       coalesce(substr(regexp_replace(regexp_replace(a.query,'(\r|\n)+',' '),' {2,}',' '),1,68),'-')
 from (select split_part(sessid,'.',2) sid from gs_session_memory_detail group by split_part(sessid,'.',2) order by sum(totalsize) desc limit 5) s
 join pg_stat_activity a on a.sessionid::text = s.sid;"
 
     local c_red="" c_ylw="" c_off=""
     if [ -t 1 ]; then c_red=$'\033[31m'; c_ylw=$'\033[33m'; c_off=$'\033[0m'; fi
     local _vtop_f; _vtop_f=$(mktemp /tmp/vbtop_frame.XXXXXX)
+    declare -A _vw_prev _vt_prev
+    local prev_xc="" prev_xr="" prev_br="" prev_bh="" prev_tb="" prev_lsn="" ist_txt=
 
     # ---- sampling loop ----
     local t0 t1 d0 d1 c0 c1 n0 n1 dt key wtxt
@@ -19448,7 +19503,7 @@ from (
     select coalesce(a.unique_sql_id::text,'pid:'||a.pid::text) k,
            case when coalesce(w.wait_event,'-') = 'none' then 1 else 0 end rn,
            extract(epoch from (now()-a.query_start))::bigint et,
-           coalesce(substr(regexp_replace(regexp_replace(a.query,'(\r|\n)+',' '),' {2,}',' '),1,44),'-') sql
+           coalesce(substr(regexp_replace(regexp_replace(a.query,'(\r|\n)+',' '),' {2,}',' '),1,80),'-') sql
     from pg_stat_activity a
     left join dbe_perf.thread_wait_status w on a.sessionid = w.sessionid
     where a.state <> 'idle' and a.datname is not null
@@ -19465,11 +19520,12 @@ limit ${topn};"
                 "${PGPORT:-5432}" "$interval" "$cores" "$(date '+%F %T')"
             _vtop_print_os
         else
-            wtxt="" ctx_txt="" blk_raw="" ltx_raw=""
+            ev_buf="" ctx_txt="" blk_raw="" ltx_raw=""
             while IFS= read -r line; do
                 case "$line" in
                     ===HDR)  section=HDR; continue;;
                     ===SESS) section=SESS; continue;;
+                    ===ISTAT) section=ISTAT; continue;;
                     ===DBM)  section=DBM; continue;;
                     ===CTX)  section=CTX; continue;;
                     ===BLK)  section=BLK; continue;;
@@ -19477,7 +19533,7 @@ limit ${topn};"
                     ===LTX)  section=LTX; continue;;
                     ===MEMSES)
                         printf 'vbtop: %s  %s\n' "$h_node" "$h_ver"
-                        printf 'port %s   up %s   refresh %ds   %s cores   %s\n' \
+                        printf 'port %s   up %s   refresh %ds   %s   %s\n' \
                             "${PGPORT:-5432}" \
                             "$(awk -v s="$h_up" 'BEGIN{printf "%dd%02dh%02dm", int(s/86400), int(s%86400/3600), int(s%3600/60)}')" \
                             "$interval" "$cores" "$(date '+%F %T')"
@@ -19503,6 +19559,18 @@ limit ${topn};"
                         else
                             printf 'LTX     none\n'
                         fi
+                        printf 'ISTAT   %s\n' "${ist_txt:--}"
+            if [ -n "$ev_buf" ]; then
+                            printf '\nEVENT   %-28s %7s %8s %7s  CLASS\n' "NAME(RT)" "WAITS" "TIME" "AVG"
+                            _vtop_rule_cols '        ' 28 7 8 7 7
+                            printf '%s' "$ev_buf" | sort -t'|' -k1,1rn | head -5 | while IFS='|' read -r _dt _dw _cl _nm; do
+                                [ -z "$_nm" ] && continue
+                                _avg=0; [ "$_dw" -gt 0 ] 2>/dev/null && _avg=$((_dt / _dw))
+                                printf '        %-28.28s %7d %8s %7s  %s\n' "$_nm" "$_dw" "$(_vtop_fmt_us $_dt)" "$(_vtop_fmt_us $_avg)" "$_cl"
+                            done
+                        else
+                            printf '\nEVENT   (no waits in this interval)\n'
+                        fi
                         local mem_col=""
                         if awk -v p="$m_used" -v m="$m_max" -v y="$m_dyu" -v n="$m_dym" 'BEGIN{exit !((m>0 && p/m*100>=90) || (n>0 && y/n*100>=90))}'; then mem_col=$c_red
                         elif awk -v p="$m_used" -v m="$m_max" 'BEGIN{exit !(m>0 && p/m*100>=75)}'; then mem_col=$c_ylw; fi
@@ -19514,46 +19582,64 @@ limit ${topn};"
                         fi
                         [ -n "$ctx_txt" ] && printf 'MEMCTX  %s\n' "$ctx_txt"
                         printf '\nTOPMEM  %-14s %-9s %-9s %-8s %9s %s\n' "SID" "USER" "DB" "STATE" "MEM" "SQLTEXT"
-                        _vtop_rule_cols '        ' 14 9 9 8 9 40
+                        _vtop_rule_cols '        ' 14 9 9 8 9 68
                         section=MEMSES; continue;;
                     ===TOP)
                         printf '\nTOPSQL  %-11s %6s %7s %5s %s\n' "SQLID" "CPU%" "RUN/TOT" "ET(s)" "SQLTEXT"
-                        _vtop_rule_cols '        ' 11 6 7 5 44
+                        _vtop_rule_cols '        ' 11 6 7 5 80
                         section=TOP; continue;;
                 esac
                 case "$section" in
                     HDR)  IFS='|' read -r h_node h_ver h_up <<< "$line";;
                     SESS) IFS='|' read -r s_tot s_act s_iit s_idle s_ltx <<< "$line";;
+                    ISTAT) IFS='|' read -r i_xc i_xr i_br i_bh i_tb i_lsn <<< "$line"
+                          if [ -n "$prev_lsn" ] && [ "$dt" -gt 0 ] 2>/dev/null; then
+                              _tps=$(( (i_xc - prev_xc + i_xr - prev_xr) * 1000 / dt ))
+                              _rb=$(( (i_xr - prev_xr) * 1000 / dt ))
+                              _lg=$(( (i_br - prev_br + i_bh - prev_bh) * 1000 / dt * 8192 ))
+                              _ph=$(( (i_br - prev_br) * 1000 / dt * 8192 ))
+                              _rd=$(( (i_lsn - prev_lsn) * 1000 / dt ))
+                              _tp=$(( (i_tb - prev_tb) * 1000 / dt ))
+                              ist_txt="tps $_tps (roll $_rb)   logical $(_vtop_fmt_b $_lg)/s   physical $(_vtop_fmt_b $_ph)/s   redo $(_vtop_fmt_b $_rd)/s   temp $(_vtop_fmt_b $_tp)/s"
+                          fi
+                          prev_xc=$i_xc; prev_xr=$i_xr; prev_br=$i_br; prev_bh=$i_bh; prev_tb=$i_tb; prev_lsn=$i_lsn;;
                     DBM)  IFS='|' read -r m_used m_max m_dyu m_dym m_dyp m_shr m_shrp <<< "$line";;
                     CTX)  ctx_txt="$line";;
                     BLK)  blk_raw="${blk_raw}${line}"$'\n';;
                     LTX)  ltx_raw="${ltx_raw}${line}"$'\n';;
-                    WAIT) IFS='|' read -r wc wn <<< "$line"
-                          wtxt="${wtxt}${wc} ${wn}   ";;
+                    WAIT) IFS='|' read -r wc_type ev_name ev_w ev_t <<< "$line"
+                          key="${wc_type}|${ev_name}"
+                          pw=${_vw_prev[$key]:-}
+                          pt=${_vt_prev[$key]:-}
+                          if [ -n "$pw" ]; then
+                              dw=$((ev_w - pw)); dt=$((ev_t - pt))
+                              [ "$dt" -gt 0 ] 2>/dev/null && ev_buf="${ev_buf}${dt}|${dw}|${wc_type%_EVENT}|${ev_name}"$'\n'
+                          fi
+                          _vw_prev[$key]=$ev_w; _vt_prev[$key]=$ev_t;;
                     MEMSES) IFS='|' read -r ms_sid ms_usr ms_db ms_st ms_sz ms_sql <<< "$line"
-                            printf '        %-14.14s %-9.9s %-9.9s %-8.8s %9s %.40s\n' "$ms_sid" "$ms_usr" "$ms_db" "$ms_st" "$ms_sz" "$ms_sql";;
+                            printf '        %-14.14s %-9.9s %-9.9s %-8.8s %9s %.68s\n' "$ms_sid" "$ms_usr" "$ms_db" "$ms_st" "$ms_sz" "$ms_sql";;
                     TOP)  IFS='|' read -r r_sqlid r_cpu r_ns r_rn r_et r_sql <<< "$line"
                           local sql_col=""
                           awk -v c="$r_cpu" 'BEGIN{exit !(c>=90)}' && sql_col=$c_red
                           printf '%s' "$sql_col"
-                          printf '        %-11.11s %6s %7s %5s %.44s\n' "$r_sqlid" "${r_cpu}%" "${r_rn}/${r_ns}" "$r_et" "$r_sql"
+                          printf '        %-11.11s %6s %7s %5s %.80s\n' "$r_sqlid" "${r_cpu}%" "${r_rn}/${r_ns}" "$r_et" "$r_sql"
                           printf '%s' "$c_off";;
                 esac
             done <<< "$db"
             if [ -n "$blk_raw" ]; then
-                local b_first=1 b_sid b_user b_cnt
-                while IFS='|' read -r b_sid b_user b_cnt; do
-                    [ -z "$b_sid" ] && continue
-                    if [ "$b_first" = "1" ]; then
-                        printf '%s' "$c_red"; printf 'BLOCK   sid %s (%s) blocks %s sess' "$b_sid" "$b_user" "$b_cnt"; printf '%s\n' "$c_off"; b_first=0
-                    else
-                        printf '%s' "$c_red"; printf '        sid %s (%s) blocks %s sess' "$b_sid" "$b_user" "$b_cnt"; printf '%s\n' "$c_off"
-                    fi
+                printf '\nLOCK    %-7s %-7s %-15s %-8s %4s  %s\n' "AGE" "STATE" "FINAL BLOCKER" "USER" "BLK" "QUERY"
+                _vtop_rule_cols '        ' 7 7 15 8 4 40
+                local k_lvl k_st k_sid k_usr k_blk k_age k_sql k_ah
+                while IFS='|' read -r k_lvl k_st k_sid k_usr k_blk k_age k_sql; do
+                    [ -z "$k_sid" ] && continue
+                    k_ah=$(awk -v x="$k_age" 'BEGIN{s=x;d=int(s/86400);h=int(s%86400/3600);m=int(s%3600/60);ss=s%60; if(d>0)printf "%dd%02dh",d,h; else if(h>0)printf "%dh%02dm",h,m; else if(m>0)printf "%dm%02ds",m,ss; else printf "%ds",ss}')
+                    printf '%s' "$c_red"
+                    printf '        %-7s %-7s %-15.15s %-8.8s %4s  %s\n' "$k_ah" "$k_st" "$k_sid" "$k_usr" "$k_blk" "$k_sql"
+                    printf '%s' "$c_off"
                 done <<< "$blk_raw"
             else
-                printf 'BLOCK   none\n'
+                printf '\nLOCK    none\n'
             fi
-            [ -n "$wtxt" ] && printf 'WAIT    %s\n' "$(echo $wtxt)"
         fi
         } > "$_vtop_f"
         if [ -t 1 ]; then
