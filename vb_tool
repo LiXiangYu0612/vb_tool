@@ -19246,21 +19246,35 @@ _vtop_mem() {
 
 _vtop_print_os() { # oratop-style coded-header sections; reads caller-scope vars
     printf 'OS      %5s %5s %5s %5s %13s %7s %7s %8s %8s\n' CPUus CPUsy CPUid CPUwa MEMused MEMav SWAP NETrx NETtx
+    _vtop_rule 96
+    local os_col=""
+    if awk -v u="$a_us" -v sy="$a_sy" -v w="$a_wa" 'BEGIN{exit !(u+sy+w>=80 || w>=20)}'; then os_col=$c_red
+    elif awk -v u="$a_us" -v sy="$a_sy" 'BEGIN{exit !(u+sy>=60)}'; then os_col=$c_ylw; fi
+    printf '%s' "$os_col"
     printf '        %5.1f %5.1f %5.1f %5.1f %13s %7s %7s %8.1f %8.1f\n' \
         "$a_us" "$a_sy" "$a_id" "$a_wa" \
         "$(_vtop_hum $((mt - ma)))/$(_vtop_hum "$mt")" "$(_vtop_hum "$ma")" \
         "$(_vtop_hum $((mst - msf)))" "$n_rx" "$n_tx"
+    printf '%s' "$c_off"
     if [ -n "$dev" ]; then
         local dpar dsz drot dsch dqd
         read -r dpar dsz drot dsch dqd <<< "$devinfo"
         printf 'DSK     %s @ %s   [%s %s  rot:%s  sched:%s  qd:%s]\n' "$dev" "$datadir" "$dpar" "$dsz" "$drot" "$dsch" "$dqd"
         printf '        %5s %6s %6s | %5s %6s %6s %5s\n' riops rMB/s ravms wiops wMB/s wavms util
+        _vtop_rule 88
+        local dsk_col=""
+        if awk -v u="$d_util" -v r="$d_rms" -v w="$d_wms" 'BEGIN{exit !(u>=90 || r>20 || w>20)}'; then dsk_col=$c_red
+        elif awk -v u="$d_util" 'BEGIN{exit !(u>=70)}'; then dsk_col=$c_ylw; fi
+        printf '%s' "$dsk_col"
         printf '        %5s %6.1f %6.1f | %5s %6.1f %6.1f %5.0f\n' \
             "$d_rops" "$d_rmb" "$d_rms" "$d_wops" "$d_wmb" "$d_wms" "$d_util"
+        printf '%s' "$c_off"
     else
         printf 'DSK     (cannot map %s to a /proc/diskstats device)\n' "$datadir"
     fi
 }
+
+_vtop_rule() { printf '%*s\n' "$1" '' | tr ' ' '-'; }
 
 _vtop_hum() { # kB -> human
     awk -v kb="$1" 'BEGIN{u="KMGTPE"; v=kb+0; i=1; while(v>=1024&&i<6){v/=1024;i++} printf (i==1)?"%d%s":"%.1f%s", v, substr(u,i,1)}'
@@ -19351,6 +19365,9 @@ select a.sessionid::text, coalesce(a.usename,'-'), coalesce(a.datname,'-'),
 from (select split_part(sessid,'.',2) sid from gs_session_memory_detail group by split_part(sessid,'.',2) order by sum(totalsize) desc limit 5) s
 join pg_stat_activity a on a.sessionid::text = s.sid;"
 
+    local c_red="" c_ylw="" c_off=""
+    if [ -t 1 ]; then c_red=$'\033[31m'; c_ylw=$'\033[33m'; c_off=$'\033[0m'; fi
+
     # ---- sampling loop ----
     local t0 t1 d0 d1 c0 c1 n0 n1 dt key wtxt
     local a_us a_sy a_id a_wa a_st
@@ -19439,29 +19456,36 @@ limit ${topn};"
                     ===MEMSES)
                         printf '\033[2J\033[H'
                         printf 'vbtop: %s  %s\n' "$h_node" "$h_ver"
-                        printf 'port %s   up %s   refresh %ds   %s cores   %s\n' \
+                        printf 'port %s   up %s   refresh %ds   %s cores   sn %s tot/%s act   dbmem %sG/%sG   %s\n' \
                             "${PGPORT:-5432}" \
                             "$(awk -v s="$h_up" 'BEGIN{printf "%dd%02dh%02dm", int(s/86400), int(s%86400/3600), int(s%3600/60)}')" \
-                            "$interval" "$cores" "$(date '+%F %T')"
+                            "$interval" "$cores" "$s_tot" "$s_act" "$m_used" "$m_max" "$(date '+%F %T')"
                         _vtop_print_os
                         printf '\n'
+                        local mem_col=""
+                        if awk -v p="$m_used" -v m="$m_max" -v y="$m_dyu" -v n="$m_dym" 'BEGIN{exit !((m>0 && p/m*100>=90) || (n>0 && y/n*100>=90))}'; then mem_col=$c_red
+                        elif awk -v p="$m_used" -v m="$m_max" 'BEGIN{exit !(m>0 && p/m*100>=75)}'; then mem_col=$c_ylw; fi
                         if [ -n "$m_used" ]; then
+                            printf '%s' "$mem_col"
                             printf 'DBMEM   proc %sG/%sG   dyn %sG/%sG (peak %sG)\n' \
                                 "$m_used" "$m_max" "$m_dyu" "$m_dym" "$m_dyp"
+                            printf '%s' "$c_off"
                         fi
                         [ -n "$ctx_txt" ] && printf 'MEMCTX  %s\n' "$ctx_txt"
                         if [ -n "$s_tot" ]; then
+                            local ltx_disp="$s_ltx"
+                            [ "$s_ltx" -gt 0 ] 2>/dev/null && ltx_disp="${c_red}${s_ltx}${c_off}"
                             printf 'SESS    tot %s   act %s   idl %s   idtx %s   ltx60 %s\n' \
-                                "$s_tot" "$s_act" "$s_idle" "$s_iit" "$s_ltx"
+                                "$s_tot" "$s_act" "$s_idle" "$s_iit" "$ltx_disp"
                         fi
                         if [ -n "$blk_raw" ]; then
                             local b_first=1 b_sid b_user b_cnt
                             while IFS='|' read -r b_sid b_user b_cnt; do
                                 [ -z "$b_sid" ] && continue
                                 if [ "$b_first" = "1" ]; then
-                                    printf 'BLOCK   sid %s (%s) blocks %s sess\n' "$b_sid" "$b_user" "$b_cnt"; b_first=0
+                                    printf '%s' "$c_red"; printf 'BLOCK   sid %s (%s) blocks %s sess' "$b_sid" "$b_user" "$b_cnt"; printf '%s\n' "$c_off"; b_first=0
                                 else
-                                    printf '        sid %s (%s) blocks %s sess\n' "$b_sid" "$b_user" "$b_cnt"
+                                    printf '%s' "$c_red"; printf '        sid %s (%s) blocks %s sess' "$b_sid" "$b_user" "$b_cnt"; printf '%s\n' "$c_off"
                                 fi
                             done <<< "$blk_raw"
                         else
@@ -19469,9 +19493,11 @@ limit ${topn};"
                         fi
                         [ -n "$wtxt" ] && printf 'WAIT    %s\n' "$(echo $wtxt)"
                         printf '\nMEM     %-14s %-9s %-9s %9s %s\n' "SID" "USER" "DB" "MEM" "SQLTEXT"
+                        _vtop_rule 96
                         section=MEMSES; continue;;
                     ===TOP)
                         printf '\nSQL     %-11s %6s %7s %5s %-5s %-19s %s\n' "SQLID" "CPU%" "RUN/TOT" "ET(s)" "ST" "WAIT_EVENT" "SQLTEXT"
+                        _vtop_rule 96
                         section=TOP; continue;;
                 esac
                 case "$section" in
@@ -19485,7 +19511,11 @@ limit ${topn};"
                     MEMSES) IFS='|' read -r ms_sid ms_usr ms_db ms_sz ms_sql <<< "$line"
                             printf '        %-14.14s %-9.9s %-9.9s %9s %.40s\n' "$ms_sid" "$ms_usr" "$ms_db" "$ms_sz" "$ms_sql";;
                     TOP)  IFS='|' read -r r_sqlid r_cpu r_ns r_rn r_et r_st r_we r_sql <<< "$line"
-                          printf '        %-11.11s %6s %7s %5s %-5.5s %-19.19s %.44s\n' "$r_sqlid" "${r_cpu}%" "${r_rn}/${r_ns}" "$r_et" "$r_st" "$r_we" "$r_sql";;
+                          local sql_col=""
+                          awk -v c="$r_cpu" 'BEGIN{exit !(c>=90)}' && sql_col=$c_red
+                          printf '%s' "$sql_col"
+                          printf '        %-11.11s %6s %7s %5s %-5.5s %-19.19s %.44s\n' "$r_sqlid" "${r_cpu}%" "${r_rn}/${r_ns}" "$r_et" "$r_st" "$r_we" "$r_sql"
+                          printf '%s' "$c_off";;
                 esac
             done <<< "$db"
         fi
