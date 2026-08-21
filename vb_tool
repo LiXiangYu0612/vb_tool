@@ -19443,6 +19443,7 @@ join pg_stat_activity a on a.sessionid::text = s.sid;"
     local c_red="" c_ylw="" c_off=""
     if [ -t 1 ]; then c_red=$'\033[31m'; c_ylw=$'\033[33m'; c_off=$'\033[0m'; fi
     local _vtop_f; _vtop_f=$(mktemp /tmp/vbtop_frame.XXXXXX)
+    trap 'rm -f "$_vtop_f"' EXIT    # any exit path (incl. SIGPIPE from a closed pipe) cleans up
     declare -A _vw_prev _vt_prev
     local prev_xc="" prev_xr="" prev_br="" prev_bh="" prev_tb="" prev_lsn="" ist_txt=
 
