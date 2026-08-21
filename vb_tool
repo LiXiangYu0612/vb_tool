@@ -19939,6 +19939,8 @@ PSQL
       for _odb in $_odbs; do
           psql -d "$_odb" -tAF',' -c "select '$_odb',n.nspname,c.relname,age(c.relfrozenxid64),c.relpages,c.reltuples,coalesce(pg_stat_get_tuples_changed(c.oid),0),coalesce(pg_stat_get_live_tuples(c.oid),0),coalesce(pg_stat_get_dead_tuples(c.oid),0) from pg_class c left join pg_namespace n on n.oid=c.relnamespace where c.relkind in ('r','t','m')" 2>/dev/null
       done; } > "$dbd/object_dead.csv"
+    # compress all db csv in place; renderer reads .csv.gz with plain-text fallback
+    gzip -f "$dbd"/*.csv 2>/dev/null
     return 0
 }
 
@@ -19998,7 +20000,7 @@ Cumulative-counter model:
 Emits a self-contained HTML report. Standalone here; embedded as a heredoc in
 vb_tool_dev (so keep it dependency-free stdlib only, single file, no argv trickery).
 """
-import csv, json, os, sys, html, subprocess, glob, re
+import csv, json, os, sys, html, subprocess, glob, re, gzip
 
 # -----------------------------------------------------------------------------
 # number formatting
@@ -20087,13 +20089,17 @@ def arrow_delta(base, cur):
 # IO helpers
 # -----------------------------------------------------------------------------
 def read_csv_rows(path):
-    if not os.path.isfile(path):
-        return []
+    gz = path + ".gz"
     try:
-        with open(path, newline="") as f:
-            return list(csv.DictReader(f))
+        if os.path.isfile(gz):
+            with gzip.open(gz, mode="rt", newline="") as f:
+                return list(csv.DictReader(f))
+        if os.path.isfile(path):
+            with open(path, newline="") as f:
+                return list(csv.DictReader(f))
     except (csv.Error, UnicodeDecodeError, OSError):
-        return []
+        pass
+    return []
 
 def fetch_pg_settings():
     """Live-query pg_settings via psql (point-in-time config; not persisted to disk).
