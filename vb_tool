@@ -1,13 +1,13 @@
 #!/bin/bash
 #--------------------------------------------------------------------------------
 #-- File name:   vb_tool
-#-- Version  ：  v1.4.19
-#-- Commit at：  2026-05-25 19:00:00
+#-- Version  ：  v1.4.20
+#-- Commit at：  2026-08-21 15:00:00
 #-- Purpose:     Vastbase Script Tool
 #-- Author:      MVS & Second-line Team 
 #--------------------------------------------------------------------------------
 set -o pipefail
-VB_TOOL_VERSION="v1.4.19"
+VB_TOOL_VERSION="v1.4.20"
 show_help() {
     echo "Vastbase Script Tool (vb_tool)"
     echo ""
@@ -69,7 +69,7 @@ show_help() {
 }
 
 show_list() {
-    echo "Vastbase Script Tool (vb_tool) v1.4.19"
+    echo "Vastbase Script Tool (vb_tool) v1.4.20"
     echo ""
     echo "Usage Summary:"
     echo "  vb_tool <command> [options]"
