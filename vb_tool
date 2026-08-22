@@ -1,13 +1,13 @@
 #!/bin/bash
 #--------------------------------------------------------------------------------
 #-- File name:   vb_tool
-#-- Version  ：  v2.0.0
+#-- Version  ：  v2.0.1
 #-- Commit at：  2026-08-21 22:46:15
 #-- Purpose:     Vastbase Script Tool
 #-- Author:      MVS & Second-line Team 
 #--------------------------------------------------------------------------------
 set -o pipefail
-VB_TOOL_VERSION="v2.0.0"
+VB_TOOL_VERSION="v2.0.1"
 show_help() {
     echo "Vastbase Script Tool (vb_tool)"
     echo ""
@@ -557,6 +557,8 @@ wdr_event_help() {
     echo "  Options:"
     echo "    -b begin_time    Begin time (default: today 00:00:00)"
     echo "    -e end_time      End time (default: tomorrow 00:00:00)"
+    echo "    -E event_name    Show per-interval history of ONE wait event"
+    echo "                     (exact match, case-insensitive; quote names with spaces)"
     echo ""
     echo "  Time Formats:"
     echo "    YYYY-MM-DD              (e.g., 2026-03-02)"
@@ -568,6 +570,7 @@ wdr_event_help() {
     echo "    - Time values with spaces must be quoted"
     echo "    - Begin time automatically subtracts 1 hour"
     echo "    - End time automatically adds 1 hour"
+    echo "    - With -E and no -b/-e, window defaults to last 7 days"
     echo ""
     echo "  Examples:"
     echo "    vb_tool wdr_event                                    # Today 00:00 to tomorrow 00:00"
@@ -575,6 +578,9 @@ wdr_event_help() {
     echo "    vb_tool wdr_event -e 2026-03-03                     # Today 00:00 to 2026-03-03 00:00"
     echo "    vb_tool wdr_event -b \"2026-03-02 12\" -e \"2026-03-02 20\"  # 12:00 to 20:00 on 2026-03-02"
     echo "    vb_tool wdr_event -b \"2026-03-02 12:30\" -e \"2026-03-02 20:45\""
+    echo "    vb_tool wdr_event -E \"wait io\""
+    echo "    vb_tool wdr_event -E BufHashTableSearch -b 2026-06-09 -e 2026-06-09"
+    echo "    vb_tool wdr_event -E \"wait wal sync\" -b \"2026-06-09 10\" -e \"2026-06-09 12\""
     echo ""
 }
 
@@ -5888,9 +5894,10 @@ EOF
 run_wdr_event() {
     local begin_time=""
     local end_time=""
+    local event_name=""
     local found_b=0
     local found_e=0
-    
+
     while [[ $# -gt 0 ]]; do
         case $1 in
             -b)
@@ -5914,6 +5921,24 @@ run_wdr_event() {
                 if [[ $# -gt 0 && "$1" =~ ^[0-9]{1,2}:[0-9]{1,2}$ ]]; then
                     echo "Error: Time value with space not quoted: -b $begin_time $1" >&2
                     echo "  Please quote time values with spaces: -b \"$begin_time $1\"" >&2
+                    return 1
+                fi
+                ;;
+            -E)
+                shift
+                if [[ $# -eq 0 || "$1" =~ ^- ]]; then
+                    echo "Error: -E requires an event name" >&2
+                    return 1
+                fi
+                event_name="$1"
+                shift
+                if [[ "$event_name" == *"'"* ]]; then
+                    echo "Error: event name cannot contain single quotes: $event_name" >&2
+                    return 1
+                fi
+                if [[ $# -gt 0 && ! "$1" =~ ^- ]]; then
+                    echo "Error: Event name with space not quoted: -E $event_name $1" >&2
+                    echo "  Please quote event names with spaces: -E \"$event_name $1\"" >&2
                     return 1
                 fi
                 ;;
@@ -6023,7 +6048,11 @@ run_wdr_event() {
     }
     
     if [ -z "$begin_time" ] && [ -z "$end_time" ]; then
-        begin_time=$(date +'%Y-%m-%d 00:00:00')
+        if [ -n "$event_name" ]; then
+            begin_time=$(date -d '7 days ago' +'%Y-%m-%d 00:00:00')
+        else
+            begin_time=$(date +'%Y-%m-%d 00:00:00')
+        fi
         end_time=$(date -d 'tomorrow 00:00:00' +'%Y-%m-%d %H:%M:%S')
     else
         begin_time=$(format_time "$begin_time")
@@ -6037,6 +6066,11 @@ run_wdr_event() {
         fi
     fi
     
+    if [ -n "$event_name" ]; then
+        run_wdr_event_hist "$event_name" "$begin_time" "$end_time"
+        return $?
+    fi
+
     local query_begin=$(date -d "$begin_time 1 hour ago" +'%Y-%m-%d %H:%M:%S')
     local query_end=$(date -d "$end_time 1 hour" +'%Y-%m-%d %H:%M:%S')
     
@@ -6115,6 +6149,181 @@ where a.snapshot_id = b.snapshot_id
 order by a.time_range, c.rn;
 EOF
 }
+
+run_wdr_event_hist() {
+    local event_name="$1"
+    local begin_time="$2"
+    local end_time="$3"
+    local query_begin=$(date -d "$begin_time 1 hour ago" +'%Y-%m-%d %H:%M:%S')
+    local query_end=$(date -d "$end_time 1 hour" +'%Y-%m-%d %H:%M:%S')
+    local snap_cnt ev_cnt delta_cnt
+
+    # ---- level 0: window has any wdr snapshot ----
+    if ! snap_cnt=$(psql -d postgres -tAc "select count(*) from snapshot.snapshot where start_ts >= '$query_begin'::timestamp and start_ts <= '$query_end'::timestamp"); then
+        echo "Error: wdr snapshot check query failed" >&2
+        return 1
+    fi
+    if [ "$snap_cnt" -eq 0 ]; then
+        echo "Error: no wdr snapshots in window $begin_time ~ $end_time" >&2
+        return 1
+    fi
+
+    # ---- level 1: event row exists in window ----
+    if ! ev_cnt=$(psql -d postgres -tAc "select count(*) from snapshot.snap_global_wait_events e join snapshot.snapshot s on e.snapshot_id = s.snapshot_id where s.start_ts >= '$query_begin'::timestamp and s.start_ts <= '$query_end'::timestamp and lower(e.snap_event) = lower('$event_name')"); then
+        echo "Error: wdr event check query failed" >&2
+        return 1
+    fi
+    if [ "$ev_cnt" -eq 0 ]; then
+        echo "Error: event '$event_name' not found in wdr snapshots (window $begin_time ~ $end_time)" >&2
+        echo "Top wait events in this window:" >&2
+        psql -d postgres <<EOF
+\pset footer off
+with ev as (
+    select snap_event, wait_time, waits
+    from (
+        select e.snapshot_id, e.snap_event,
+               case when lag(e.snap_total_wait_time) over pw IS NOT NULL
+                         and e.snap_total_wait_time - lag(e.snap_total_wait_time) over pw >= 0
+                    then e.snap_total_wait_time - lag(e.snap_total_wait_time) over pw end wait_time,
+               case when lag(e.snap_wait) over pw IS NOT NULL
+                         and e.snap_wait - lag(e.snap_wait) over pw > 0
+                    then e.snap_wait - lag(e.snap_wait) over pw end waits
+        from snapshot.snap_global_wait_events e
+        where snap_event not in ('none','wait cmd')
+        window pw as (partition by e.snap_event order by e.snapshot_id)
+    ) d where waits > 0
+)
+select snap_event, sum(waits) waits, round(sum(wait_time)/1e6,3) total_wait_s
+from ev group by snap_event order by sum(wait_time) desc limit 20;
+EOF
+        return 1
+    fi
+
+    # ---- level 2: any waits delta rows ----
+    if ! delta_cnt=$(psql -d postgres -tAc "
+with grt as (
+    select r.snapshot_id, max(r.snap_reset_time) gen
+    from (select distinct snapshot_id, snap_node_name, snap_reset_time
+          from snapshot.snap_global_record_reset_time) r
+    group by r.snapshot_id),
+tr as (
+    select snapshot_id from (
+        select a.snapshot_id,
+               case when lag(gen) over(order by a.snapshot_id) IS NOT DISTINCT FROM gen then 1 end valid_gen
+        from snapshot.snapshot a join grt on a.snapshot_id = grt.snapshot_id
+        where start_ts >= '$query_begin'::timestamp and start_ts <= '$query_end'::timestamp
+    ) t where valid_gen = 1
+),
+ev as (
+    select snapshot_id, waits from (
+        select e.snapshot_id,
+               case when lag(e.snap_wait) over pw IS NOT NULL
+                         and e.snap_wait - lag(e.snap_wait) over pw > 0
+                    then e.snap_wait - lag(e.snap_wait) over pw end waits
+        from snapshot.snap_global_wait_events e
+        where lower(snap_event) = lower('$event_name')
+          and snap_event not in ('none','wait cmd')
+        window pw as (partition by e.snap_event order by e.snapshot_id)
+    ) d where waits > 0
+)
+select count(*) from tr join ev on tr.snapshot_id = ev.snapshot_id"); then
+        echo "Error: wdr delta check query failed" >&2
+        return 1
+    fi
+    if [ "$delta_cnt" -eq 0 ]; then
+        echo "Note: event '$event_name' exists in snapshots but has no waits delta in window $begin_time ~ $end_time" >&2
+        return 0
+    fi
+
+    # ---- main: detail + TOTAL, then max line ----
+    psql -d postgres <<EOF
+\pset footer off
+\echo ====================
+\echo wdr event history: '$event_name'  (window $begin_time ~ $end_time)
+\echo ====================
+with grt as (
+    select r.snapshot_id, max(r.snap_reset_time) gen
+    from (select distinct snapshot_id, snap_node_name, snap_reset_time
+          from snapshot.snap_global_record_reset_time) r
+    group by r.snapshot_id),
+time_range as (
+    select snapshot_id, time_range
+    from (
+        select a.snapshot_id,
+               to_char(lag(a.start_ts) over(order by a.snapshot_id),'mmdd hh24:mi')||'-'||to_char(a.start_ts,'hh24:mi') time_range,
+               case when lag(gen) over(order by a.snapshot_id) IS NOT DISTINCT FROM gen then 1 end valid_gen
+        from snapshot.snapshot a join grt on a.snapshot_id = grt.snapshot_id
+        where start_ts >= '$query_begin'::timestamp and start_ts <= '$query_end'::timestamp
+    ) t
+    where length(time_range)>15 and valid_gen=1
+),
+time_model as (
+    select snapshot_id, sum(decode(snap_stat_name,'DB_TIME',stat_value,0)) db_time
+    from (select snapshot_id,snap_stat_name,
+                 snap_value-lag(snap_value)over(partition by snap_node_name,snap_stat_name order by snapshot_id) stat_value
+          from snapshot.snap_global_instance_time)
+    group by snapshot_id
+),
+ev as (
+    select snapshot_id, wait_time, waits
+    from (
+        select e.snapshot_id,
+               case when lag(e.snap_total_wait_time) over pw IS NOT NULL
+                         and e.snap_total_wait_time - lag(e.snap_total_wait_time) over pw >= 0
+                    then e.snap_total_wait_time - lag(e.snap_total_wait_time) over pw end wait_time,
+               case when lag(e.snap_wait) over pw IS NOT NULL
+                         and e.snap_wait - lag(e.snap_wait) over pw > 0
+                    then e.snap_wait - lag(e.snap_wait) over pw end waits
+        from snapshot.snap_global_wait_events e
+        where lower(snap_event) = lower('$event_name')
+          and snap_event not in ('none','wait cmd')
+        window pw as (partition by e.snap_event order by e.snapshot_id)
+    ) d where waits > 0
+),
+j as (
+    select a.snapshot_id, a.time_range, b.db_time, c.wait_time, c.waits
+    from time_range a join time_model b on a.snapshot_id = b.snapshot_id
+    join ev c on a.snapshot_id = c.snapshot_id
+)
+select /*+set(enable_mergejoin off) set(enable_nestloop off) set(enable_index_nestloop off)*/
+       time_range, round(db_time/1e6,1) db_time_s, waits,
+       round(wait_time/1e6,1) wait_time_s, round(wait_time/waits/1e3,1) avg_wait_ms
+from j
+union all
+select 'TOTAL (N='||count(*)||')', round(sum(db_time)/1e6,1), sum(waits), round(sum(wait_time)/1e6,1), round(sum(wait_time)/sum(waits)/1e3,1)
+from j
+order by 1;
+\echo
+with ev as (
+    select snapshot_id, wait_time, waits
+    from (
+        select e.snapshot_id,
+               case when lag(e.snap_total_wait_time) over pw IS NOT NULL
+                         and e.snap_total_wait_time - lag(e.snap_total_wait_time) over pw >= 0
+                    then e.snap_total_wait_time - lag(e.snap_total_wait_time) over pw end wait_time,
+               case when lag(e.snap_wait) over pw IS NOT NULL
+                         and e.snap_wait - lag(e.snap_wait) over pw > 0
+                    then e.snap_wait - lag(e.snap_wait) over pw end waits
+        from snapshot.snap_global_wait_events e
+        where lower(snap_event) = lower('$event_name')
+        window pw as (partition by e.snap_event order by e.snapshot_id)
+    ) d where waits > 0
+),
+time_range as (
+    select snapshot_id, time_range from (
+        select a.snapshot_id,
+               to_char(lag(a.start_ts) over(order by a.snapshot_id),'mmdd hh24:mi')||'-'||to_char(a.start_ts,'hh24:mi') time_range
+        from snapshot.snapshot a
+        where start_ts >= '$query_begin'::timestamp and start_ts <= '$query_end'::timestamp
+    ) t where length(time_range)>15
+)
+select 'max avg_wait_ms: '||round((wait_time/waits)/1e3,1)||'  @ '||time_range as "max avg_wait"
+from ev join time_range using(snapshot_id)
+order by wait_time/waits desc limit 1;
+EOF
+    return 0
+}
+
 
 
 run_as() {
