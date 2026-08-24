@@ -7,7 +7,7 @@
 #-- Author:      MVS & Second-line Team 
 #--------------------------------------------------------------------------------
 set -o pipefail
-VB_TOOL_VERSION="v2.0.2"
+export VB_TOOL_VERSION="v2.0.3"
 show_help() {
     echo "Vastbase Script Tool (vb_tool)"
     echo ""
@@ -20229,6 +20229,11 @@ vb_tool_dev (so keep it dependency-free stdlib only, single file, no argv tricke
 """
 import csv, json, os, sys, html, subprocess, glob, re, gzip
 
+# version of the vb_tool binary generating this report (exported by the bash
+# wrapper, inherited via env); distinct from the per-snap vb_tool_version in
+# meta.json, which records the binary that CAPTURED each snapshot
+_GEN_VER = os.environ.get("VB_TOOL_VERSION") or "?"
+
 # -----------------------------------------------------------------------------
 # number formatting
 # -----------------------------------------------------------------------------
@@ -22014,13 +22019,13 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         '<div class="rhead"><div class="title">Performance AWR Report</div>'
         '<table>'
         '<tr><td class="k">Instance Name</td><td>%s</td><td class="k">Host</td><td>%s</td></tr>'
-        '<tr><td class="k">Release</td><td>%s</td><td class="k">vb_tool</td><td>%s</td></tr>'
+        '<tr><td class="k">Release</td><td>%s</td><td class="k">vb_tool (snap / report)</td><td>%s / %s</td></tr>'
         '<tr><td class="k">AWR</td><td>%s</td><td class="k">DB Compatibility</td><td>%s</td></tr>'
         '<tr><td class="k">Begin Snap</td><td>%s</td><td class="k">End Snap</td><td>%s</td></tr>'
         '<tr><td class="k">Duration (s)</td><td>%s</td><td class="k">DB Time (s)</td><td>%s</td></tr>'
         '</table></div>' % (
             esc(m.get("db_name") or m.get("name") or "?"), esc(m.get("hostname", "?")),
-            esc(m.get("db_version", "?") or "?"), esc(m.get("vb_tool_version", "?")),
+            esc(m.get("db_version", "?") or "?"), esc(m.get("vb_tool_version", "?")), esc(_GEN_VER),
             esc(m.get("name", "?")), esc(_compat),
             esc(m.get("begin_ts", "?")), esc(m.get("end_ts", "?")),
             esc(m.get("duration", "?")), s_of(dbt),
@@ -22727,7 +22732,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     parts.append(
         '<div class="rhead"><div class="title">Performance AWR Diff Report</div><table>'
         '<tr><td class="k">Instance Name</td><td>%s</td><td class="k">Host</td><td>%s</td></tr>'
-        '<tr><td class="k">Release</td><td>%s</td><td class="k">vb_tool</td><td>%s</td></tr>'
+        '<tr><td class="k">Release</td><td>%s</td><td class="k">vb_tool (snap / report)</td><td>%s / %s</td></tr>'
         '<tr><td class="k">DB Compatibility</td><td>%s</td><td class="k"></td><td></td></tr>'
         '<tr><td class="k">Period 1</td><td>%s: %s &rarr; %s (%ss)</td>'
         '<td class="k">Period 2</td><td>%s: %s &rarr; %s (%ss)</td></tr>'
@@ -22735,7 +22740,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         '<td class="k">&Delta; DB Time (s)</td><td>%s</td></tr>'
         '</table></div>' % (
             esc(m2.get("db_name") or m2.get("name") or "?"), esc(m2.get("hostname", "?")),
-            esc(m2.get("db_version", "?") or "?"), esc(m2.get("vb_tool_version", "?")),
+            esc(m2.get("db_version", "?") or "?"), esc(m2.get("vb_tool_version", "?")), esc(_GEN_VER),
             esc(_compat),
             esc(m1.get("name", "?")), esc(m1.get("begin_ts", "?")), esc(m1.get("end_ts", "?")), esc(m1.get("duration", "?")),
             esc(m2.get("name", "?")), esc(m2.get("begin_ts", "?")), esc(m2.get("end_ts", "?")), esc(m2.get("duration", "?")),
