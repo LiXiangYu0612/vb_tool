@@ -1,13 +1,13 @@
 #!/bin/bash
 #--------------------------------------------------------------------------------
 #-- File name:   vb_tool
-#-- Version  ：  v2.0.4
-#-- Commit at：  2026-08-24 21:19:28
+#-- Version  ：  v2.0.5
+#-- Commit at：  2026-08-24 21:41:00
 #-- Purpose:     Vastbase Script Tool
 #-- Author:      MVS & Second-line Team 
 #--------------------------------------------------------------------------------
 set -o pipefail
-export VB_TOOL_VERSION="v2.0.4"
+export VB_TOOL_VERSION="v2.0.5"
 show_help() {
     echo "Vastbase Script Tool (vb_tool)"
     echo ""
@@ -6651,8 +6651,9 @@ WHERE
     ${tablecondition}
 ORDER BY
     total_size DESC
-limit ${number} 
-)tt;
+limit ${number}
+)tt
+order by tt.total_size desc;
 
 EOF
 
