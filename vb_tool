@@ -7,7 +7,7 @@
 #-- Author:      MVS & Second-line Team 
 #--------------------------------------------------------------------------------
 set -o pipefail
-VB_TOOL_VERSION="v2.0.1"
+VB_TOOL_VERSION="v2.0.2"
 show_help() {
     echo "Vastbase Script Tool (vb_tool)"
     echo ""
@@ -19944,9 +19944,10 @@ counter delta between two snapshots (end - begin).
                             newest first; default latest 30, a date lists
                             that whole day
   show                      awr overview: run status (crontab entries),
-                            sampling interval, retention, oldest/newest
-                            snapshot, snapshot count; while ENABLED also
-                            last-snap age (ok / STALE liveness hint)
+                            data dir (absolute path), sampling interval,
+                            retention, oldest/newest snapshot, snapshot
+                            count; while ENABLED also last-snap age
+                            (ok / STALE liveness hint)
   delete  until <time>      delete snapshots (by ts), html reports (by mtime) and
                             old repl_*.log (by whole day) older than <time>;
                             e.g. '2026-08-11' or '2026-08-11 12:00:00'
@@ -23712,6 +23713,10 @@ _awr_show() {
         return 2
     fi
     local root; root=$(_awr_root)
+    # absolute path for display: root is normally already absolute ($HOME or
+    # $VB_TOOL_HOME based), cd+pwd also resolves a relative VB_TOOL_HOME and
+    # collapses any symlinked segments when the dir exists
+    local rootabs; rootabs=$(cd "$root" 2>/dev/null && pwd); [ -n "$rootabs" ] || rootabs=$root
     local days; days=$(_awr_retention_read)
     local mins; mins=$(_awr_interval_read)
     # run status: read the SAME per-port markers enable/disable use, so what
@@ -23799,6 +23804,7 @@ PY
     [ -n "$others" ] && echo "other ports   : awr also enabled on: $others"
     cat <<EOF
 port           : $port
+data dir      : $rootabs (snap_<id>/ per snapshot)
 interval      : ${mins} min
 retention     : $rdesc
 auto-purge    : $purge
