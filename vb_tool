@@ -1,13 +1,13 @@
 #!/bin/bash
 #--------------------------------------------------------------------------------
 #-- File name:   vb_tool
-#-- Version  ：  v2.0.1
-#-- Commit at：  2026-08-21 22:46:15
+#-- Version  ：  v2.0.4
+#-- Commit at：  2026-08-24 21:19:28
 #-- Purpose:     Vastbase Script Tool
 #-- Author:      MVS & Second-line Team 
 #--------------------------------------------------------------------------------
 set -o pipefail
-export VB_TOOL_VERSION="v2.0.3"
+export VB_TOOL_VERSION="v2.0.4"
 show_help() {
     echo "Vastbase Script Tool (vb_tool)"
     echo ""
@@ -19651,10 +19651,11 @@ order by age_s desc limit 3;
 \echo ===MEMSES
 select a.sessionid::text, coalesce(a.usename,'-'), coalesce(a.datname,'-'),
        decode(a.state,'active','act','idle in transaction','idle-tx','idle','idle','?') st,
-       (select pg_size_pretty(sum(t2.totalsize)::numeric) from gs_session_memory_detail t2 where split_part(t2.sessid,'.',2)=a.sessionid::text),
+       pg_size_pretty(s.sz::numeric),
        coalesce(substr(regexp_replace(regexp_replace(a.query,'(\r|\n)+',' '),' {2,}',' '),1,68),'-')
-from (select split_part(sessid,'.',2) sid from gs_session_memory_detail group by split_part(sessid,'.',2) order by sum(totalsize) desc limit 5) s
-join pg_stat_activity a on a.sessionid::text = s.sid;"
+from (select split_part(sessid,'.',2) sid, sum(totalsize) sz from gs_session_memory_detail group by split_part(sessid,'.',2) order by sum(totalsize) desc limit 5) s
+join pg_stat_activity a on a.sessionid::text = s.sid
+order by s.sz desc;"
 
     local c_red="" c_ylw="" c_off=""
     if [ -t 1 ]; then c_red=$'\033[31m'; c_ylw=$'\033[33m'; c_off=$'\033[0m'; fi

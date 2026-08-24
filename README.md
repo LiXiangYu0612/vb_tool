@@ -90,6 +90,10 @@ vb_tool list
 
 | 版本 | 日期 | 要点 |
 |------|------|------|
+| v2.0.4 | 2026-08-24 | 修复 vtop TOPMEM 会话内存排行未按内存降序：内层子查询有序但外层 join 缺 ORDER BY，行序不定；现携带聚合值排序输出（显示列同时省去一次重复聚合） |
+| v2.0.3 | 2026-08-24 | awrrpt/awrdiff 报告头 vb_tool 版本格改为 `采集版本 / 生成版本` 双值（生成版本取运行时版本，区分"旧快照+新报告"场景） |
+| v2.0.2 | 2026-08-24 | `awr show` 新增 `data dir` 行：快照根目录绝对路径（per-port） |
+| v2.0.1 | 2026-08-22 | `wdr_event -E "<事件名>"` 单事件历史统计：精确忽略大小写、默认 7 天窗、明细+加权 TOTAL+max 行、三级检查（无快照/无事件提示） |
 | v2.0.0 | 2026-08-21 | 生产环境加固版（vtop/awr 全面风险复查后的修复）：vtop 修复 stdin 关闭时全速刷帧死循环（nohup/管道场景对库高频冲击，现按刷新间隔休眠）；vtop 速率/字节格式化负值防护+ISTAT 实例重启计数器清零防护；vtop EVENT 段排除空闲等待（`wait cmd` 空闲霸榜且把真实等待挤出采样窗口，`none` 同排；flush data/Sort 等干活状态保留）；awr 跨库对象统计的 per-db psql 补齐连接/语句超时（防单个库挂起拖长 create 并长时间持锁）；awr 报告 html 与 repl/slot 日志统一 0600 权限（含 SQL 文本/备机地址，umask 077）；awr 孤儿快照（create 中途被杀、无 meta.json）改按目录 mtime 清理（原先永不清理累积）；修复报告 Platform 行在无 DMI 机器（容器/部分 ARM）误报 Physical（空 join 产生空格 truthy，现正确回落 cpuinfo hypervisor 判虚拟） |
 | v1.4.20 | 2026-08-21 | 新增 `vtop` 实时监控命令（oratop 风格完整版：OS+SESS/LTX 长事务+ISTAT 负载速率（tps/逻辑物理读字节/redo/temp 每秒）+EVENT 等待事件 Top5（wait_events 帧间差值、RT 语义）+DBMEM/MEMCTX/TOPMEM 内存三段+TOPSQL（sqlid 汇总、top 线程真实 CPU% 排序、ET 合计）+LOCK final blocker（lockchain 同源递归 CTE、2PC 感知）；身份行含 CPU 拓扑 sockets/cores/threads/lcpu 与 vb_version()；top 式原地刷新（无闪屏）+阈值红黄着色（管道自动降级纯文本）；默认 -n 10）；awr 报告 Platform 行显示 CPU 架构（lscpu/uname -m）+物理/虚拟；awr 快照 db/*.csv 改 gzip 存储（约 7× 压缩，渲染端新旧格式混用兼容） |
 | v1.4.19 | 2026-08-20 | awr 报告 OS 统计大升级 + Oracle AWR 正宗配色：磁盘表合并 lsds 设备元数据列（Size/Type/Rot/Sched/QDepth/NR_RQ/WC）+ discard/flush 统计（kernel 4.18+）；CPU Info 新增 Platform 行（物理机/虚拟机识别）；网络表新增 Speed/Duplex/Queues/RX·TX ring 列；新增 Network Protocol Errors 节（netstat -s 错误类计数器：核心 30 项固定序、0 值灰显、非零尾巴追加）；报告样式换装 Oracle AWR 原版配色（钢蓝 #336699 标题/卡其分隔线/亮蓝 #0066CC 表头白字/淡黄 #FFFFCC 隔行/棕色 #663300 链接）；大节标题右上加 ↑ Top 返回目录按钮；列名 AWR 化（Reads per Sec 等，去除所有 /s 表头）；修复 SQL 表维度为 CPU/IO Time 时列重复；lsds 新增 --raw 原始输出；全命令统一支持 -h/-help/--help |
