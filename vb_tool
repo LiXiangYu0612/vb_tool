@@ -19583,7 +19583,8 @@ select round(coalesce(max(case when memorytype='process_used_memory' then memory
        round(coalesce(max(case when memorytype='max_dynamic_memory' then memorymbytes end),0)/1024.0,1),
        round(coalesce(max(case when memorytype='dynamic_peak_memory' then memorymbytes end),0)/1024.0,1),
        round(coalesce(max(case when memorytype='dynamic_used_shrctx' then memorymbytes end),0)/1024.0,1),
-       round(coalesce(max(case when memorytype='dynamic_peak_shrctx' then memorymbytes end),0)/1024.0,1)
+       round(coalesce(max(case when memorytype='dynamic_peak_shrctx' then memorymbytes end),0)/1024.0,1),
+       (select current_setting('shared_buffers'))
 from dbe_perf.memory_node_detail;
 \echo ===CTX
 select string_agg(contextname||' '||pg_size_pretty(t.totalsize::numeric)||' ('||t.cnt||')', ' | ' order by t.totalsize desc)
@@ -19701,7 +19702,7 @@ order by s.sz desc;"
         mep=$(awk -v t="$mt" -v a="$ma" 'BEGIN{printf (t>0)?int((t-a)*100/t):0}')
 
         # ---- DB sections ----
-        local db section="" h_node h_ver h_up s_tot s_act s_iit s_idle s_ltx m_used m_max m_dyu m_dym m_dyp m_shr m_shrp
+        local db section="" h_node h_ver h_up s_tot s_act s_iit s_idle s_ltx m_used m_max m_dyu m_dym m_dyp m_shr m_shrp m_sbuf
         local r_sqlid r_cpu r_ns r_rn r_et r_st r_we r_sql ms_sid ms_usr ms_db ms_sz ms_sql
         local cpupairs="0,0" VT_TOP
         if [ -n "$pm_pid" ]; then
@@ -19801,8 +19802,8 @@ limit ${topn};"
                         elif awk -v p="$m_used" -v m="$m_max" 'BEGIN{exit !(m>0 && p/m*100>=75)}'; then mem_col=$c_ylw; fi
                         if [ -n "$m_used" ]; then
                             printf '%s' "$mem_col"
-                            printf 'DBMEM   process %sG/%sG   dynamic %sG/%sG (peak %sG)   dynamic-shared %sG (peak %sG)\n' \
-                                "$m_used" "$m_max" "$m_dyu" "$m_dym" "$m_dyp" "$m_shr" "$m_shrp"
+                            printf 'DBMEM   process %sG/%sG   dynamic %sG/%sG (peak %sG)   dynamic-shared %sG (peak %sG)   shared_buffers %s\n' \
+                                "$m_used" "$m_max" "$m_dyu" "$m_dym" "$m_dyp" "$m_shr" "$m_shrp" "${m_sbuf:--}"
                             printf '%s' "$c_off"
                         fi
                         [ -n "$ctx_txt" ] && printf 'MEMCTX  %s\n' "$ctx_txt"
@@ -19829,7 +19830,7 @@ limit ${topn};"
                               ist_txt="tps $_tps (roll $_rb)   logical $(_vtop_fmt_b $_lg)/s   physical $(_vtop_fmt_b $_ph)/s   redo $(_vtop_fmt_b $_rd)/s   temp $(_vtop_fmt_b $_tp)/s"
                           fi
                           prev_xc=$i_xc; prev_xr=$i_xr; prev_br=$i_br; prev_bh=$i_bh; prev_tb=$i_tb; prev_lsn=$i_lsn;;
-                    DBM)  IFS='|' read -r m_used m_max m_dyu m_dym m_dyp m_shr m_shrp <<< "$line";;
+                    DBM)  IFS='|' read -r m_used m_max m_dyu m_dym m_dyp m_shr m_shrp m_sbuf <<< "$line";;
                     CTX)  ctx_txt="$line";;
                     BLK)  blk_raw="${blk_raw}${line}"$'\n';;
                     LTX)  ltx_raw="${ltx_raw}${line}"$'\n';;
