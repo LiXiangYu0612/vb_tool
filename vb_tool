@@ -19556,7 +19556,7 @@ run_vtop() {
     l_cor=$(lscpu 2>/dev/null | awk -F: '$1=="Core(s) per socket"{gsub(/^[ \t]+/,"",$2); print $2+0}')
     l_thr=$(lscpu 2>/dev/null | awk -F: '$1=="Thread(s) per core"{gsub(/^[ \t]+/,"",$2); print $2+0}')
     l_soc=${l_soc:-1}; l_cor=${l_cor:-1}; l_thr=${l_thr:-1}
-    cores="${l_soc} sockets / $((l_soc*l_cor)) cores / ${l_thr} threads/core / $cores lcpu"
+    cores="${l_soc} sockets / $((l_soc*l_cor)) cores / ${l_thr} threads / $cores lcpu"
     local pm_pid=""
     [ -f "$datadir/postmaster.pid" ] && pm_pid=$(head -1 "$datadir/postmaster.pid" 2>/dev/null | tr -d ' ')
     local VT_SQL="\\echo ===HDR
