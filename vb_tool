@@ -283,7 +283,7 @@ kill_help() {
     echo "    -i ip           Filter by client IP"
     echo "    -p pid          Filter by session ID"
     echo "    -q sqlid        Filter by unique SQL ID"
-    echo "    -s state        Filter by session state (a|i|iit|iita|f|d|r, full name, or prefix)"
+    echo "    -s state        Filter by session state (a|i|iit|iita, full name, or prefix)"
     echo "    -t interval(s)  Filter transactions running longer than interval(seconds)"
     echo "    -u name         Filter by username"
     echo ""
@@ -7404,9 +7404,6 @@ run_kill_sessions() {
              i)    SF="idle" ;;
              iit)  SF="idle in transaction" ;;
              iita) SF="idle in transaction (aborted)" ;;
-             f)    SF="fastpath function call" ;;
-             d)    SF="disabled" ;;
-             r)    SF="retrying" ;;
              *)    SF="$OPTARG" ;;   # full name or prefix
            esac
            if [ "$SF" = "$OPTARG" ]; then
