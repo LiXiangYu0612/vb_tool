@@ -7755,13 +7755,17 @@ filtered_data AS (
     FROM 
         time_counts
     WHERE 
-        /* per-sample-time merge: local_active_session rows win; gs_asp rows
-           fill the sample times local does not cover (local is a short ring
-           buffer, gs_asp holds the flushed history) */
-        table_type = 'a'
-        OR NOT EXISTS (SELECT 1 FROM time_counts a2
-                       WHERE a2.table_type = 'a'
-                         AND a2.sample_time = time_counts.sample_time)
+        /* bucket-level source pick: if gs_asp has ANY sample in this 5-min
+           bucket, gs_asp wins the whole bucket (it usually covers the full
+           5 minutes); local_active_session only fills buckets gs_asp has not
+           flushed yet -> one row per bucket, no split at the flush seam */
+        table_type = 'b'
+        OR NOT EXISTS (SELECT 1 FROM time_counts b2
+                       WHERE b2.table_type = 'b'
+                         AND DATE_TRUNC('hour', b2.sample_time)
+                             + FLOOR(EXTRACT(MINUTE FROM b2.sample_time) / 5) * INTERVAL '5 min'
+                           = DATE_TRUNC('hour', time_counts.sample_time)
+                             + FLOOR(EXTRACT(MINUTE FROM time_counts.sample_time) / 5) * INTERVAL '5 min')
 ),
 five_min_intervals AS (
     SELECT 
@@ -7855,13 +7859,17 @@ filtered_data AS (
     FROM 
         time_counts
     WHERE 
-        /* per-sample-time merge: local_active_session rows win; gs_asp rows
-           fill the sample times local does not cover (local is a short ring
-           buffer, gs_asp holds the flushed history) */
-        table_type = 'a'
-        OR NOT EXISTS (SELECT 1 FROM time_counts a2
-                       WHERE a2.table_type = 'a'
-                         AND a2.sample_time = time_counts.sample_time)
+        /* bucket-level source pick: if gs_asp has ANY sample in this 5-min
+           bucket, gs_asp wins the whole bucket (it usually covers the full
+           5 minutes); local_active_session only fills buckets gs_asp has not
+           flushed yet -> one row per bucket, no split at the flush seam */
+        table_type = 'b'
+        OR NOT EXISTS (SELECT 1 FROM time_counts b2
+                       WHERE b2.table_type = 'b'
+                         AND DATE_TRUNC('hour', b2.sample_time)
+                             + FLOOR(EXTRACT(MINUTE FROM b2.sample_time) / 5) * INTERVAL '5 min'
+                           = DATE_TRUNC('hour', time_counts.sample_time)
+                             + FLOOR(EXTRACT(MINUTE FROM time_counts.sample_time) / 5) * INTERVAL '5 min')
 ),
 five_min_intervals AS (
     SELECT 
@@ -7965,13 +7973,17 @@ filtered_data AS (
     FROM 
         time_counts
     WHERE 
-        /* per-sample-time merge: local_active_session rows win; gs_asp rows
-           fill the sample times local does not cover (local is a short ring
-           buffer, gs_asp holds the flushed history) */
-        table_type = 'a'
-        OR NOT EXISTS (SELECT 1 FROM time_counts a2
-                       WHERE a2.table_type = 'a'
-                         AND a2.sample_time = time_counts.sample_time)
+        /* bucket-level source pick: if gs_asp has ANY sample in this 5-min
+           bucket, gs_asp wins the whole bucket (it usually covers the full
+           5 minutes); local_active_session only fills buckets gs_asp has not
+           flushed yet -> one row per bucket, no split at the flush seam */
+        table_type = 'b'
+        OR NOT EXISTS (SELECT 1 FROM time_counts b2
+                       WHERE b2.table_type = 'b'
+                         AND DATE_TRUNC('hour', b2.sample_time)
+                             + FLOOR(EXTRACT(MINUTE FROM b2.sample_time) / 5) * INTERVAL '5 min'
+                           = DATE_TRUNC('hour', time_counts.sample_time)
+                             + FLOOR(EXTRACT(MINUTE FROM time_counts.sample_time) / 5) * INTERVAL '5 min')
 ),
 five_min_intervals AS (
     SELECT 
@@ -8050,13 +8062,17 @@ filtered_data AS (
     FROM 
         time_counts
     WHERE 
-        /* per-sample-time merge: local_active_session rows win; gs_asp rows
-           fill the sample times local does not cover (local is a short ring
-           buffer, gs_asp holds the flushed history) */
-        table_type = 'a'
-        OR NOT EXISTS (SELECT 1 FROM time_counts a2
-                       WHERE a2.table_type = 'a'
-                         AND a2.sample_time = time_counts.sample_time)
+        /* bucket-level source pick: if gs_asp has ANY sample in this 5-min
+           bucket, gs_asp wins the whole bucket (it usually covers the full
+           5 minutes); local_active_session only fills buckets gs_asp has not
+           flushed yet -> one row per bucket, no split at the flush seam */
+        table_type = 'b'
+        OR NOT EXISTS (SELECT 1 FROM time_counts b2
+                       WHERE b2.table_type = 'b'
+                         AND DATE_TRUNC('hour', b2.sample_time)
+                             + FLOOR(EXTRACT(MINUTE FROM b2.sample_time) / 5) * INTERVAL '5 min'
+                           = DATE_TRUNC('hour', time_counts.sample_time)
+                             + FLOOR(EXTRACT(MINUTE FROM time_counts.sample_time) / 5) * INTERVAL '5 min')
 ),
 five_min_intervals AS (
     SELECT 
@@ -8163,13 +8179,17 @@ filtered_data AS (
     FROM 
         time_counts
     WHERE 
-        /* per-sample-time merge: local_active_session rows win; gs_asp rows
-           fill the sample times local does not cover (local is a short ring
-           buffer, gs_asp holds the flushed history) */
-        table_type = 'a'
-        OR NOT EXISTS (SELECT 1 FROM time_counts a2
-                       WHERE a2.table_type = 'a'
-                         AND a2.sample_time = time_counts.sample_time)
+        /* bucket-level source pick: if gs_asp has ANY sample in this 5-min
+           bucket, gs_asp wins the whole bucket (it usually covers the full
+           5 minutes); local_active_session only fills buckets gs_asp has not
+           flushed yet -> one row per bucket, no split at the flush seam */
+        table_type = 'b'
+        OR NOT EXISTS (SELECT 1 FROM time_counts b2
+                       WHERE b2.table_type = 'b'
+                         AND DATE_TRUNC('hour', b2.sample_time)
+                             + FLOOR(EXTRACT(MINUTE FROM b2.sample_time) / 5) * INTERVAL '5 min'
+                           = DATE_TRUNC('hour', time_counts.sample_time)
+                             + FLOOR(EXTRACT(MINUTE FROM time_counts.sample_time) / 5) * INTERVAL '5 min')
 ),
 five_min_intervals AS (
     SELECT 
@@ -8235,13 +8255,17 @@ filtered_data AS (
     FROM 
         time_counts
     WHERE 
-        /* per-sample-time merge: local_active_session rows win; gs_asp rows
-           fill the sample times local does not cover (local is a short ring
-           buffer, gs_asp holds the flushed history) */
-        table_type = 'a'
-        OR NOT EXISTS (SELECT 1 FROM time_counts a2
-                       WHERE a2.table_type = 'a'
-                         AND a2.sample_time = time_counts.sample_time)
+        /* bucket-level source pick: if gs_asp has ANY sample in this 5-min
+           bucket, gs_asp wins the whole bucket (it usually covers the full
+           5 minutes); local_active_session only fills buckets gs_asp has not
+           flushed yet -> one row per bucket, no split at the flush seam */
+        table_type = 'b'
+        OR NOT EXISTS (SELECT 1 FROM time_counts b2
+                       WHERE b2.table_type = 'b'
+                         AND DATE_TRUNC('hour', b2.sample_time)
+                             + FLOOR(EXTRACT(MINUTE FROM b2.sample_time) / 5) * INTERVAL '5 min'
+                           = DATE_TRUNC('hour', time_counts.sample_time)
+                             + FLOOR(EXTRACT(MINUTE FROM time_counts.sample_time) / 5) * INTERVAL '5 min')
 ),
 five_min_intervals AS (
     SELECT 
@@ -8466,6 +8490,8 @@ blocker_stats AS (
 local_part AS (
     SELECT 'a' src,
            a.sample_time::timestamp(0) without time zone AS sample_time,
+           DATE_TRUNC('hour', a.sample_time::timestamp(0) without time zone)
+             + FLOOR(EXTRACT(MINUTE FROM a.sample_time::timestamp(0) without time zone) / 5) * INTERVAL '5 min' AS interval_start,
            b.final_block_sessionid||'('||case when $condition6 then 'a' else 'iit' end||')'||'('||$condition8||')' root_block_sessid,
            b.cnt as b_cnt,
            substr(a.unique_query,1,50) h_sql,
@@ -8477,6 +8503,8 @@ local_part AS (
 gs_part AS (
     SELECT 'b' src,
            las.sample_time::timestamp(0) without time zone AS sample_time,
+           DATE_TRUNC('hour', las.sample_time::timestamp(0) without time zone)
+             + FLOOR(EXTRACT(MINUTE FROM las.sample_time::timestamp(0) without time zone) / 5) * INTERVAL '5 min' AS interval_start,
            las.sessionid||'('||case when $condition7 then 'a' else 'iit' end||')'||'('||$condition9||')' root_block_sessid,
            bs.blocked_count as b_cnt,
            substr(las.unique_query,1,50) h_sql,
@@ -8492,18 +8520,20 @@ merged AS (
     UNION ALL
     SELECT * FROM gs_part
 ),
-/* 5-minute buckets, same alignment as cnt/sql/event; per (src,bucket,root)
-   keep the sample with the MAX blocked count (user-facing rule) */
+/* 5-minute buckets, same alignment as cnt/sql/event; buckets with ANY
+   gs_asp sample are served by gs_asp alone (usually full coverage), local
+   only fills buckets gs_asp has not flushed -> one row per bucket+root */
+picked AS (
+    SELECT m.* FROM merged m
+    WHERE m.src = 'b'
+       OR NOT EXISTS (SELECT 1 FROM merged m2
+                      WHERE m2.src = 'b' AND m2.interval_start = m.interval_start)
+),
 bucketed AS (
-    SELECT m.*,
-           DATE_TRUNC('hour', m.sample_time)
-             + FLOOR(EXTRACT(MINUTE FROM m.sample_time) / 5) * INTERVAL '5 min' AS interval_start,
-           row_number() OVER (PARTITION BY m.src,
-                              DATE_TRUNC('hour', m.sample_time)
-                                + FLOOR(EXTRACT(MINUTE FROM m.sample_time) / 5) * INTERVAL '5 min',
-                              m.root_block_sessid
-                              ORDER BY m.b_cnt DESC, m.sample_time) AS rn
-    FROM merged m
+    SELECT p.*,
+           row_number() OVER (PARTITION BY p.src, p.interval_start, p.root_block_sessid
+                              ORDER BY p.b_cnt DESC, p.sample_time) AS rn
+    FROM picked p
 )
 SELECT /*+set(enable_mergejoin off) set(enable_nestloop off) set(enable_index_nestloop off)*/
     CASE WHEN src = 'a' THEN '[local_active_session] ' ELSE '[gs_asp] ' END
