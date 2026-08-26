@@ -19607,21 +19607,21 @@ _vtop_net() {
     awk 'NR>2 && $1 !~ /^(lo|veth|br-|docker|virbr|tap)[0-9:a-z]*:?$/ {sub(":","",$1); r+=$2; t+=$10} END{print r+0, t+0}' /proc/net/dev
 }
 
-# MemTotal MemFree MemAvailable SwapTotal SwapFree (kB)
+# MemTotal MemFree MemAvailable Buffers+Cached+SReclaimable SwapTotal SwapFree (kB)
 _vtop_mem() {
-    awk '/^(MemTotal|MemFree|MemAvailable|SwapTotal|SwapFree):/{a[$1]=$2} END{print a["MemTotal:"], a["MemFree:"], a["MemAvailable:"], a["SwapTotal:"], a["SwapFree:"]}' /proc/meminfo
+    awk '/^(MemTotal|MemFree|MemAvailable|Buffers|Cached|SReclaimable|SwapTotal|SwapFree):/{a[$1]=$2} END{print a["MemTotal:"], a["MemFree:"], a["MemAvailable:"], a["Buffers:"]+a["Cached:"]+a["SReclaimable:"], a["SwapTotal:"], a["SwapFree:"]}' /proc/meminfo
 }
 
 _vtop_print_os() { # oratop-style coded-header sections; reads caller-scope vars
-    printf 'OS      %5s %5s %5s %5s %21s %11s %8s %8s\n' CPUus CPUsy CPUid CPUwa 'MEMu/f/a/t' 'SWAPf/t' NETrx NETtx
-    _vtop_rule_cols '        ' 5 5 5 5 21 11 8 8
+    printf 'OS      %5s %5s %5s %5s %28s %11s %8s %8s\n' CPUus CPUsy CPUid CPUwa 'MEMu/f/a/c/t' 'SWAPf/t' NETrx NETtx
+    _vtop_rule_cols '        ' 5 5 5 5 28 11 8 8
     local os_col=""
     if awk -v u="$a_us" -v sy="$a_sy" -v w="$a_wa" 'BEGIN{exit !(u+sy+w>=80 || w>=20)}'; then os_col=$c_red
     elif awk -v u="$a_us" -v sy="$a_sy" 'BEGIN{exit !(u+sy>=60)}'; then os_col=$c_ylw; fi
     printf '%s' "$os_col"
-    printf '        %5.1f %5.1f %5.1f %5.1f %21s %11s %8.1f %8.1f\n' \
+    printf '        %5.1f %5.1f %5.1f %5.1f %28s %11s %8.1f %8.1f\n' \
         "$a_us" "$a_sy" "$a_id" "$a_wa" \
-        "$(_vtop_hum $((mt - ${ma:-0})))/$(_vtop_hum "${mf:-0}")/$(_vtop_hum "$ma")/$(_vtop_hum "$mt")" \
+        "$(_vtop_hum $((mt - ${ma:-0})))/$(_vtop_hum "${mf:-0}")/$(_vtop_hum "$ma")/$(_vtop_hum "${mbc:-0}")/$(_vtop_hum "$mt")" \
         "$(_vtop_hum "${msf:-0}")/$(_vtop_hum "$mst")" "$n_rx" "$n_tx"
     printf '%s' "$c_off"
     if [ -n "$dev" ]; then
@@ -19856,7 +19856,7 @@ order by s.sz desc;"
             s=ms/1000; rl=(ro>0)?rt/ro:0; wl=(wo>0)?wt/wo:0; u=(it*100/ms); if(u>100)u=100;
             printf "%.0f %.1f %.1f %.0f %.1f %.1f %.0f", ro/s, rs/1048576/s, rl, wo/s, ws/1048576/s, wl, u}')"
         read -r n_rx n_tx <<< "$(awk -v a="$n0" -v b="$n1" -v ms="$dt" 'BEGIN{split(a,x);split(b,y);s=ms/1000; printf "%.1f %.1f", (y[1]-x[1])/1048576/s, (y[2]-x[2])/1048576/s}')"
-        read -r mt mf ma mst msf <<< "$(_vtop_mem)"
+        read -r mt mf ma mbc mst msf <<< "$(_vtop_mem)"
         local mep
         mep=$(awk -v t="$mt" -v a="$ma" 'BEGIN{printf (t>0)?int((t-a)*100/t):0}')
 
