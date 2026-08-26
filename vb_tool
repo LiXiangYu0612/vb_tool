@@ -20960,8 +20960,8 @@ def numa_html_table(topology, stats_delta_factory):
     nodes = topology.get("nodes", {})
     parts.append('<table class="t"><tr><th>NUMA Nodes</th><th class="n">%d</th></tr></table>'
                  % len(nodes))
-    parts.append('<table class="t"><tr><th>Node</th><th>CPU list</th><th>MemTotal</th>'
-                 '<th>MemFree</th><th>Distance</th></tr>')
+    parts.append('<table class="t"><tr><th>Node</th><th>CPU list</th><th class="n">MemTotal</th>'
+                 '<th class="n">MemFree</th><th class="n">Distance</th></tr>')
     for nid in sorted(nodes, key=lambda x: int(x) if x.isdigit() else 0):
         nd = nodes[nid]
         parts.append('<tr><td>%s</td><td>%s</td><td class="n">%s</td>'
@@ -20970,9 +20970,9 @@ def numa_html_table(topology, stats_delta_factory):
                          fmt_kb(nd["mem_total_kb"]), fmt_kb(nd["mem_free_kb"]),
                          esc(nd["distance"])))
     parts.append('</table>')
-    parts.append('<table class="t"><tr><th>Node</th><th>numa_hit</th><th>numa_miss</th>'
-                 '<th>interleave_hit</th><th>local_node</th><th>other_node</th>'
-                 '<th>local ratio</th></tr>')
+    parts.append('<table class="t"><tr><th>Node</th><th class="n">numa_hit</th><th class="n">numa_miss</th>'
+                 '<th class="n">interleave_hit</th><th class="n">local_node</th><th class="n">other_node</th>'
+                 '<th class="n">local ratio</th></tr>')
     any_stat = False
     for nid in sorted(nodes, key=lambda x: int(x) if x.isdigit() else 0):
         hit = stats_delta_factory(nid, "numa_hit")
@@ -22685,6 +22685,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             parts.append('<div class="note">no data</div>')
             return
         _hdr = list(key_cols)
+        _num = [False] * len(key_cols)
         for _c, _mode in col_specs:
             if _mode == "be":
                 _hdr += [_c + " Begin", _c + " End"]
@@ -22692,7 +22693,10 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                 _hdr += [_c + " Δ"]
             else:
                 _hdr += [_c]
-        parts.append('<table class="t"><tr>' + ''.join('<th>%s</th>' % esc(c) for c in _hdr) + '</tr>')
+            _num += [True]           # col_spec columns are numeric -> right-align headers too
+        parts.append('<table class="t"><tr>' + ''.join(
+            '<th%s>%s</th>' % (' class="n"' if nu else '', esc(c))
+            for c, nu in zip(_hdr, _num)) + '</tr>')
         for _k, _vals in _rows:
             _cells = ''.join('<td>%s</td>' % esc(x) for x in _k)
             for _c, _mode in col_specs:
@@ -22982,8 +22986,8 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         _nodes = _ntop.get("nodes", {})
         parts.append('<table class="t"><tr><th>NUMA Nodes</th><th class="n">%d</th></tr></table>'
                      % len(_nodes))
-        parts.append('<table class="t"><tr><th>Node</th><th>CPU list</th><th>MemTotal</th>'
-                     '<th>MemFree</th><th>Distance</th></tr>')
+        parts.append('<table class="t"><tr><th>Node</th><th>CPU list</th><th class="n">MemTotal</th>'
+                     '<th class="n">MemFree</th><th class="n">Distance</th></tr>')
         for nid in sorted(_nodes, key=lambda x: int(x) if x.isdigit() else 0):
             nd = _nodes[nid]
             parts.append('<tr><td>%s</td><td>%s</td><td class="n">%s</td>'
@@ -23298,7 +23302,10 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         _keys = sorted(set(d1) | set(d2),
                        key=lambda k: d2.get(k, {}).get(sort_col, 0) + d1.get(k, {}).get(sort_col, 0), reverse=True)[:top]
         _hdr = list(key_cols) + [c + " P1" for c in cnt_cols] + [c + " P2" for c in cnt_cols] + [c + " &Delta;" for c in cnt_cols]
-        parts.append('<table class="t"><tr>' + ''.join('<th>%s</th>' % esc(c) for c in _hdr) + '</tr>')
+        _num = [False] * len(key_cols) + [True] * (3 * len(cnt_cols))
+        parts.append('<table class="t"><tr>' + ''.join(
+            '<th%s>%s</th>' % (' class="n"' if nu else '', esc(c))
+            for c, nu in zip(_hdr, _num)) + '</tr>')
         if not _keys:
             parts.append('<tr><td colspan="%d" class="note">no data</td></tr>' % len(_hdr))
         for k in _keys:
