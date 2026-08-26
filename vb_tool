@@ -19613,15 +19613,16 @@ _vtop_mem() {
 }
 
 _vtop_print_os() { # oratop-style coded-header sections; reads caller-scope vars
-    printf 'OS      %5s %5s %5s %5s %28s %11s %8s %8s\n' CPUus CPUsy CPUid CPUwa 'MEMu/f/a/c/t' 'SWAPf/t' NETrx NETtx
-    _vtop_rule_cols '        ' 5 5 5 5 28 11 8 8
+    printf 'OS      %5s %5s %5s %5s %6s %6s %6s %6s %6s %11s %8s %8s\n' CPUus CPUsy CPUid CPUwa MEMt MEMu MEMf MEMa MEMbc 'SWAPf/t' NETrx NETtx
+    _vtop_rule_cols '        ' 5 5 5 5 6 6 6 6 6 11 8 8
     local os_col=""
     if awk -v u="$a_us" -v sy="$a_sy" -v w="$a_wa" 'BEGIN{exit !(u+sy+w>=80 || w>=20)}'; then os_col=$c_red
     elif awk -v u="$a_us" -v sy="$a_sy" 'BEGIN{exit !(u+sy>=60)}'; then os_col=$c_ylw; fi
     printf '%s' "$os_col"
-    printf '        %5.1f %5.1f %5.1f %5.1f %28s %11s %8.1f %8.1f\n' \
+    printf '        %5.1f %5.1f %5.1f %5.1f %6s %6s %6s %6s %6s %11s %8.1f %8.1f\n' \
         "$a_us" "$a_sy" "$a_id" "$a_wa" \
-        "$(_vtop_hum $((mt - ${ma:-0})))/$(_vtop_hum "${mf:-0}")/$(_vtop_hum "$ma")/$(_vtop_hum "${mbc:-0}")/$(_vtop_hum "$mt")" \
+        "$(_vtop_hum "$mt")" "$(_vtop_hum $((mt - ${ma:-0})))" "$(_vtop_hum "${mf:-0}")" \
+        "$(_vtop_hum "$ma")" "$(_vtop_hum "${mbc:-0}")" \
         "$(_vtop_hum "${msf:-0}")/$(_vtop_hum "$mst")" "$n_rx" "$n_tx"
     printf '%s' "$c_off"
     if [ -n "$dev" ]; then
