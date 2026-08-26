@@ -8464,7 +8464,8 @@ blocker_stats AS (
     GROUP BY sampleid, root_blocker
 ),
 local_part AS (
-    SELECT '[local_active_session] '||(a.sample_time::timestamp(0) without time zone)::text sample_time,
+    SELECT 'a' src,
+           a.sample_time::timestamp(0) without time zone AS sample_time,
            b.final_block_sessionid||'('||case when $condition6 then 'a' else 'iit' end||')'||'('||$condition8||')' root_block_sessid,
            b.cnt as b_cnt,
            substr(a.unique_query,1,50) h_sql,
@@ -8474,7 +8475,8 @@ local_part AS (
     WHERE a.sampleid=b.sampleid and b.final_block_sessionid=a.sessionid and b.sampleid=c.sampleid and b.w_sessionid=c.sessionid
 ),
 gs_part AS (
-    SELECT '[gs_asp] '||(las.sample_time::timestamp(0) without time zone)::text sample_time,
+    SELECT 'b' src,
+           las.sample_time::timestamp(0) without time zone AS sample_time,
            las.sessionid||'('||case when $condition7 then 'a' else 'iit' end||')'||'('||$condition9||')' root_block_sessid,
            bs.blocked_count as b_cnt,
            substr(las.unique_query,1,50) h_sql,
@@ -8484,15 +8486,36 @@ gs_part AS (
                                       AND bs.root_blocker = las.sessionid
     JOIN gs_asp_1 blocked_las ON bs.sampleid = blocked_las.sampleid 
                                               AND bs.example_blocked_sessionid = blocked_las.sessionid
-)
-SELECT /*+set(enable_mergejoin off) set(enable_nestloop off) set(enable_index_nestloop off)*/ 
-    sample_time, root_block_sessid, b_cnt, h_sql, w_sql
-FROM (
+),
+merged AS (
     SELECT * FROM local_part
     UNION ALL
     SELECT * FROM gs_part
-) merged
-ORDER BY sample_time, root_block_sessid; 
+),
+/* 5-minute buckets, same alignment as cnt/sql/event; per (src,bucket,root)
+   keep the sample with the MAX blocked count (user-facing rule) */
+bucketed AS (
+    SELECT m.*,
+           DATE_TRUNC('hour', m.sample_time)
+             + FLOOR(EXTRACT(MINUTE FROM m.sample_time) / 5) * INTERVAL '5 min' AS interval_start,
+           row_number() OVER (PARTITION BY m.src,
+                              DATE_TRUNC('hour', m.sample_time)
+                                + FLOOR(EXTRACT(MINUTE FROM m.sample_time) / 5) * INTERVAL '5 min',
+                              m.root_block_sessid
+                              ORDER BY m.b_cnt DESC, m.sample_time) AS rn
+    FROM merged m
+)
+SELECT /*+set(enable_mergejoin off) set(enable_nestloop off) set(enable_index_nestloop off)*/
+    CASE WHEN src = 'a' THEN '[local_active_session] ' ELSE '[gs_asp] ' END
+    || to_char(interval_start, 'YYYY-MM-DD HH24:MI:SS') || '-'
+    || to_char(interval_start + INTERVAL '5 minutes', 'HH24:MI:SS') AS date_time,
+    root_block_sessid,
+    b_cnt AS max_b_cnt,
+    h_sql,
+    w_sql
+FROM bucketed
+WHERE rn = 1
+ORDER BY interval_start, max_b_cnt DESC; 
 EOF
     fi
 }
