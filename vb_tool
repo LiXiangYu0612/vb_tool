@@ -19902,7 +19902,7 @@ limit ${topn};"
         db=$(printf '%s\n%s\n' "$VT_SQL" "$VT_TOP" | PGCONNECT_TIMEOUT=5 psql -d postgres -X -At -F'|' 2>/dev/null)
         {
         if [ -z "$db" ]; then
-            printf 'vbtop: (db unreachable)   port %s   refresh %ds   %s cores   %s\n\n' \
+            printf 'vbtop: (db unreachable)   port %s   refresh %ds   %s cores   %s\n' \
                 "${PGPORT:-5432}" "$interval" "$cores" "$(date '+%F %T')"
             _vtop_print_os
         else
@@ -19924,7 +19924,6 @@ limit ${topn};"
                             "$(awk -v s="$h_up" 'BEGIN{printf "%dd%02dh%02dm", int(s/86400), int(s%86400/3600), int(s%3600/60)}')" \
                             "$interval" "$cores" "$(date '+%F %T')"
                         _vtop_print_os
-                        printf '\n'
                         if [ -n "$s_tot" ]; then
                             local ltx_disp="$s_ltx"
                             [ "$s_ltx" -gt 0 ] 2>/dev/null && ltx_disp="${c_red}${s_ltx}${c_off}"
@@ -19947,7 +19946,7 @@ limit ${topn};"
                         fi
                         printf 'ISTAT   %s\n' "${ist_txt:--}"
             if [ -n "$ev_buf" ]; then
-                            printf '\nEVENT   %-28s %7s %8s %7s  CLASS\n' "NAME(RT)" "WAITS" "TIME" "AVG"
+                            printf 'EVENT   %-28s %7s %8s %7s  CLASS\n' "NAME(RT)" "WAITS" "TIME" "AVG"
                             _vtop_rule_cols '        ' 28 7 8 7 7
                             printf '%s' "$ev_buf" | sort -t'|' -k1,1rn | head -5 | while IFS='|' read -r _dt _dw _cl _nm; do
                                 [ -z "$_nm" ] && continue
@@ -19955,7 +19954,7 @@ limit ${topn};"
                                 printf '        %-28.28s %7d %8s %7s  %s\n' "$_nm" "$_dw" "$(_vtop_fmt_us $_dt)" "$(_vtop_fmt_us $_avg)" "$_cl"
                             done
                         else
-                            printf '\nEVENT   (no waits in this interval)\n'
+                            printf 'EVENT   (no waits in this interval)\n'
                         fi
                         local mem_col=""
                         if awk -v p="$m_used" -v m="$m_max" -v y="$m_dyu" -v n="$m_dym" 'BEGIN{exit !((m>0 && p/m*100>=90) || (n>0 && y/n*100>=90))}'; then mem_col=$c_red
@@ -19967,11 +19966,11 @@ limit ${topn};"
                             printf '%s' "$c_off"
                         fi
                         [ -n "$ctx_txt" ] && printf 'MEMCTX  %s\n' "$ctx_txt"
-                        printf '\nTOPMEM  %-14s %-9s %-9s %-8s %9s %s\n' "SID" "USER" "DB" "STATE" "MEM" "SQLTEXT"
+                        printf 'TOPMEM  %-14s %-9s %-9s %-8s %9s %s\n' "SID" "USER" "DB" "STATE" "MEM" "SQLTEXT"
                         _vtop_rule_cols '        ' 14 9 9 8 9 68
                         section=MEMSES; continue;;
                     ===TOP)
-                        printf '\nTOPSQL  %-11s %6s %7s %5s %s\n' "SQLID" "CPU%" "RUN/TOT" "ET(s)" "SQLTEXT"
+                        printf 'TOPSQL  %-11s %6s %7s %5s %s\n' "SQLID" "CPU%" "RUN/TOT" "ET(s)" "SQLTEXT"
                         _vtop_rule_cols '        ' 11 6 7 5 80
                         section=TOP; continue;;
                 esac
@@ -20014,7 +20013,7 @@ limit ${topn};"
                 esac
             done <<< "$db"
             if [ -n "$blk_raw" ]; then
-                printf '\nLOCK    %-7s %-7s %-15s %-8s %4s  %s\n' "AGE" "STATE" "FINAL BLOCKER" "USER" "BLK" "QUERY"
+                printf 'LOCK    %-7s %-7s %-15s %-8s %4s  %s\n' "AGE" "STATE" "FINAL BLOCKER" "USER" "BLK" "QUERY"
                 _vtop_rule_cols '        ' 7 7 15 8 4 40
                 local k_lvl k_st k_sid k_usr k_blk k_age k_sql k_ah
                 while IFS='|' read -r k_lvl k_st k_sid k_usr k_blk k_age k_sql; do
@@ -20025,7 +20024,7 @@ limit ${topn};"
                     printf '%s' "$c_off"
                 done <<< "$blk_raw"
             else
-                printf '\nLOCK    none\n'
+                printf 'LOCK    none\n'
             fi
         fi
         } > "$_vtop_f"
