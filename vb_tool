@@ -8389,9 +8389,9 @@ EOF
 	else 
 	psql -d postgres -P footer=off <<EOF
 \echo '==================================='
-\echo '====================================================='
-\echo '  waitchain (local_active_session + gs_asp merged)  '
-\echo '====================================================='
+\echo '=================================='
+\echo ' active session history waitchain '
+\echo '=================================='
 WITH RECURSIVE
 blocked_sessions AS (
     SELECT 
