@@ -22215,7 +22215,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     if _ci:
         sub("CPU Info")
         parts.append('<table class="t"><tr><th>Item</th><th class="n">Value</th></tr>')
-        parts.append('<tr><td>Model</td><td>%s</td></tr>' % esc(_ci["model"]))
+        parts.append('<tr><td>Model</td><td class="n">%s</td></tr>' % esc(_ci["model"]))
         parts.append('<tr><td>Sockets</td><td class="n">%d</td></tr>' % _ci["sockets"])
         parts.append('<tr><td>Cores per Socket</td><td class="n">%d</td></tr>' % _ci["cores_per_socket"])
         parts.append('<tr><td>Total Physical Cores</td><td class="n">%d</td></tr>' % _ci["total_cores"])
@@ -22225,7 +22225,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             parts.append('<tr><td>Freq (min / avg / max MHz)</td><td class="n">%.0f / %.0f / %.0f</td></tr>'
                          % (_ci["freq_min_mhz"], _ci["freq_avg_mhz"], _ci["freq_max_mhz"]))
         if osd.get("platform"):
-            parts.append('<tr><td>Platform</td><td>%s</td></tr>' % esc(osd["platform"]))
+            parts.append('<tr><td>Platform</td><td class="n">%s</td></tr>' % esc(osd["platform"]))
         parts.append('</table>')
     sub("CPU utilization (%)")
     # horizontal layout: components as columns, one value row (busy bolded)
@@ -22941,7 +22941,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         _ci = _ci2 or _ci1   # hardware info is static; prefer P2 (newer), fall back P1
         sub("CPU Info (period-end snapshot)")
         parts.append('<table class="t"><tr><th>Item</th><th class="n">Value</th></tr>')
-        parts.append('<tr><td>Model</td><td>%s</td></tr>' % esc(_ci["model"]))
+        parts.append('<tr><td>Model</td><td class="n">%s</td></tr>' % esc(_ci["model"]))
         parts.append('<tr><td>Sockets</td><td class="n">%d</td></tr>' % _ci["sockets"])
         parts.append('<tr><td>Cores per Socket</td><td class="n">%d</td></tr>' % _ci["cores_per_socket"])
         parts.append('<tr><td>Total Physical Cores</td><td class="n">%d</td></tr>' % _ci["total_cores"])
@@ -22952,7 +22952,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                          % (_ci["freq_min_mhz"], _ci["freq_avg_mhz"], _ci["freq_max_mhz"]))
         _plat = osd2.get("platform") or osd1.get("platform")
         if _plat:
-            parts.append('<tr><td>Platform</td><td>%s</td></tr>' % esc(_plat))
+            parts.append('<tr><td>Platform</td><td class="n">%s</td></tr>' % esc(_plat))
         parts.append('</table>')
     sub("CPU utilization (%)")
     # horizontal layout: components as columns, P1 / P2 / delta as rows
