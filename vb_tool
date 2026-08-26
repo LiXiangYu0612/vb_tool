@@ -283,7 +283,7 @@ kill_help() {
     echo "    -i ip           Filter by client IP"
     echo "    -p pid          Filter by session ID"
     echo "    -q sqlid        Filter by unique SQL ID"
-    echo "    -s state        Filter by session state"
+    echo "    -s state        Filter by session state (a|i|iit|iita|f|d|r, full name, or prefix)"
     echo "    -t interval(s)  Filter transactions running longer than interval(seconds)"
     echo "    -u name         Filter by username"
     echo ""
@@ -7399,7 +7399,23 @@ run_kill_sessions() {
     while getopts ":i:s:p:q:d:au:u:t:" opt; do
       case $opt in
         i) CONDITIONS+=("client_addr = ''$OPTARG'' and datname not in (''postgres'',''vastbase'',''panweidb'')") ;;
-        s) CONDITIONS+=("state = ''$OPTARG'' and datname not in (''postgres'',''vastbase'',''panweidb'')") ;;
+        s) case "$OPTARG" in
+             a)    SF="active" ;;
+             i)    SF="idle" ;;
+             iit)  SF="idle in transaction" ;;
+             iita) SF="idle in transaction (aborted)" ;;
+             f)    SF="fastpath function call" ;;
+             d)    SF="disabled" ;;
+             r)    SF="retrying" ;;
+             *)    SF="$OPTARG" ;;   # full name or prefix
+           esac
+           if [ "$SF" = "$OPTARG" ]; then
+             # user-supplied string: exact OR prefix match ("id" hits all idle* states)
+             CONDITIONS+=("(state = ''$SF'' or state like ''$SF%'') and datname not in (''postgres'',''vastbase'',''panweidb'')")
+           else
+             # known abbreviation: exact match only ("i" is pure idle, NOT idle-in-transaction)
+             CONDITIONS+=("state = ''$SF'' and datname not in (''postgres'',''vastbase'',''panweidb'')")
+           fi ;;
         p) CONDITIONS+=("pid = ''$OPTARG''") ;;
         q) CONDITIONS+=("unique_sql_id = ''$OPTARG''") ;;
         d) CONDITIONS+=("application_name = ''$OPTARG'' and datname not in (''postgres'',''vastbase'',''panweidb'')") ;;
