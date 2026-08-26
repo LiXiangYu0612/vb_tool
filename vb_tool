@@ -275,7 +275,7 @@ dead_tups_help() {
 kill_help() {
     echo "Options for kill:"
     echo "  Usage: vb_tool kill [OPTIONS] [SQL_OPTIONS]"
-    echo "  Description: terminate sessions by conditions"
+    echo "  Description: terminate sessions by conditions (-p/-q match exactly; batch filters -a/-i/-s/-d/-u/-t skip sessions in postgres/vastbase/panweidb databases)"
     echo "  -P <port>: database port (default: current \$PGPORT)"
     echo "  Options:"
     echo "    -a              ALL Exclude background sessions"
@@ -7400,8 +7400,8 @@ run_kill_sessions() {
       case $opt in
         i) CONDITIONS+=("client_addr = ''$OPTARG'' and datname not in (''postgres'',''vastbase'',''panweidb'')") ;;
         s) CONDITIONS+=("state = ''$OPTARG'' and datname not in (''postgres'',''vastbase'',''panweidb'')") ;;
-        p) CONDITIONS+=("pid = ''$OPTARG'' and datname not in (''postgres'',''vastbase'',''panweidb'')") ;;
-        q) CONDITIONS+=("unique_sql_id = ''$OPTARG'' and datname not in (''postgres'',''vastbase'',''panweidb'')") ;;
+        p) CONDITIONS+=("pid = ''$OPTARG''") ;;
+        q) CONDITIONS+=("unique_sql_id = ''$OPTARG''") ;;
         d) CONDITIONS+=("application_name = ''$OPTARG'' and datname not in (''postgres'',''vastbase'',''panweidb'')") ;;
         a) CONDITIONS+=("datname not in (''postgres'',''vastbase'',''panweidb'')") ;;
         u) CONDITIONS+=("usename = ''$OPTARG'' and datname not in (''postgres'',''vastbase'',''panweidb'')") ;;
