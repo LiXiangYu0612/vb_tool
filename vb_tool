@@ -20707,39 +20707,44 @@ def load_repl_samples(repl_dir, begin_ts, end_ts):
 
 def replication_section_html(repl):
     """Replication section body html (self-contained; caller emits the sec() title).
-    `repl` = load_repl_samples() result. Shows the last-seen state per standby."""
+    `repl` = load_repl_samples() result. One row per per-minute sample in ts order
+    (the sampler's whole timeline for the window); null/error minutes render as
+    muted gap rows. A window with no data row at all keeps a compact note instead
+    of a table full of identical "no standby" rows."""
     parts = []
     if not repl["files"]:
         return '<div class="note">no replication samples in this period</div>'
-    last = {}
-    for ts, kind, f in repl["rows"]:
-        if kind == "data":
-            last[f[0]] = (ts, f)          # rows are in ts order; later overwrite = last seen
-    if not last:
-        parts.append('<div class="note">no standby connected at any sample in this period</div>')
-    else:
-        parts.append('<table class="t"><tr><th>Standby</th><th>Client Addr</th>'
-                     '<th>State</th><th>Sync</th><th>Sent LSN</th><th>Write LSN</th><th>Flush LSN</th>'
-                     '<th>Replay LSN</th><th>Net lag</th><th>Fsync lag</th><th>Apply lag</th>'
-                     '<th>Total lag</th><th>Last seen</th></tr>')
-        for name in sorted(last):
-            ts, f = last[name]
-            sent, write, flush, replay = f[4], f[5], f[6], f[7]
-            L = [_lsn64(x) for x in (sent, write, flush, replay)]
-            def _seg(i, j):   # bytes between pipeline stages; n/a if either LSN unparseable
-                a, b = L[i], L[j]
-                return fmt_bytes(a - b) if (a is not None and b is not None and a >= b) else "n/a"
-            parts.append('<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td>'
-                         '<td>%s</td><td>%s</td><td>%s</td><td>%s</td>'
-                         '<td class="n">%s</td><td class="n">%s</td>'
-                         '<td class="n">%s</td><td class="n">%s</td><td>%s</td></tr>'
-                         % (esc(name), esc(f[1]), esc(f[2]), esc(f[3]),
-                            esc(sent), esc(write), esc(flush), esc(replay),
-                            _seg(0, 1), _seg(1, 2), _seg(2, 3), _seg(0, 3), esc(ts)))
-        parts.append('</table>')
-        parts.append('<div class="note">lag = LSN byte distance: '
-                     'Net = sent&minus;write, Fsync = write&minus;flush, '
-                     'Apply = flush&minus;replay, Total = sent&minus;replay.</div>')
+    rows = sorted(repl["rows"], key=lambda r: r[0])   # stable: same-minute standbys keep order
+    if repl["n_data"] == 0:
+        return ('<div class="note">no standby connected at any sample in this period '
+                '(%d samples: %d null, %d error)</div>'
+                % (len(rows), repl["n_null"], repl["n_error"]))
+    parts.append('<table class="t"><tr><th>Sample Time</th><th>Standby</th><th>Client Addr</th>'
+                 '<th>State</th><th>Sync</th><th>Sent LSN</th><th>Write LSN</th><th>Flush LSN</th>'
+                 '<th>Replay LSN</th><th>Net lag</th><th>Fsync lag</th><th>Apply lag</th>'
+                 '<th>Total lag</th></tr>')
+    for ts, kind, f in rows:
+        if kind != "data":
+            msg = "no standby connected" if kind == "null" else "sample error (query failed)"
+            parts.append('<tr><td>%s</td><td colspan="12" class="muted">%s</td></tr>'
+                         % (esc(ts), msg))
+            continue
+        sent, write, flush, replay = f[4], f[5], f[6], f[7]
+        L = [_lsn64(x) for x in (sent, write, flush, replay)]
+        def _seg(i, j):   # bytes between pipeline stages; n/a if either LSN unparseable
+            a, b = L[i], L[j]
+            return fmt_bytes(a - b) if (a is not None and b is not None and a >= b) else "n/a"
+        parts.append('<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td>'
+                     '<td>%s</td><td>%s</td><td>%s</td><td>%s</td>'
+                     '<td class="n">%s</td><td class="n">%s</td>'
+                     '<td class="n">%s</td><td class="n">%s</td></tr>'
+                     % (esc(ts), esc(f[0]), esc(f[1]), esc(f[2]), esc(f[3]),
+                        esc(sent), esc(write), esc(flush), esc(replay),
+                        _seg(0, 1), _seg(1, 2), _seg(2, 3), _seg(0, 3)))
+    parts.append('</table>')
+    parts.append('<div class="note">lag = LSN byte distance: '
+                 'Net = sent&minus;write, Fsync = write&minus;flush, '
+                 'Apply = flush&minus;replay, Total = sent&minus;replay.</div>')
     return "".join(parts)
 
 # ---- Replication slots sampler (awrrpt only; mirrors the repl stat sampler) ----
@@ -20788,27 +20793,28 @@ def load_slot_samples(repl_dir, begin_ts, end_ts):
 def slots_subtable_html(slots):
     """Replication Slots sub-table body html, rendered inside the Replication
     section (after the standby stat table). `slots` = load_slot_samples() result.
-    Shows the last-seen state per slot, with its sample timestamp."""
+    One row per per-minute slot sample in ts order; null/error minutes render as
+    muted gap rows; a window with no data row at all keeps the compact note."""
     if not slots["files"]:
         return '<div class="note">no slot samples in this period</div>'
-    last = {}
-    for ts, kind, f in slots["rows"]:
-        if kind == "data":
-            last[f[0]] = (ts, f)          # rows are in ts order; later overwrite = last seen
-    if not last:
+    rows = sorted(slots["rows"], key=lambda r: r[0])   # stable: same-minute slots keep order
+    if slots["n_data"] == 0:
         return ('<div class="note">no replication slots at any sample in this period '
                 '(%d samples: %d null, %d error)</div>'
-                % (len(slots["rows"]), slots["n_null"], slots["n_error"]))
-    parts = ['<table class="t"><tr><th>Slot</th><th>Type</th><th>Plugin</th><th>DB</th>'
-             '<th>Active</th><th>Restart LSN</th><th>Xmin</th><th>Catalog Xmin</th>'
-             '<th>Dummy Stby</th><th>Confirmed Flush</th><th>Last seen</th></tr>']
-    for name in sorted(last):
-        ts, f = last[name]
-        parts.append('<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td>'
-                     '<td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td>'
-                     '<td>%s</td></tr>'
-                     % (esc(f[0]), esc(f[2]), esc(f[1]), esc(f[3]), esc(f[4]),
-                        esc(f[7]), esc(f[5]), esc(f[6]), esc(f[8]), esc(f[9]), esc(ts)))
+                % (len(rows), slots["n_null"], slots["n_error"]))
+    parts = ['<table class="t"><tr><th>Sample Time</th><th>Slot</th><th>Type</th><th>Plugin</th>'
+             '<th>DB</th><th>Active</th><th>Restart LSN</th><th>Xmin</th><th>Catalog Xmin</th>'
+             '<th>Dummy Stby</th><th>Confirmed Flush</th></tr>']
+    for ts, kind, f in rows:
+        if kind != "data":
+            msg = "no replication slots" if kind == "null" else "sample error (query failed)"
+            parts.append('<tr><td>%s</td><td colspan="10" class="muted">%s</td></tr>'
+                         % (esc(ts), msg))
+            continue
+        parts.append('<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td>'
+                     '<td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>'
+                     % (esc(ts), esc(f[0]), esc(f[2]), esc(f[1]), esc(f[3]), esc(f[4]),
+                        esc(f[7]), esc(f[5]), esc(f[6]), esc(f[8]), esc(f[9])))
     parts.append('</table>')
     return "".join(parts)
 
@@ -22101,6 +22107,7 @@ td.b { font-weight: bold; }
 tr:nth-child(even) td { background: #FFFFCC; }
 .sql { font-family: 'Courier New', Courier, monospace; font-size: 11px; max-width: 620px; word-break: break-all; }
 .note { color: #555; font-size: 11px; font-style: italic; margin: 2px 0 6px 0; }
+.muted { color: #9aa5b1; }
 .bad { color: #c0392b; font-weight: bold; }
 .foot { color: #555; font-size: 11px; margin-top: 20px; border-top: 1px solid #cccc99; padding-top: 8px; }
 .sqlblock { border: 1px solid #cccc99; margin: 6px 0; padding: 6px 8px; background: #fff; }
