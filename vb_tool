@@ -1,13 +1,13 @@
 #!/bin/bash
 #--------------------------------------------------------------------------------
 #-- File name:   vb_tool
-#-- Version  ：  v2.0.5
-#-- Commit at：  2026-08-24 21:41:00
+#-- Version  ：  v2.0.6
+#-- Commit at：  2026-08-26 15:30:00
 #-- Purpose:     Vastbase Script Tool
 #-- Author:      MVS & Second-line Team 
 #--------------------------------------------------------------------------------
 set -o pipefail
-export VB_TOOL_VERSION="v2.0.5"
+export VB_TOOL_VERSION="v2.0.6"
 show_help() {
     echo "Vastbase Script Tool (vb_tool)"
     echo ""
@@ -69,7 +69,7 @@ show_help() {
 }
 
 show_list() {
-    echo "Vastbase Script Tool (vb_tool) v2.0.0"
+    echo "Vastbase Script Tool (vb_tool) ${VB_TOOL_VERSION}"
     echo ""
     echo "Usage Summary:"
     echo "  vb_tool <command> [options]"
@@ -681,20 +681,28 @@ tps_help() {
 }
 
 run_tps() {
-    psql -d postgres <<EOF
-\pset footer off
-\echo 'default begin date is '2000-01-01';default end date is trunc(sysdate)+1;'
-\echo 'please input begin date: ' \prompt begin_date
-\echo 'please input end date: ' \prompt end_date
+    # \prompt only works on a tty: on piped/cron stdin psql reads the heredoc
+    # itself as the "typed" answer, breaking the SQL. Non-tty runs use defaults.
+    local _vb_pfx _vb_pv=""
+    if [ -t 0 ]; then
+        _vb_pfx="\\prompt 'please input begin date: ' begin_date
+\\prompt 'please input end date: ' end_date
+"
+    else
+        _vb_pv="-v begin_date= -v end_date="
+    fi
+    { printf '%s' "$_vb_pfx"; cat <<'VBTPSQLEOF'
+\echo 'default begin date is 2000-01-01; default end date is tomorrow 00:00:00'
 select time_range,total_trans,tps from
 (select st_timestamp, to_char(st_timestamp, 'mmdd hh24:mi:ss') || '--' || COALESCE(to_char(lead(st_timestamp) OVER (ORDER BY st_timestamp), 'mmdd hh24:mi:ss'),to_char(now(),'mmdd hh24:mi:ss')) time_range,
     trunc(extract(epoch FROM (COALESCE(lead(st_timestamp) OVER (ORDER BY st_timestamp), now()) - st_timestamp))) el,
 	COALESCE(lead(st_xid) OVER (ORDER BY st_timestamp),(select txid_current()))-st_xid total_trans,
-	round((COALESCE(lead(st_xid) OVER (ORDER BY st_timestamp),(select txid_current()))-st_xid)/trunc(extract(epoch FROM (COALESCE(lead(st_timestamp) OVER (ORDER BY st_timestamp), now()) - st_timestamp))),1) TPS
-	from vb_usage_statistic) 
-	where to_char(st_timestamp,'yyyy-mm-dd hh24:mi:ss')>=COALESCE(NULLIF(:'begin_date',''),'2001-01-01 00:00:01') and to_char(st_timestamp,'yyyy-mm-dd hh24:mi:ss')<=COALESCE(NULLIF(:'end_date',''),to_char(trunc(now()+1),'yyyy-mm-dd hh24:mi:ss')) and el<1000
- order by 1;
-EOF
+	round((COALESCE(lead(st_xid) OVER (ORDER BY st_timestamp),(select txid_current()))-st_xid)/NULLIF(trunc(extract(epoch FROM (COALESCE(lead(st_timestamp) OVER (ORDER BY st_timestamp), now()) - st_timestamp))),0),1) TPS
+	from vb_usage_statistic)
+	where to_char(st_timestamp,'yyyy-mm-dd hh24:mi:ss')>=COALESCE(NULLIF(:'begin_date',''),'2000-01-01 00:00:00') and to_char(st_timestamp,'yyyy-mm-dd hh24:mi:ss')<=COALESCE(NULLIF(:'end_date',''),to_char(trunc(now()+1),'yyyy-mm-dd hh24:mi:ss')) and el<1000
+ order by st_timestamp;
+VBTPSQLEOF
+    } | psql $_vb_pv -d postgres -P footer=off
 }
 
 run_lsds() {
@@ -1074,7 +1082,7 @@ planbyline() {
     {
         printf "%-8s | %-15.3f | %-8s | %s\n", $2, $1, $3, $4;
     }'
-    return ${PIPESTATUS[0]}
+    return ${PIPESTATUS[1]}   # awk's rc, not cat's
 }
 
 flamegraph_help() {
@@ -2900,14 +2908,24 @@ FLAMEGRAPH_PL_EOF
     echo "====================================================================="
     echo "Running: $RECORD_CMD"
     eval $RECORD_CMD
+    if [ $? -ne 0 ] || [ ! -s "$OUTPUT_DIR/perf.data" ]; then
+        echo "Error: perf record failed (EACCES under perf_event_paranoid? wrong PID?) - no flame graph" >&2
+        return 1
+    fi
 
     # ---------- generate flame graph ----------
     echo "Generating folded stack data..."
-    perf script -i "$OUTPUT_DIR/perf.data" > "$OUTPUT_DIR/perf.unfolded"
-    perl "$FLAMEGRAPH_DIR/stackcollapse-perf.pl" --all "$OUTPUT_DIR/perf.unfolded" > "$OUTPUT_DIR/perf.folded"
+    perf script -i "$OUTPUT_DIR/perf.data" > "$OUTPUT_DIR/perf.unfolded" || { echo "Error: perf script failed" >&2; return 1; }
+    perl "$FLAMEGRAPH_DIR/stackcollapse-perf.pl" --all "$OUTPUT_DIR/perf.unfolded" > "$OUTPUT_DIR/perf.folded" || { echo "Error: stackcollapse-perf.pl failed" >&2; return 1; }
 
     echo "Generating flame graph..."
     perl "$FLAMEGRAPH_DIR/flamegraph.pl" "$OUTPUT_DIR/perf.folded" > "$SVG_FILE"
+    local _vb_fg_rc=$?
+    rm -f "$OUTPUT_DIR/perf.data" "$OUTPUT_DIR/perf.unfolded" "$OUTPUT_DIR/perf.folded"
+    if [ $_vb_fg_rc -ne 0 ] || [ ! -s "$SVG_FILE" ]; then
+        echo "Error: flamegraph.pl failed (empty folded stacks?)" >&2
+        return 1
+    fi
 
     echo "====================================================================="
     echo "Flame graph generated at $SVG_FILE"
@@ -3701,7 +3719,7 @@ run_redo() {
             sub(/[ ,].*/, "", lsn)
             
             slots[slot] = lsn
-            slot_list[++slot_idx] = slot
+            if (!(slot in slot_seen)) { slot_seen[slot] = 1; slot_list[++slot_idx] = slot }
             next
         }
 
@@ -3717,7 +3735,7 @@ run_redo() {
             sub(/[ ,].*/, "", lsn)
             
             slots[slot] = lsn
-            slot_list[++slot_idx] = slot
+            if (!(slot in slot_seen)) { slot_seen[slot] = 1; slot_list[++slot_idx] = slot }
             next
         }
 
@@ -3803,68 +3821,50 @@ run_redo() {
                     last_match_bytes = current_match_bytes
                 }
                 
-                if (!header_printed) {
-                    if (standby_log != "") {
-                        printf "%-20s %-20s %-15s %-15s %-20s %-15s %-15s\n", 
-                               "Time", "redo_loc", "wal_gen", "wal_speed", 
-                               "replay_time", "replay_delay", "replay_speed"
-                        printf "%-20s %-20s %-15s %-15s %-20s %-15s %-15s\n", 
-                               "--------------------", "--------------------", 
-                               "---------------", "---------------",
-                               "--------------------", "---------------", "---------------"
-                    } else {
-                        printf "%-20s %-20s %-15s %-15s", 
-                               "Time", "redo_loc", "wal_gen", "wal_speed"
-                        if (has_slots == 1 && slot_idx > 0) {
-                            for (i = 1; i <= slot_idx; i++) {
-                                printf " %-20s", slot_list[i]
-                            }
-                        }
-                        printf "\n"
-                        
-                        printf "%-20s %-20s %-15s %-15s", 
-                               "--------------------", "--------------------", 
-                               "---------------", "---------------"
-                        if (has_slots == 1 && slot_idx > 0) {
-                            for (i = 1; i <= slot_idx; i++) {
-                                printf " %-20s", "--------------------"
-                            }
-                        }
-                        printf "\n"
-                    }
-                    header_printed = 1
-                }
-                
+                /* rows are buffered: the header can only be built once the FULL
+                   slot set is known (slots may appear/disappear across
+                   checkpoint windows; a first-window header misaligned all
+                   later rows) */
                 if (standby_log != "") {
-                    printf "%-20s %-20s %-15s %-15s %-20s %-15s %-15s\n", 
+                    out_lines[++out_n] = sprintf("%-20s %-20s %-15s %-15s %-20s %-15s %-15s", 
                            full_time_str, new_redo_val, diff_formatted, wal_speed,
-                           standby_replay_time, replay_delay, replay_speed
+                           standby_replay_time, replay_delay, replay_speed)
                 } else {
-                    printf "%-20s %-20s %-15s %-15s", 
-                           full_time_str, new_redo_val, diff_formatted, wal_speed
-                    if (has_slots == 1 && slot_idx > 0) {
-                        for (i = 1; i <= slot_idx; i++) {
-                            slot = slot_list[i]
-                            lsn_display = slots[slot]
-                            printf " %-20s", lsn_display
-                        }
+                    buf = sprintf("%-20s %-20s %-15s %-15s", 
+                           full_time_str, new_redo_val, diff_formatted, wal_speed)
+                    for (i = 1; i <= slot_idx; i++) {
+                        slot = slot_list[i]
+                        lsn_display = (slot in slots) ? slots[slot] : "-"
+                        buf = buf sprintf(" %-20s", lsn_display)
                     }
-                    printf "\n"
+                    out_lines[++out_n] = buf
                 }
             }
             
             prev_time_seconds = current_seconds
             prev_redo_val = new_redo_val
             collect_slots = 0
-            has_slots = 0
             delete slots
-            delete slot_list
-            slot_idx = 0
+            /* slot_list/slot_idx stay: the column set is global (union, in
+               first-seen order); slots map is per-window */
         }
 
         END {
-            if (!header_printed) {
+            if (out_n == 0) {
                 print "No checkpoint data found in log file!"
+            } else {
+                if (standby_log != "") {
+                    printf "%-20s %-20s %-15s %-15s %-20s %-15s %-15s\n", "Time", "redo_loc", "wal_gen", "wal_speed", "replay_time", "replay_delay", "replay_speed"
+                    printf "%-20s %-20s %-15s %-15s %-20s %-15s %-15s\n", "--------------------", "--------------------", "---------------", "---------------", "--------------------", "---------------", "---------------"
+                } else {
+                    printf "%-20s %-20s %-15s %-15s", "Time", "redo_loc", "wal_gen", "wal_speed"
+                    for (i = 1; i <= slot_idx; i++) printf " %-20s", slot_list[i]
+                    printf "\n"
+                    printf "%-20s %-20s %-15s %-15s", "--------------------", "--------------------", "---------------", "---------------"
+                    for (i = 1; i <= slot_idx; i++) printf " %-20s", "--------------------"
+                    printf "\n"
+                }
+                for (i = 1; i <= out_n; i++) print out_lines[i]
             }
         }
         ' "$log_file"
@@ -3988,7 +3988,7 @@ run_xlogcom() {
         exit 1
     fi
     
-    pg_xlogdump -p $wal_dir "$start_wal" "$end_wal" | awk 'BEGIN {
+    pg_xlogdump -p "$wal_dir" "$start_wal" "$end_wal" | awk 'BEGIN {
     max_len = 19  
     count_len = 6  
 }
@@ -4042,13 +4042,14 @@ run_mem() {
     echo "    memory frag" && \
     echo "====================" && \
     cat /proc/buddyinfo && \
-    psql -d postgres<<EOF
-\pset footer off
+    psql -q -d postgres -P footer=off <<EOF
 -- materialize session memory detail once: the view walks every session's
 -- memory contexts under lock, scanning it 3x is the dominant cost on
 -- instances with many sessions
-create temp table _vb_smd as select sessid,contextname,totalsize,freesize,usedsize from gs_session_memory_detail
-\g /dev/null
+-- (-q suppresses the CTAS "INSERT 0 n" tag; deliberately NO \g-FILE redirect:
+--  VastBase psql would send the NEXT query's output to that file too, which
+--  emptied the memory guc section)
+create temp table _vb_smd as select sessid,contextname,totalsize,freesize,usedsize from gs_session_memory_detail;
 \echo ====================
 \echo      memory guc
 \echo ====================
@@ -4131,7 +4132,6 @@ EOF
 
 run_net() {
     export -f run_nets  
-    watch -n 1 "bash -c run_nets"
 	watch -t -n 1 "echo \"Every 1.0s: run_net\"; echo; bash -c run_nets"
 }
 
@@ -4175,7 +4175,7 @@ run_nets() {
         ip=$(/usr/sbin/ip -4 addr show "$iface" 2>/dev/null | awk '/inet / {print $2}' | cut -d/ -f1 | head -n1)
         [ -z "$ip" ] && ip="-"
         
-        stats=$(grep -w "$iface" /proc/net/dev)
+        stats="$line"          # the exact /proc/net/dev line; grep -w also matched eth0.100 for eth0
         rx_err=$(echo "$stats" | awk '{print $4}')
         rx_drp=$(echo "$stats" | awk '{print $5}')
         tx_err=$(echo "$stats" | awk '{print $12}')
@@ -4350,8 +4350,7 @@ run_memhist() {
         fi
     fi
     
-    psql -d postgres <<EOF
-\pset footer off
+    psql -d postgres -P footer=off <<EOF
 \echo '==========================='
 \echo '   Memory Usage History'
 \echo '==========================='
@@ -4406,8 +4405,7 @@ run_show_privilege() {
         exit 1
     fi
 
-    psql -d "$db_param" <<EOF
-\pset footer off
+    psql -d "$db_param" -P footer=off <<EOF
 \pset tuples_only on
 $(
     [ -n "$user_param" ] && echo "\\set _user '$user_param'"
@@ -4457,10 +4455,10 @@ SELECT
         WHEN 'S' THEN 'SEQUENCES' 
         WHEN 'f' THEN 'FUNCTIONS' 
         WHEN 'T' THEN 'TYPES' 
-    END || ' TO ' || pg_get_userbyid(def.grantee) || ';'  
+    END || ' TO ' || (case when def.grantee=0 then 'PUBLIC' else pg_get_userbyid(def.grantee) end) || ';'  
     as show_privilege  
 FROM def  
-WHERE pg_get_userbyid(def.grantee)= :'_user'  
+WHERE (pg_get_userbyid(def.grantee)= :'_user' or def.grantee=0)  
 GROUP BY nspname,defaclrole,defaclnamespace,defaclobjtype,defaclacl,grantor,grantee,is_grantable);
 USER_PRIVS
 )
@@ -4526,8 +4524,7 @@ EOF
 }
 
 run_lockchain() {
-    psql -d postgres <<EOF
-\pset footer off
+    psql -d postgres -P footer=off <<EOF
 \echo '=========================='
 \echo 'lock chain analysis'
 \echo '=========================='
@@ -4570,7 +4567,7 @@ SELECT
   a.client_addr,
   lvl,
   (SELECT l2.virtualtransaction FROM l l2 WHERE l2.holder = tree.holder AND l2.granted ORDER BY 1 LIMIT 1) AS virtualtransaction,
-  (SELECT count(*) FROM tree p WHERE p.w_chain ~ ('^'||tree.w_chain) AND NOT p.w_chain=tree.w_chain) blocked,
+  (SELECT count(*) FROM tree p WHERE p.w_chain LIKE tree.w_chain || '.%') blocked,
   COALESCE(
     substr(REGEXP_REPLACE(REGEXP_REPLACE(a.query, '(\r|\n)+', ' '),' {2,}', ' '), 1, 50),
     CASE WHEN tree.holder LIKE 'P:%' THEN '[prepared xact] ' || px.gid END
@@ -4602,8 +4599,7 @@ run_redundant_index() {
         exit 1
     fi
     
-psql -d "$db_name" <<EOF
-\pset footer off
+psql -d "$db_name" -P footer=off <<EOF
 \echo '===================='
 \echo 'redundant index list'
 \echo '===================='
@@ -4740,9 +4736,10 @@ where
 		AND idx_scan = 0 
         AND n.nspname !~ '^pg_toast'
         AND n.nspname <> 'information_schema'
-		AND (i.indisprimary<>'t' or i.indisunique<>'t')
+		AND i.indisprimary<>'t'
+		AND i.indisunique<>'t'
 		AND (indisvalid='t' or indisusable='t' or i.indisvisible='t') 
-		AND exists(select 1 from pg_stat_user_tables s1 where s1.relid=relid and s1.seq_scan+idx_scan>100);
+		AND exists(select 1 from pg_stat_user_tables s1 where s1.relid=s.relid and s1.seq_scan+idx_scan>100);
 EOF
 }
 run_tabstat() {
@@ -4766,8 +4763,7 @@ run_tabstat() {
         exit 1
     fi
     
-psql -d "$db_name" <<EOF
-\pset footer off
+psql -d "$db_name" -P footer=off <<EOF
 \set schema '$schema_name'
 \set name '$table_name'
 \echo '================'
@@ -5006,7 +5002,6 @@ SELECT a.schemaname as owner
         ,a.tablename tab_name
         ,a.attname
         ,null_frac
-        ,a.attname
         ,avg_width
         ,n_distinct
         ,n_dndistinct
@@ -5043,8 +5038,7 @@ EOF
 
 run_sqlstat() {
     local unique_query_id="$1"
-    psql -d postgres <<EOF
-\pset footer off
+    psql -d postgres -P footer=off <<EOF
 \set unique_sql_id '$unique_query_id'
 \echo '======='
 \echo 'sqltext'
@@ -5123,7 +5117,7 @@ round(n_blocks_fetched/n_calls,1) avg_cr,
 round((n_blocks_fetched-n_blocks_hit)/n_calls,1) avg_pr,
 round((n_returned_rows+n_insert_rows+n_update_rows+n_delete_rows)/n_calls,1) avg_rows
 from 
-(SELECT snap_user_name,to_char(start_ts,'yyyy-mm-dd hh24:mi:ss') snap_time,
+(SELECT snap_user_name,to_char(start_ts,'yyyy-mm-dd hh24:mi:ss') snap_time, start_ts,
     snap_n_calls-coalesce(lag(snap_n_calls)over(partition by snap_user_name,snap_unique_sql_id order by a.snapshot_id),0) n_calls,
     snap_db_time-coalesce(lag(snap_db_time)over(partition by snap_user_name,snap_unique_sql_id order by a.snapshot_id),0) db_time,
     snap_execution_time-coalesce(lag(snap_execution_time)over(partition by snap_user_name,snap_unique_sql_id order by a.snapshot_id),0) execution_time,
@@ -5137,8 +5131,7 @@ from
     snap_n_tuples_deleted-coalesce(lag(snap_n_tuples_deleted)over(partition by snap_user_name,snap_unique_sql_id order by a.snapshot_id),0) n_delete_rows
     FROM snapshot.snap_summary_statement a,snapshot.snapshot  b
     WHERE snap_unique_sql_id=:'unique_sql_id'
-      and a.snapshot_id=b.snapshot_id
-      and start_ts>now()-3) where n_calls>0 order by 2) where snap_time<(select max(start_ts) from snapshot.snapshot);
+      and a.snapshot_id=b.snapshot_id) where n_calls>0 and start_ts>now()-3 order by 2) where snap_time<(select max(start_ts) from snapshot.snapshot);
 EOF
 }
 
@@ -5340,8 +5333,7 @@ run_wdr_tabstat() {
     local query_begin=$(date -d "$begin_time 1 hour ago" +'%Y-%m-%d %H:%M:%S')
     local query_end=$(date -d "$end_time 1 hour" +'%Y-%m-%d %H:%M:%S')
 
-    psql -d postgres <<EOF
-\pset footer off
+    psql -d postgres -P footer=off <<EOF
 \echo '========================='
 \echo '   wdr tabstat summary   '
 \echo '========================='
@@ -5571,8 +5563,7 @@ run_wdr_topsql() {
     local query_begin=$(date -d "$begin_time 1 hour ago" +'%Y-%m-%d %H:%M:%S')
     local query_end=$(date -d "$end_time 1 hour" +'%Y-%m-%d %H:%M:%S')
     
-    psql -d postgres <<EOF
-\pset footer off
+    psql -d postgres -P footer=off <<EOF
 \echo '===================='
 \echo '   topsql summary   '
 \echo '===================='
@@ -5831,8 +5822,7 @@ run_wdr_summary() {
     local query_begin=$(date -d "$begin_time 1 hour ago" +'%Y-%m-%d %H:%M:%S')
     local query_end=$(date -d "$end_time 1 hour" +'%Y-%m-%d %H:%M:%S')
     
-    psql -d postgres <<EOF
-\pset footer off
+    psql -d postgres -P footer=off <<EOF
 \echo '===================='
 \echo 'wdr workload summary'
 \echo '===================='
@@ -5902,7 +5892,7 @@ select snapshot_id,
        case when redo_phywrts>=lag(redo_phywrts)over(order by snapshot_id) then redo_phywrts-lag(redo_phywrts)over(order by snapshot_id) end redo_phywrts,
        case when redo_phyblkwrt>=lag(redo_phyblkwrt)over(order by snapshot_id) then redo_phyblkwrt-lag(redo_phyblkwrt)over(order by snapshot_id) end redo_phyblkwrt
 from (select snapshot_id,sum(snap_phywrts) as redo_phywrts, sum(snap_phyblkwrt) as redo_phyblkwrt from snapshot.snap_summary_file_redo_iostat group by snapshot_id))
-select /*+leading(t1 t2 t3 t4 t5 t6) set(rewrite_rule 'magicset,predpushnormal')*/time_range,round(db_time/60,1) dbtime,round(case when el>0 then db_time/el end,1) aas,round(cpu_time/60,1) cputime,round(data_io_time/60,1) iotime,round(case when el>0 then total_trans/el end,1) tps,round(case when el>0 then total_cr/el end,1) "cr/s",round(case when el>0 then (snap_phyrds+snap_phywrts)/el end,1) iops,round(case when el>0 then (snap_phyblkrd+snap_phyblkwrt)*8/1024/el end,1) mbps,round(case when el>0 then redo_phyblkwrt*8/1024/el end,1) "wal_mb/s",round(case when el>0 then calls/el end,1) "call/s",round(case when el>0 then parse/el end,1) "parse/s",round(case when el>0 then hard/el end,1) "hard/s"
+select /*+leading(t1 t2 t3 t4 t5 t6) set(rewrite_rule 'magicset,predpushnormal')*/time_range,round(db_time/60,1) dbtime,round(case when el>0 then db_time/el end,1) aas,round(cpu_time/60,1) cputime,round(data_io_time/60,1) iotime,round(case when el>0 then total_trans/el end,1) tps,round(case when el>0 then total_cr/el end,1) "cr/s",round(case when el>0 then (snap_phyrds+snap_phywrts)/el end,1) iops,round(case when el>0 then (snap_phyblkrd+snap_phyblkwrt)*8.0/1024/el end,1) mbps,round(case when el>0 then redo_phyblkwrt*8.0/1024/el end,1) "wal_mb/s",round(case when el>0 then calls/el end,1) "call/s",round(case when el>0 then parse/el end,1) "parse/s",round(case when el>0 then hard/el end,1) "hard/s"
 from time_range t1,time_model t2,tps t3,iops t4,redo t5,sql t6
 where t1.snapshot_id=t2.snapshot_id
   and t1.snapshot_id=t3.snapshot_id
@@ -6097,8 +6087,7 @@ run_wdr_event() {
     local query_begin=$(date -d "$begin_time 1 hour ago" +'%Y-%m-%d %H:%M:%S')
     local query_end=$(date -d "$end_time 1 hour" +'%Y-%m-%d %H:%M:%S')
     
-    psql -d postgres <<EOF
-\pset footer off
+    psql -d postgres -P footer=off <<EOF
 \echo '===================='
 \echo 'wdr topevent summary'
 \echo '===================='
@@ -6164,7 +6153,7 @@ select /*+set(enable_mergejoin off) set(enable_nestloop off) set(enable_index_ne
        round(wait_time/1e6,1) wait_time_s, 
        waits, 
        case when is_cpu = 1 then null else round(wait_time/waits/1e3,1) end as avg_wait_ms,
-       round(100*(wait_time/db_time),1)||'%' db_time_pct
+       round(case when db_time>0 then 100*(wait_time/db_time) end,1)||'%' db_time_pct
 from time_range a, time_model b, ranked_events c 
 where a.snapshot_id = b.snapshot_id 
   and a.snapshot_id = c.snapshot_id
@@ -6199,8 +6188,7 @@ run_wdr_event_hist() {
     if [ "$ev_cnt" -eq 0 ]; then
         echo "Error: event '$event_name' not found in wdr snapshots (window $begin_time ~ $end_time)" >&2
         echo "Top wait events in this window:" >&2
-        psql -d postgres <<EOF
-\pset footer off
+        psql -d postgres -P footer=off <<EOF
 with ev as (
     select snap_event, wait_time, waits
     from (
@@ -6259,8 +6247,7 @@ select count(*) from tr join ev on tr.snapshot_id = ev.snapshot_id"); then
     fi
 
     # ---- main: detail + TOTAL, then max line ----
-    psql -d postgres <<EOF
-\pset footer off
+    psql -d postgres -P footer=off <<EOF
 \echo ====================
 \echo wdr event history: '$event_name'  (window $begin_time ~ $end_time)
 \echo ====================
@@ -6368,8 +6355,7 @@ run_as() {
                             and c.nspname='pg_catalog'")
 
     if [[ "$psa_flag" = 1 ]]; then
-    psql -d postgres <<EOF
-\pset footer off
+    psql -d postgres -P footer=off <<EOF
 \echo '================================'
 \echo 'long transaction info(limit 10) '
 \echo '================================'
@@ -6434,7 +6420,7 @@ EOF
 echo '=========================================='
 echo '         top cpu usage info               '
 echo '=========================================='
-psql -d postgres -c "with tmp as (SELECT split_part(result, ',', 1) AS lwpid, split_part(result, ',', 2) AS cpu_usage FROM regexp_split_to_table('$(top -b -n1 -H -p $pid | awk '/^ *PID USER.*COMMAND$/ {getline; while (getline) print $1 "," $9}'| paste -sd ";")', ';') AS result) select round(sum(tmp.cpu_usage),2)||'%' cpu_usage,s.thread_name,a.unique_sql_id,min(s.pid) one_pid,count(*) pid_cnt,min(substr(REGEXP_REPLACE(REGEXP_REPLACE(query, '(\r|\n)+', ' '),' {2,}', ' '),1,50)) sqltext from pg_os_threads s right join tmp on s.lwpid=tmp.lwpid  left join pg_stat_activity a on s.pid=a.pid  where (a.state in ('active') or a.state is null) group by s.thread_name,a.unique_sql_id having sum(tmp.cpu_usage)>0 order by round(sum(tmp.cpu_usage),2)::numeric desc limit 10"
+psql -d postgres -c "with tmp as (SELECT split_part(result, ',', 1) AS lwpid, split_part(result, ',', 2) AS cpu_usage FROM regexp_split_to_table('$(top -b -n1 -H -p $pid | awk '/^ *PID USER/ {ci=0; for(i=1;i<=NF;i++) if($i=="%CPU") ci=i; while (getline) if(ci && $ci!="") print $1 "," $ci}'| paste -sd ";")', ';') AS result) select round(sum(tmp.cpu_usage),2)||'%' cpu_usage,s.thread_name,a.unique_sql_id,min(s.pid) one_pid,count(*) pid_cnt,min(substr(REGEXP_REPLACE(REGEXP_REPLACE(query, '(\r|\n)+', ' '),' {2,}', ' '),1,50)) sqltext from pg_os_threads s right join tmp on s.lwpid=tmp.lwpid  left join pg_stat_activity a on s.pid=a.pid  where (a.state in ('active') or a.state is null) group by s.thread_name,a.unique_sql_id having sum(tmp.cpu_usage)>0 order by round(sum(tmp.cpu_usage),2)::numeric desc limit 10"
 
 echo '=========================================='
 echo '         top I/O usage info               '
@@ -6443,8 +6429,7 @@ export S_TIME_FORMAT=ISO
 psql -d postgres -c "with tmp as (SELECT split_part(result, ',', 1) AS lwpid, split_part(result, ',', 2) AS kb_rd,split_part(result, ',', 3) AS kb_wr FROM regexp_split_to_table('$(pidstat -hdt -p $pid 1 1 | awk 'NR>4 {print $4 "," $5 "," $6}' | paste -sd ";")', ';') AS result) select sum(tmp.kb_rd) read_kb,sum(tmp.kb_wr) write_kb,s.thread_name,a.unique_sql_id,min(s.pid) one_pid,count(*) pid_cnt,min(substr(REGEXP_REPLACE(REGEXP_REPLACE(query, '(\r|\n)+', ' '),' {2,}', ' '),1,50)) sqltext from pg_os_threads s right join tmp on s.lwpid=tmp.lwpid left join pg_stat_activity a on s.pid=a.pid where (a.state in ('active') or a.state is null) group by s.thread_name,a.unique_sql_id having sum(tmp.kb_rd)::numeric+sum(tmp.kb_wr)::numeric>0 order by sum(tmp.kb_rd)::numeric+sum(tmp.kb_wr)::numeric desc limit 10" 
 
  else
-    psql -d postgres <<EOF
-\pset footer off
+    psql -d postgres -P footer=off <<EOF
 \echo '================================'
 \echo 'long transaction info(limit 10)   '
 \echo '================================'
@@ -6509,13 +6494,13 @@ EOF
 echo '=========================================='
 echo '         top cpu usage info               '
 echo '=========================================='
-psql -d postgres -c "with tmp as (SELECT split_part(result, ',', 1) AS lwpid, split_part(result, ',', 2) AS cpu_usage FROM regexp_split_to_table('$(top -b -n1 -H -p $pid | awk '/^ *PID USER.*COMMAND$/ {getline; while (getline) print $1 "," $9}'| paste -sd ";")', ';') AS result) select sum(tmp.cpu_usage)||'%' cpu_usage,s.thread_name,a.query_id,min(s.pid) one_pid,count(*) pid_cnt,min(substr(REGEXP_REPLACE(REGEXP_REPLACE(query, '(\r|\n)+', ' '),' {2,}', ' '),1,50)) sqltext from pg_os_threads s join tmp on s.lwpid=tmp.lwpid  left join pg_stat_activity a on s.pid=a.pid  where (a.state in ('active') or a.state is null) group by s.thread_name,a.query_id having sum(tmp.cpu_usage)>50 order by round(sum(tmp.cpu_usage),2)::numeric desc limit 10"
+psql -d postgres -c "with tmp as (SELECT split_part(result, ',', 1) AS lwpid, split_part(result, ',', 2) AS cpu_usage FROM regexp_split_to_table('$(top -b -n1 -H -p $pid | awk '/^ *PID USER/ {ci=0; for(i=1;i<=NF;i++) if($i=="%CPU") ci=i; while (getline) if(ci && $ci!="") print $1 "," $ci}'| paste -sd ";")', ';') AS result) select sum(tmp.cpu_usage)||'%' cpu_usage,s.thread_name,a.query_id,min(s.pid) one_pid,count(*) pid_cnt,min(substr(REGEXP_REPLACE(REGEXP_REPLACE(query, '(\r|\n)+', ' '),' {2,}', ' '),1,50)) sqltext from pg_os_threads s join tmp on s.lwpid=tmp.lwpid  left join pg_stat_activity a on s.pid=a.pid  where (a.state in ('active') or a.state is null) group by s.thread_name,a.query_id having sum(tmp.cpu_usage)>0 order by round(sum(tmp.cpu_usage),2)::numeric desc limit 10"
 
 echo '=========================================='
 echo '         top I/O usage info               '
 echo '=========================================='
 export S_TIME_FORMAT=ISO
-psql -d postgres -c "with tmp as (SELECT split_part(result, ',', 1) AS lwpid, split_part(result, ',', 2) AS kb_rd,split_part(result, ',', 3) AS kb_wr FROM regexp_split_to_table('$(pidstat -hdt -p $pid  | awk 'NR>4 {print $4 "," $5 "," $6}' | paste -sd ";")', ';') AS result) select sum(tmp.kb_rd) read_kb,sum(tmp.kb_wr) write_kb,s.thread_name,a.query_id,min(s.pid) one_pid,count(*) pid_cnt,min(substr(REGEXP_REPLACE(REGEXP_REPLACE(query, '(\r|\n)+', ' '),' {2,}', ' '),1,50)) sqltext from pg_os_threads s join tmp on s.lwpid=tmp.lwpid left join pg_stat_activity a on s.pid=a.pid where (a.state in ('active') or a.state is null) group by s.thread_name,a.query_id having sum(tmp.kb_rd)::numeric+sum(tmp.kb_wr)::numeric>128 order by sum(tmp.kb_rd)::numeric+sum(tmp.kb_wr)::numeric desc limit 10" 
+psql -d postgres -c "with tmp as (SELECT split_part(result, ',', 1) AS lwpid, split_part(result, ',', 2) AS kb_rd,split_part(result, ',', 3) AS kb_wr FROM regexp_split_to_table('$(pidstat -hdt -p $pid 1 1 | awk 'NR>4 {print $4 "," $5 "," $6}' | paste -sd ";")', ';') AS result) select sum(tmp.kb_rd) read_kb,sum(tmp.kb_wr) write_kb,s.thread_name,a.query_id,min(s.pid) one_pid,count(*) pid_cnt,min(substr(REGEXP_REPLACE(REGEXP_REPLACE(query, '(\r|\n)+', ' '),' {2,}', ' '),1,50)) sqltext from pg_os_threads s join tmp on s.lwpid=tmp.lwpid left join pg_stat_activity a on s.pid=a.pid where (a.state in ('active') or a.state is null) group by s.thread_name,a.query_id having sum(tmp.kb_rd)::numeric+sum(tmp.kb_wr)::numeric>0 order by sum(tmp.kb_rd)::numeric+sum(tmp.kb_wr)::numeric desc limit 10" 
 fi
 }
 
@@ -6527,8 +6512,7 @@ run_sp() {
         exit 1
     fi
     
-    psql -d postgres <<EOF
-\pset footer off
+    psql -d postgres -P footer=off <<EOF
 \set name '$param'
 \echo '=========================='
 \echo 'show parameter from sp'
@@ -6545,8 +6529,7 @@ run_st() {
         exit 1
     fi
     
-    psql -d postgres <<EOF
-\pset footer off
+    psql -d postgres -P footer=off <<EOF
 \set name '$param'
 \echo '=========================='
 \echo 'show table/view from st   '
@@ -6579,7 +6562,7 @@ fi
 
 # 检查是否传入参数
 if [ -n "$dbname" ]; then
-    dbcondition="AND D.datname='${dbname}'"
+    dbcondition="AND current_database()='${dbname}'"
 fi
 
 if [ -n "$all" ]; then
@@ -6588,6 +6571,8 @@ if [ -n "$all" ]; then
     schemacondition="AND 1=1"
     tablecondition="AND 1=1"
 fi
+# -d is optional per help: without it (and without -a) psql -d "" would fail outright
+[ -z "$dbname" ] && dbname="postgres"
 
 echo "dbname is ${dbname}"
 
@@ -6614,7 +6599,7 @@ pg_size_pretty(total_size) AS "total_size"
 from 
 (
 SELECT
-    D.datname as "dbname",
+    current_database() as "dbname",
     N.nspname as "schemaname",
     C.relname AS "tablename",
     case when exists(select inhparent from pg_inherits where C.oid=inhparent)
@@ -6624,13 +6609,16 @@ SELECT
     from 
       (
         SELECT
-           c.relname AS partition_name
+           quote_ident(nc.nspname)||'.'||quote_ident(c.relname) AS partition_name
         FROM
              pg_inherits i
         JOIN
              pg_class c ON c.oid = i.inhrelid
         JOIN
-             pg_class pc ON pc.oid = i.inhparent    
+             pg_class pc ON pc.oid = i.inhparent
+        JOIN
+             pg_namespace nc ON nc.oid = c.relnamespace
+        WHERE i.inhparent = C.oid
       ) t
     )
     else
@@ -6646,13 +6634,16 @@ SELECT
     from 
       (
         SELECT
-           c.relname AS partition_name
+           quote_ident(nc.nspname)||'.'||quote_ident(c.relname) AS partition_name
         FROM
              pg_inherits i
         JOIN
              pg_class c ON c.oid = i.inhrelid
         JOIN
-             pg_class pc ON pc.oid = i.inhparent    
+             pg_class pc ON pc.oid = i.inhparent
+        JOIN
+             pg_namespace nc ON nc.oid = c.relnamespace
+        WHERE i.inhparent = C.oid
       ) t
     )
     else
@@ -6662,8 +6653,6 @@ FROM
     pg_class C 
 LEFT JOIN
     pg_namespace N ON (N.oid = C.relnamespace)
-left join 
-    pg_database D on D.datname not in ('template0','template1') 
 WHERE
     Not exists(select inhrelid from pg_inherits where C.oid=inhrelid)
     AND nspname NOT IN ('pg_catalog', 'information_schema','snapshot')
@@ -6685,6 +6674,7 @@ psql -d ${dbname} -f /tmp/query.sql
 }
 
 run_repl() {
+rm -f /tmp/repl.txt
 psql -d postgres -c "
 COPY (
   SELECT slot_name, pg_current_xlog_location(), receiver_replay_location
@@ -6695,6 +6685,7 @@ COPY (
 " >/dev/null 2>&1
 
 sleep 5
+[ -f /tmp/repl.txt ] || { echo "Error: COPY to /tmp/repl.txt failed (privileges / no physical slots?)" >&2; return 1; }
 
 psql -d postgres -c "
 WITH aa AS (
@@ -6727,14 +6718,21 @@ WHERE a.application_name LIKE '%'||b.slot_name||'%'
 }
 
 run_slow() {
-    psql -d postgres <<EOF
-\pset footer off
+    # \prompt only works on a tty: on piped/cron stdin psql reads the heredoc
+    # itself as the "typed" answer, breaking the SQL. Non-tty runs use defaults.
+    local _vb_pfx _vb_pv=""
+    if [ -t 0 ]; then
+        _vb_pfx="\\prompt 'Enter begin date: ' begin_date
+\\prompt 'Enter end date: ' end_date
+\\prompt 'Enter top_n: ' top_n
+"
+    else
+        _vb_pv="-v begin_date= -v end_date= -v top_n="
+    fi
+    { printf '%s' "$_vb_pfx"; cat <<'VBSLOWEOF'
 \echo 'Default begin date: trunc(now()-5/24/60,'MI')'
 \echo 'Default end date: trunc(now()+1/24/60,'MI')'
 \echo 'Default top_n: 10'
-\prompt 'Enter begin date: ' begin_date
-\prompt 'Enter end date: ' end_date
-\prompt 'Enter top_n: ' top_n
 \echo '===================='
 \echo '   top slow sql     '
 \echo '===================='
@@ -6775,7 +6773,8 @@ group by substr(trunc(start_time,'MI'),1,19),user_name,schema_name,unique_query_
 ))
 where rn<=(case when :'top_n'='' or :'top_n' is null then '10' else :'top_n' end)
 order by 1,execs*db_ms desc;
-EOF
+VBSLOWEOF
+    } | psql $_vb_pv -d postgres -P footer=off
 }
 
 run_xloghc() {
@@ -7002,7 +7001,7 @@ run_relxlog() {
         exit 1
     fi
     
-    pg_xlogdump -p $wal_dir "$start_wal" "$end_wal" |
+    pg_xlogdump -p "$wal_dir" "$start_wal" "$end_wal" |
     awk '/REDO/{
         type=$19" - "$21;
         size=$15;
@@ -7011,13 +7010,8 @@ run_relxlog() {
         type_size[type]+=size;
         total_size+=size;
         total_entries++;
-        if($0 ~ " rel ") {
-            if($30=="rel"){
-                rel=$31;
-            }
-            if($27=="rel"){
-                rel=$28;
-            }
+        if (match($0, / rel [0-9]+\/[0-9]+(\/[0-9]+)?/)) {
+            rel = substr($0, RSTART+5, RLENGTH-5);
             rel_cnt[rel]++;
             rel_size[rel]+=size;
             rel_total_size+=size;
@@ -7109,7 +7103,10 @@ def parse_datetime(date_str):
         '%Y-%m-%d %H:%M:%S.%f', 
         '%Y-%m-%d %H:%M:%S', 
         '%Y-%m-%d %H:%M', 
-        '%Y-%m-%d %H'
+        '%Y-%m-%d %H',
+        '%Y-%m-%dT%H:%M:%S.%f',   # ISO 8601 'T' separator
+        '%Y-%m-%dT%H:%M:%S',
+        '%Y-%m-%d'
     ]
     for fmt in formats:
         try:
@@ -7379,9 +7376,11 @@ EOF
 
     # Execute the python script with the provided arguments
     python3 "$TEMP_SCRIPT" "${@:2}"
+    _vb_py_rc=$?
     
-    # Clean up
+    # Clean up (rc captured BEFORE rm: the trailing rm used to mask python's rc)
     rm -f "$TEMP_SCRIPT"
+    return $_vb_py_rc
 }
 
 
@@ -7391,13 +7390,13 @@ run_kill_sessions() {
 
     while getopts ":i:s:p:q:d:au:u:t:" opt; do
       case $opt in
-        i) CONDITIONS+=("client_addr = ''$OPTARG''") ;;
+        i) CONDITIONS+=("client_addr = ''$OPTARG'' and datname not in (''postgres'',''vastbase'',''panweidb'')") ;;
         s) CONDITIONS+=("state = ''$OPTARG'' and datname not in (''postgres'',''vastbase'',''panweidb'')") ;;
-        p) CONDITIONS+=("pid = ''$OPTARG''") ;;
-        q) CONDITIONS+=("unique_sql_id = ''$OPTARG''") ;;
-        d) CONDITIONS+=("application_name = ''$OPTARG''") ;;
+        p) CONDITIONS+=("pid = ''$OPTARG'' and datname not in (''postgres'',''vastbase'',''panweidb'')") ;;
+        q) CONDITIONS+=("unique_sql_id = ''$OPTARG'' and datname not in (''postgres'',''vastbase'',''panweidb'')") ;;
+        d) CONDITIONS+=("application_name = ''$OPTARG'' and datname not in (''postgres'',''vastbase'',''panweidb'')") ;;
         a) CONDITIONS+=("datname not in (''postgres'',''vastbase'',''panweidb'')") ;;
-        u) CONDITIONS+=("usename = ''$OPTARG'' ") ;;
+        u) CONDITIONS+=("usename = ''$OPTARG'' and datname not in (''postgres'',''vastbase'',''panweidb'')") ;;
         t) CONDITIONS+=("EXTRACT(EPOCH FROM (now() - xact_start))>$OPTARG and datname not in (''postgres'',''vastbase'',''panweidb'')") ;;
         \?) echo "Invalid option: -$OPTARG" >&2; exit 1 ;;
         :) echo "Option -$OPTARG requires argument" >&2; exit 1 ;;
@@ -7449,8 +7448,7 @@ EOF
 }
 
 run_lock_details() {
-    psql -d postgres <<EOF
-\pset footer off
+    psql -d postgres -P footer=off <<EOF
 \pset format unaligned
 \pset tuples_only on
 \echo '=========================='
@@ -7463,10 +7461,21 @@ WITH t_wait AS (
   FROM pg_locks a,pg_stat_activity b WHERE a.pid=b.pid AND NOT a.granted
 ),
 t_run AS (
+  /* 2PC: prepared transactions hold locks with pid IS NULL + vxid '-1/<xid>'
+     (same signature as lockchain); plain pid join dropped those holders */
   SELECT a.mode,a.locktype,a.database,a.relation,a.page,a.tuple,a.classid,a.granted,
          a.objid,a.objsubid,a.pid,a.virtualtransaction,a.virtualxid,a.transactionid,a.fastpath,
-         b.state,b.query,b.xact_start,b.query_start,b.usename,b.datname,b.client_addr,b.client_port,b.application_name
-  FROM pg_locks a,pg_stat_activity b WHERE a.pid=b.pid AND a.granted
+         CASE WHEN b.pid IS NOT NULL THEN b.state
+              WHEN px.gid IS NOT NULL THEN '2pc-prepared' ELSE NULL END state,
+         b.query,
+         COALESCE(b.xact_start,px.prepared) xact_start,b.query_start,
+         COALESCE(b.usename,px.owner) usename,b.datname,b.client_addr,b.client_port,b.application_name
+  FROM pg_locks a
+  LEFT JOIN pg_stat_activity b ON a.pid=b.pid
+  LEFT JOIN pg_prepared_xacts px ON a.pid IS NULL
+       AND a.virtualtransaction LIKE '-1/%'
+       AND px.transaction::text = split_part(a.virtualtransaction, '/', 2)
+  WHERE a.granted
 ),
 t_overlap AS (
   SELECT r.* FROM t_wait w JOIN t_run r ON
@@ -7481,7 +7490,7 @@ t_overlap AS (
     r.classid IS NOT DISTINCT FROM w.classid AND
     r.objid IS NOT DISTINCT FROM w.objid AND
     r.objsubid IS NOT DISTINCT FROM w.objsubid AND
-    r.pid <> w.pid
+    r.pid IS DISTINCT FROM w.pid
   )
 ),
 t_unionall AS (
@@ -7618,8 +7627,7 @@ run_asp_cnt_query() {
     fi
  
     if [[ "$las_flag" = 0 ]]; then
-	    psql -d postgres <<EOF
-\pset footer off
+	    psql -d postgres -P footer=off <<EOF
 \echo '=================================='
 \echo '   active session history count '
 \echo '=================================='
@@ -7700,8 +7708,7 @@ ORDER BY
     interval_start;
 EOF
     else 
-    psql -d postgres <<EOF
-\pset footer off
+    psql -d postgres -P footer=off <<EOF
 \echo '=================================='
 \echo '   active session history count '
 \echo '=================================='
@@ -7837,8 +7844,7 @@ run_asp_sql_query() {
     fi
 	
     if [[ "$las_flag" = 0 ]]; then
-    psql -d postgres <<EOF
-\pset footer off
+    psql -d postgres -P footer=off <<EOF
 \echo '==================================' 
 \echo '   active session history topsql  '
 \echo '=================================='
@@ -7908,8 +7914,7 @@ ORDER BY
     date_time, max_cnt DESC;
 EOF
     else 
-    psql -d postgres <<EOF
-\pset footer off
+    psql -d postgres -P footer=off <<EOF
 \echo '==================================' 
 \echo '   active session history topsql  '
 \echo '=================================='
@@ -8031,8 +8036,7 @@ run_asp_event_query() {
     fi
 	
     if [[ "$las_flag" = 0 ]]; then	
-   psql -d postgres <<EOF
-\pset footer off
+   psql -d postgres -P footer=off <<EOF
 \echo '=================================='
 \echo '   active session history event   '
 \echo '=================================='
@@ -8089,8 +8093,7 @@ ORDER BY
     interval_start,max_cnt;
 EOF
     else 
-   psql -d postgres <<EOF
-\pset footer off
+   psql -d postgres -P footer=off <<EOF
 \echo '=================================='
 \echo '   active session history event   '
 \echo '=================================='
@@ -8276,8 +8279,7 @@ JOIN gs_asp_1 blocked_las ON bs.sampleid = blocked_las.sampleid
 ORDER BY bs.sampleid, bs.blocked_count DESC; 
 EOF
 	else 
-	psql -d postgres <<EOF
-\pset footer off
+	psql -d postgres -P footer=off <<EOF
 \echo '==================================='
 \echo 'waitchain from local_active_session'
 \echo '==================================='
@@ -8751,10 +8753,12 @@ setup_ssh() {
     touch $HOME/.ssh/authorized_keys $HOME/.ssh/known_hosts | tee -a $LOGFILE
     chmod 644 $HOME/.ssh/authorized_keys $HOME/.ssh/known_hosts | tee -a $LOGFILE
     
-    # Create SSH config
-    echo "Host *" > $HOME/.ssh/config
-    echo "ForwardX11 no" >> $HOME/.ssh/config
-    chmod 644 $HOME/.ssh/config
+    # Create SSH config (only if absent: never truncate a hand-maintained one)
+    if [ ! -f $HOME/.ssh/config ]; then
+        echo "Host *" > $HOME/.ssh/config
+        echo "ForwardX11 no" >> $HOME/.ssh/config
+        chmod 644 $HOME/.ssh/config
+    fi
     
     # Generate SSH key if needed
     if ! test -f $HOME/.ssh/${IDENTITY} || ! test -f $HOME/.ssh/${IDENTITY}.pub
@@ -8790,16 +8794,19 @@ setup_ssh() {
         
         # Copy public key to remote host
         echo "  Copying public key to remote host..." | tee -a $LOGFILE
-        $SCP -o BatchMode=yes $HOME/.ssh/${IDENTITY}.pub $USR@$host:.ssh/authorized_keys >/dev/null 2>&1
+        $SSH -o StrictHostKeyChecking=no -o BatchMode=yes $USR@$host "cat >> .ssh/authorized_keys" \
+            < $HOME/.ssh/${IDENTITY}.pub >/dev/null 2>&1
         
         if [ $? -ne 0 ]
         then
-            echo "  Warning: SCP failed, trying with password prompt..." | tee -a $LOGFILE
-            $SCP $HOME/.ssh/${IDENTITY}.pub $USR@$host:.ssh/authorized_keys | tee -a $LOGFILE
+            echo "  Warning: ssh append failed, trying with password prompt..." | tee -a $LOGFILE
+            $SSH -o StrictHostKeyChecking=no $USR@$host "cat >> .ssh/authorized_keys" \
+                < $HOME/.ssh/${IDENTITY}.pub | tee -a $LOGFILE
         fi
         
-        # Add local public key to local authorized_keys
-        cat $HOME/.ssh/${IDENTITY}.pub >> $HOME/.ssh/authorized_keys
+        # Add local public key to local authorized_keys (once, idempotent)
+        grep -qF "$(cat $HOME/.ssh/${IDENTITY}.pub)" $HOME/.ssh/authorized_keys 2>/dev/null || \
+            cat $HOME/.ssh/${IDENTITY}.pub >> $HOME/.ssh/authorized_keys
     done
     
     # Advanced setup (setup SSH between remote hosts)
@@ -8977,10 +8984,12 @@ run_workload() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -n)
+                [ $# -lt 2 ] && { echo "Error: -n requires a value" >&2; return 2; }
                 top_n="$2"
                 shift 2
                 ;;
             -o)
+                [ $# -lt 2 ] && { echo "Error: -o requires a value" >&2; return 2; }
                 order_by="$2"
                 shift 2
                 ;;
@@ -9531,8 +9540,7 @@ EOF
                 done < /proc/diskstats
             }
 
-            psql -d postgres <<EOF
-\pset footer off
+            psql -d postgres -P footer=off <<EOF
 \echo '================================================================================'
 \echo '                        VASTBASE WORKLOAD REPORT'
 \echo '================================================================================'
@@ -9573,8 +9581,7 @@ echo ""
 echo "=========================================="
 echo "     VASTBASE PERFORMANCE STATISTICS      "
 echo "=========================================="
-psql -d postgres <<EOF
-\pset footer off
+psql -d postgres -P footer=off <<EOF
 \echo '1. INSTANCE TIME STATISTICS'
 \echo '==========================='
 SELECT 
@@ -9648,13 +9655,13 @@ z AS (
 SELECT 
     'Transactions' as metric,
     x.transactions as total,
-    round(x.transactions / z.duration, 2) as per_second
+    round(x.transactions / nullif(z.duration,0), 2) as per_second
 FROM x, z
 UNION ALL
 SELECT 
     'Blocks Read(blocks)',
     x.blocks_read,
-    round(x.blocks_read / z.duration, 2)
+    round(x.blocks_read / nullif(z.duration,0), 2)
 FROM x, z
 UNION ALL
 SELECT 
@@ -9672,31 +9679,31 @@ UNION ALL
 SELECT 
     'Blocks Hit(blocks)',
     x.blocks_hit,
-    round(x.blocks_hit / z.duration, 2)
+    round(x.blocks_hit / nullif(z.duration,0), 2)
 FROM x, z
 UNION ALL
 SELECT 
     'Pages Flushed(blocks)',
     y.pages_flushed,
-    round(y.pages_flushed / z.duration, 2)
+    round(y.pages_flushed / nullif(z.duration,0), 2)
 FROM y, z
 UNION ALL
 SELECT 
     'Remaining Dirty Pages diff(blocks)',
     y.remaining_dirty_pages_diff,
-    round(y.remaining_dirty_pages_diff / z.duration, 2)
+    round(y.remaining_dirty_pages_diff / nullif(z.duration,0), 2)
 FROM y, z
 UNION ALL
 SELECT 
     'Redo Size(Byte)',
     y.xlog_diff,
-    round(y.xlog_diff / z.duration, 2)
+    round(y.xlog_diff / nullif(z.duration,0), 2)
 FROM y, z
 UNION ALL
 SELECT 
     'Temp Size(Byte)',
     x.tempbytes,
-    round(x.tempbytes / z.duration, 2)
+    round(x.tempbytes / nullif(z.duration,0), 2)
 FROM x, z;
 
 \echo ''
@@ -9916,12 +9923,17 @@ run_collect_log(){
 run_collect_log_self() {
     echo "[INFO ] Collecting logs ($begin_time ~ $end_time)..."
     run_collect_log_nodes_info "$local_hostname"
+    local _vb_cl_rc=$?
 
     # Logfile Check
     echo "--------------------------------------------------------------"
-    if [ $? -eq 0 ]; then
+    if [ $_vb_cl_rc -eq 0 ]; then
         echo "[INFO ] Compressing logs ……"
 	    tar -czf "/tmp/${logname}.tar.gz" -C /tmp "$logname"
+        if [ $? -ne 0 ]; then
+            echo "[ERROR] tar failed; raw files kept at $output_dir" >&2
+            exit 1
+        fi
         rm -rf "$output_dir"
         echo "--------------------------------------------------------------"
         echo "[SUCCESS] Logs collected to \"/tmp/${logname}.tar.gz\" . Size: $(du -sh "/tmp/${logname}.tar.gz" | cut -f1)"
@@ -9952,9 +9964,14 @@ run_collect_log_all() {
         else
             echo "[INFO ] Single node detected (1 node: $host_list)."
         fi
+        local _vb_fail_hosts=""
         for host in $host_list; do
-            run_collect_log_nodes_info "$host"
+            run_collect_log_nodes_info "$host" || _vb_fail_hosts="$_vb_fail_hosts $host"
         done
+        if [ -n "$_vb_fail_hosts" ]; then
+            echo "[ERROR] Collection failed on:$_vb_fail_hosts -- raw files kept at $output_dir" >&2
+            exit 1
+        fi
     else
         echo "[ERROR] Non-Has3.x environment detected. Remove '-g' to collect local logs only."
         exit 1
@@ -9963,6 +9980,10 @@ run_collect_log_all() {
     # Final Result
     echo "[INFO ] Compressing logs ……"
 	tar -czf "/tmp/${logname}.tar.gz" -C /tmp "$logname"
+    if [ $? -ne 0 ]; then
+        echo "[ERROR] tar failed; raw files kept at $output_dir" >&2
+        exit 1
+    fi
     rm -rf "$output_dir"
     echo "--------------------------------------------------------------"
     echo "[SUCCESS] Logs collected to \"/tmp/${logname}.tar.gz\" . Size: $(du -sh "/tmp/${logname}.tar.gz" | cut -f1)"
@@ -10051,7 +10072,7 @@ run_collect_log_nodes_info() {
                 run_collect_log_asp      > "$output_dir/dbinfo/asp_${node}.txt"
                 run_collect_log_mem      > "$output_dir/dbinfo/mem_${node}.txt"
                 run_collect_log_wdr      > "$output_dir/dbinfo/wdr_${node}.txt"
-				safe_exec "Show Backup" "vb_probackup show -B '$backup_path' > $output_dir/dbinfo/dbinfo_${node}.txt "
+				safe_exec "Show Backup" "vb_probackup show -B '$backup_path' >> $output_dir/dbinfo/dbinfo_${node}.txt "
             fi
         else
             echo "[WARN ] Database offline or connection timeout - skipping SQL-based metrics."
@@ -10086,8 +10107,12 @@ run_collect_log_nodes_info() {
         if [ -d "$output_dir" ]; then
             cd "$output_dir"
             tar -czf "${node}.tar.gz" * --exclude="${node}.tar.gz" 2>/dev/null
-            find . -maxdepth 1 ! -name "${node}.tar.gz" ! -name "." -exec rm -rf {} +
-            echo "BUNDLE_READY"
+            if [ \$? -ne 0 ]; then
+                echo "[ERROR] tar failed for ${node}; raw files kept for inspection"
+            else
+                find . -maxdepth 1 ! -name "${node}.tar.gz" ! -name "." -exec rm -rf {} +
+                echo "BUNDLE_READY"
+            fi
         fi
 		# Ending Message
         printf "\n[INFO ] Node ${node} collection completed.\n" 
@@ -10343,7 +10368,9 @@ run_collect_log_param() {
     if [[ -z "$param_value" ]]; then
         # Read files in reverse using 'tac' as PostgreSQL honors the last defined setting.
         # Search scope: postgresql.base.conf and postgresql.conf
-        param_value=$(tac "$pgdata_dir/postgresql.base.conf" "$pgdata_dir/postgresql.conf" 2>/dev/null | \
+        # GNU tac reverses each file separately keeping file order: main config
+        # must come FIRST so its (reversed) definitions are found before base.conf
+        param_value=$(tac "$pgdata_dir/postgresql.conf" "$pgdata_dir/postgresql.base.conf" 2>/dev/null | \
                       grep -E "^[[:space:]]*$param_name" | head -n 1 | \
                       sed -E "s/^[[:space:]]*$param_name[[:space:]]*=[[:space:]]*['\"]?([^'\"]*)['\"?].*/\1/")
     fi
@@ -10425,7 +10452,11 @@ def get_log_line_prefix():
             ['psql', '-t', '-A', '-c', "SHOW log_line_prefix", '-d', 'postgres'],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True
         )
-        stdout, _ = p.communicate(timeout=5)
+        try:
+            stdout, _ = p.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            p.kill(); p.communicate()
+            return None
         if p.returncode == 0 and stdout.strip():
             return stdout.strip()
     except Exception:
@@ -10436,7 +10467,11 @@ def get_log_line_prefix():
             ['psql', '-t', '-A', '-c', "SHOW config_file", '-d', 'postgres'],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True
         )
-        stdout, _ = p.communicate(timeout=5)
+        try:
+            stdout, _ = p.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            p.kill(); p.communicate()
+            return None
         if p.returncode == 0:
             config_file = stdout.strip()
             if config_file and os.path.exists(config_file):
@@ -10741,7 +10776,7 @@ run_collect_log_cmdn() {
         # 1. Independent Cut-off Calibration
         # Locate the first file modified after end_time to ensure continuity
         local first_after
-        first_after=$(find "$leaf_path" -maxdepth 1 -type f -newermt "$end_time" 2>/dev/null | head -n 1)
+        first_after=$(find "$leaf_path" -maxdepth 1 -type f -newermt "$end_time" -printf '%T@ %p\n' 2>/dev/null | sort -n | head -n 1 | cut -d' ' -f2-)
         
         local final_cutoff="$end_time"
         [[ -n "$first_after" ]] && final_cutoff=$(stat -c '%y' "$first_after")
@@ -10772,7 +10807,7 @@ run_collect_log_cmdn() {
         
         # Only process relevant categories: bin, cm, om, pg_log
         case "$top_level" in
-            bin|cm|om|pg_log)
+            bin|cm|om|pg_log|ffic_log)
                 process_leaf "$dir" "$rel_dir" "$target_path"
                 ;;
         esac
@@ -10800,7 +10835,11 @@ run_collect_log_xlog() {
     local lsn_high="${raw_lsn%/*}"
     local lsn_low="${raw_lsn#*/}"
 	local lsn_low_padded=$(printf "%08s" "$lsn_low" | tr ' ' '0')
-	local boundary_wal=$(printf "00000001%08X000000%02X" "0x$lsn_high" "0x${lsn_low_padded:0:2}")
+	# timeline from pg_controldata (hardcoded 1 missed every WAL after a
+    # failover/PITR -- timeline>=2 names sort AFTER the boundary and got dropped)
+	local tli=$(pg_controldata 2>/dev/null | awk -F': +' '/TimeLineID/ {print $2; exit}')
+	[[ "$tli" =~ ^[0-9]+$ ]] || tli=1
+	local boundary_wal=$(printf "%08X%08X000000%02X" "$tli" "0x$lsn_high" "0x${lsn_low_padded:0:2}")
 
     # 3. Timestamp Normalization (End Time Calibration)
     # Buffers the search window to ensure files modified shortly after the end_time are considered.
@@ -10923,13 +10962,13 @@ except ImportError:
 # 预编译正则表达式以提高性能
 # HTML 中超长 SQL 截断阈值：超过该长度时，页面内嵌文本截断展示，完整内容写入外置 txt
 MAX_INLINE_SQL_LEN = 4096
-TIMESTAMP_PATTERN = re.compile(r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}) ')
+TIMESTAMP_PATTERN = re.compile(r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?) ')
 # 错误/警告级别识别（ERROR / WARNING / FATAL / PANIC）
 ERROR_LEVEL_PATTERN = re.compile(r'\b(ERROR|WARNING|FATAL|PANIC)\s*:')
 IP_PATTERN = re.compile(r'(\d{1,3}\.){3}\d{1,3}\(\d+\)')
 QUERY_TEXT_PATTERN = re.compile(r'Query Text:', re.IGNORECASE)
 EXECUTE_PATTERN = re.compile(r'(?:execute|bind)\s+(?:<[^>]*>|\S+)\s*:|duration:|unique id|statement:', re.IGNORECASE)
-PARAM_PATTERN = re.compile(r'\$(\d+)\s*=\s*([^,\s]+(?:\s*[^,\s]+)*)')
+PARAM_PATTERN = re.compile(r"\$(\d+)\s*=\s*('[^']*'|[^,]*?)(?=\s*,|$)")
 # 新增预编译正则表达式
 SPLIT_PATTERN = re.compile(r'\s+')
 PARAMETERS_PATTERN = re.compile(r'parameters:\s+')
@@ -11048,7 +11087,12 @@ def get_db_log_directory():
                 stderr=subprocess.PIPE,
                 universal_newlines=True
             )
-            stdout_data, stderr_data = process_data.communicate()
+            try:
+                stdout_data, stderr_data = process_data.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                process_data.kill(); process_data.communicate()
+                print("ERROR: 获取data_directory超时(5s)")
+                return None
             
             if process_data.returncode != 0:
                 print(f"ERROR: 获取data_directory失败: {stderr_data.strip()}")
@@ -11084,7 +11128,10 @@ def parse_datetime(date_str):
         '%Y-%m-%d %H:%M:%S.%f', 
         '%Y-%m-%d %H:%M:%S', 
         '%Y-%m-%d %H:%M', 
-        '%Y-%m-%d %H'
+        '%Y-%m-%d %H',
+        '%Y-%m-%dT%H:%M:%S.%f',   # ISO 8601 'T' separator
+        '%Y-%m-%dT%H:%M:%S',
+        '%Y-%m-%d'
     ]
     for fmt in formats:
         try:
@@ -11162,6 +11209,9 @@ parser.add_argument('-o', '--output', type=str, default=None,
                     help="输出HTML报告的文件路径，例如: report.html 或 /path/to/report.html。不指定则使用默认路径")
 parser.add_argument('--debug', action='store_true', help="启用调试输出")
 args = parser.parse_args()
+# -e 只给日期时按“当天结束”理解（否则按 00:00 边界会把当天日志整文件排除）
+if args.end and re.match(r'^\d{4}-\d{2}-\d{2}$', args.end.strip()):
+    args.end = args.end.strip() + ' 23:59:59.999'
 file_names = args.file
 
 # 验证 --mode 参数
@@ -11240,27 +11290,37 @@ def parse_log_prefix_format(log_prefix):
     extracted_fields = []
     i = 0
     while i < len(log_prefix):
-        if log_prefix[i:i+2] in format_mapping:
-            field_code = log_prefix[i:i+2]
+        field_code = log_prefix[i:i+2]
+        if field_code in format_mapping:
             field_name = format_mapping[field_code]
-            if field_name not in ['literal_percent']:  # 排除不需要的字段
+            # %% -> literal '%'; %q emits NOTHING for normal backends -- neither
+            # consumes a token in the log line
+            if field_name not in ['literal_percent', 'backend_type']:
                 extracted_fields.append(field_name)
+            i += 2
+        elif len(field_code) == 2 and field_code[0] == '%' and field_code[1].isalpha():
+            # unknown %-escape (%h/%a/%e/...): its value IS one token in the
+            # log line -- consume-and-discard so later fields stay aligned
+            extracted_fields.append('skip_token')
             i += 2
         else:
             i += 1
     
-    # 去重但保持顺序
+    # 去重但保持顺序（skip_token 不去重：每个未知转义各吃一个 token）
     unique_fields = []
     seen = set()
     for field in extracted_fields:
-        if field not in seen:
+        if field == 'skip_token':
+            unique_fields.append(field)
+        elif field not in seen:
             unique_fields.append(field)
             seen.add(field)
     
-    # 在解析时，由于时间戳已经作为块分割符被单独提取，所以应该跳过第一个字段（如果它是timestamp）
-    # 这是因为在主解析循环中，blocks数组包含的是时间戳之后的内容
-    if unique_fields and unique_fields[0] == 'timestamp':
-        unique_fields = unique_fields[1:]
+    # 时间戳已作为块分割符被单独提取：blocks 里只有时间戳之后的内容。
+    # 若前缀里时间戳不在最前（如 '[%p] %m %u %d'），时间戳之前的字段
+    # 已随上一个 block 丢失，一并丢弃，之后的字段才能重新对齐
+    if 'timestamp' in unique_fields:
+        unique_fields = unique_fields[unique_fields.index('timestamp') + 1:]
     
     print(f"解析日志前缀 '{log_prefix}'....")
     
@@ -11297,7 +11357,11 @@ def _parse_log_line_by_format(log_line, unique_fields):
     for field_name in unique_fields:
         if token_idx >= len(tokens):
             break
-            
+
+        if field_name == 'skip_token':
+            token_idx += 1        # unknown placeholder: drop its token
+            continue
+
         current_token = tokens[token_idx]
         
         # 特殊处理某些字段
@@ -11502,43 +11566,28 @@ def parse_csv_log_line(csv_row):
         if len(csv_row) < 16:
             return None
         
-        # 判断是26列格式还是16列格式
-        if len(csv_row) >= 26:
-            # 26列格式
-            timestamp_idx = 0
-            user_idx = 1
-            database_idx = 2
-            thread_id_idx = 4
-            connection_from_idx = 5
-            session_id_idx = 6
-            message_idx = 16
-            query_idx = 22
-        else:
-            # 16列格式(被截断的日志)
-            # 索引0=user, 1=database, 2=thread_id, 3=connection_from, 4=session_id...
-            # 实际格式: user, database, unknown, thread_id, connection_from, session_id, ...
-            # message在索引15
-            timestamp_idx = -1  # 无时间戳字段
-            user_idx = 0
-            database_idx = 1
-            thread_id_idx = 3
-            connection_from_idx = 4
-            session_id_idx = 5
-            message_idx = 15
-            query_idx = -1  # 无query字段
-        
+        # 按列名从 CSV_LOG_COLUMNS 定位（此前按位置硬编码的两套索引与
+        # CSV_LOG_COLUMNS 自相矛盾，标准 csvlog 全部串列）。PG15+/VastBase
+        # 的扩展列都追加在尾部，前部索引稳定；截断行缺列时优雅降级为空
+        def _col(name):
+            try:
+                i = CSV_LOG_COLUMNS.index(name)
+            except ValueError:
+                return ''
+            return csv_row[i].strip() if len(csv_row) > i else ''
+
         result = {
-            'timestamp': csv_row[timestamp_idx].strip() if timestamp_idx >= 0 and len(csv_row) > timestamp_idx else '',
-            'user': csv_row[user_idx].strip() if len(csv_row) > user_idx else '',
-            'database': csv_row[database_idx].strip() if len(csv_row) > database_idx else '',
-            'thread_id': csv_row[thread_id_idx].strip() if len(csv_row) > thread_id_idx else '',
-            'connection_from': csv_row[connection_from_idx].strip() if len(csv_row) > connection_from_idx else '',
-            'session_id': csv_row[session_id_idx].strip() if len(csv_row) > session_id_idx else '',
-            'message': csv_row[message_idx].strip() if len(csv_row) > message_idx else '',
-            'query': csv_row[query_idx].strip() if query_idx >= 0 and len(csv_row) > query_idx else '',
-            'detail': '',
-            'hint': '',
-            'context': '',
+            'timestamp': _col('timestamp'),
+            'user': _col('user'),
+            'database': _col('database'),
+            'thread_id': _col('process_id'),
+            'connection_from': _col('connection_from'),
+            'session_id': _col('session_id'),
+            'message': _col('message'),
+            'query': _col('query'),
+            'detail': _col('detail'),
+            'hint': _col('hint'),
+            'context': _col('context'),
         }
         
         # 提取IP地址（从connection_from字段）
@@ -11630,6 +11679,11 @@ def convert_csv_to_standard_format(content):
         else:
             timestamp = parsed['timestamp']
         
+        # PG csvlog 的 log_time 带时区后缀(+08 / CST)，重拼后的行首时间戳
+        # 必须剥掉，否则 TIMESTAMP_PATTERN 整文件一条都匹配不上
+        _tsm = re.match(r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?)', timestamp)
+        if _tsm:
+            timestamp = _tsm.group(1)
         # 确保时间戳包含毫秒部分（TIMESTAMP_PATTERN要求格式: 2026-05-11 09:00:33.000）
         if timestamp and '.' not in timestamp:
             # 没有时间戳毫秒部分，添加.000
@@ -11926,11 +11980,14 @@ def find_recent_log_files(log_directory, days=2, begin_time=None, end_time=None)
         # 如果还是没有找到文件，抛出异常
         if not filtered_files:
             if begin_time and end_time:
-                raise FileNotFoundError(f"在指定时间范围 {begin_time} 到 {end_time} 内没有找到合适的日志文件")
+                print(f"错误: 在指定时间范围 {begin_time} 到 {end_time} 内没有找到合适的日志文件")
+                sys.exit(1)
             elif begin_time:
-                raise FileNotFoundError(f"在指定开始时间 {begin_time} 之后没有找到合适的日志文件")
+                print(f"错误: 在指定开始时间 {begin_time} 之后没有找到合适的日志文件")
+                sys.exit(1)
             elif end_time:
-                raise FileNotFoundError(f"在指定结束时间 {end_time} 之前没有找到合适的日志文件")
+                print(f"错误: 在指定结束时间 {end_time} 之前没有找到合适的日志文件")
+                sys.exit(1)
             else:
                 # 使用默认天数限制
                 cutoff_date = datetime.now() - timedelta(days=days)
@@ -12178,6 +12235,9 @@ def process_single_file(file_name, args, total_elapsed_time=0):
     
     # 使用优化的文件读取
     content = read_log_file_stream(file_name)
+    if content is None:
+        print(f"错误: 无法读取文件 {file_name}（权限/不存在？），跳过")
+        return [], [], 0.0, [], [], []
     
     # 检查文件大小并给出优化建议
     file_size = len(content)
@@ -12244,7 +12304,7 @@ def process_single_file(file_name, args, total_elapsed_time=0):
     error_list = []
 
     # 仅在 --mode error/all 时提取错误日志，query 模式不提取
-    analyze_errors = (getattr(args, 'statement', 'query').lower() in ('error', 'all'))
+    analyze_errors = (args.mode.lower() in ('error', 'all'))
 
     # Process logs based on the analysis type
     if e_type == 'slow':
@@ -13203,10 +13263,12 @@ class ReportGenerator:
         if not lock_event_list:
             return ''
 
-        # 合并同一次等待的 waiting + acquired 为一条记录
-        # 按 (session_id, target, lock_type) 分组，waiting 被后续 acquired 吸收
-        from collections import OrderedDict
-        merged_events = OrderedDict()
+        # 合并同一次等待的 waiting + acquired 为一条记录。
+        # 同一 (session,target,lock_type) 在窗口内可等待多轮：waiting 时若
+        # 上一轮尚未 acquired 则累计；acquired 后新到的 waiting 开启新一轮
+        # （旧实现 key 已存在直接丢弃，只保留最后一轮且漏计耗时）
+        pending = {}          # key -> 正在等待的记录
+        records = []          # 已完成（或已吸收）的记录
         for ev in lock_event_list:
             session_id = ev.get('session_id', '')
             target = ev.get('target', '')
@@ -13215,8 +13277,11 @@ class ReportGenerator:
             key = (session_id, target, lock_type)
 
             if event_kind == 'waiting':
-                if key not in merged_events:
-                    merged_events[key] = {
+                if key in pending:
+                    pending[key]['wait_time_ms'] += ev.get('wait_time_ms', 0)
+                    pending[key]['rounds'] += 1
+                else:
+                    pending[key] = {
                         'timestamp': ev.get('timestamp', ''),
                         'session_id': session_id,
                         'lock_type': lock_type,
@@ -13227,29 +13292,30 @@ class ReportGenerator:
                         'log_text': ev.get('log_text', ''),
                         'sql_text': ev.get('sql_text', ''),
                         'unique_id': ev.get('unique_id', ''),
-                        'txid': ev.get('txid', '')
+                        'txid': ev.get('txid', ''),
+                        'rounds': 1,
                     }
             elif event_kind == 'acquired':
-                if key in merged_events and merged_events[key]['event_kind'] == 'waiting':
+                if key in pending:
                     # waiting 被 acquired 吸收：保留 waiting 的时间戳，总耗时 = waiting + acquired
-                    waiting_ev = merged_events[key]
-                    total_wait_ms = waiting_ev['wait_time_ms'] + ev.get('wait_time_ms', 0)
-                    merged_events[key] = {
+                    waiting_ev = pending.pop(key)
+                    records.append({
                         'timestamp': waiting_ev['timestamp'],
                         'session_id': session_id,
                         'lock_type': lock_type,
                         'target': target,
-                        'wait_time_ms': total_wait_ms,
+                        'wait_time_ms': waiting_ev['wait_time_ms'] + ev.get('wait_time_ms', 0),
                         'event_kind': 'acquired',
                         'connection_key': ev.get('connection_key', ''),
                         'log_text': waiting_ev['log_text'] + '\n' + ev.get('log_text', ''),
                         'sql_text': ev.get('sql_text', '') or waiting_ev['sql_text'],
                         'unique_id': ev.get('unique_id', '') or waiting_ev['unique_id'],
-                        'txid': ev.get('txid', '') or waiting_ev['txid']
-                    }
+                        'txid': ev.get('txid', '') or waiting_ev['txid'],
+                        'rounds': waiting_ev['rounds'],
+                    })
                 else:
                     # 没有 waiting 的 acquired（如等待时间极短）
-                    merged_events[key] = {
+                    records.append({
                         'timestamp': ev.get('timestamp', ''),
                         'session_id': session_id,
                         'lock_type': lock_type,
@@ -13260,10 +13326,12 @@ class ReportGenerator:
                         'log_text': ev.get('log_text', ''),
                         'sql_text': ev.get('sql_text', ''),
                         'unique_id': ev.get('unique_id', ''),
-                        'txid': ev.get('txid', '')
-                    }
-
-        merged_list = list(merged_events.values())
+                        'txid': ev.get('txid', ''),
+                        'rounds': 1,
+                    })
+        # 窗口结束仍在等待的记录也要参与统计
+        records.extend(pending.values())
+        merged_list = records
 
         # 按锁耗时降序取前10
         top10 = sorted(merged_list, key=lambda x: x.get('wait_time_ms', 0), reverse=True)[:10]
@@ -14165,17 +14233,17 @@ class ReportGenerator:
             is_min_long = len(min_full) > MAX_INLINE_SQL_LEN
 
             if is_max_long:
-                max_q_disp = normalize_sql_for_display(max_full[:MAX_INLINE_SQL_LEN]) + "\n... [SQL 过长已截断，点击按钮下载完整内容]"
+                max_q_disp = html.escape(normalize_sql_for_display(max_full[:MAX_INLINE_SQL_LEN])) + "\n... [SQL 过长已截断，点击按钮下载完整内容]"
                 max_b64 = _b64(max_full)
             else:
-                max_q_disp = normalize_sql_for_display(max_full)
+                max_q_disp = html.escape(normalize_sql_for_display(max_full))
                 max_b64 = ''
 
             if is_min_long:
-                min_q_disp = normalize_sql_for_display(min_full[:MAX_INLINE_SQL_LEN]) + "\n... [SQL 过长已截断，点击按钮下载完整内容]"
+                min_q_disp = html.escape(normalize_sql_for_display(min_full[:MAX_INLINE_SQL_LEN])) + "\n... [SQL 过长已截断，点击按钮下载完整内容]"
                 min_b64 = _b64(min_full)
             else:
-                min_q_disp = normalize_sql_for_display(min_full)
+                min_q_disp = html.escape(normalize_sql_for_display(min_full))
                 min_b64 = ''
 
             max_execute_stmt = f"execute bind_sql({', '.join(stat['max_param_values'])});" if stat['max_param_values'] else "execute bind_sql;"
@@ -17698,7 +17766,7 @@ def parse_all_events(start_n, blocks, total_list, deadlock_list, lock_event_list
                     next_block = blocks[j + 1]
                     next_ts = parse_datetime(next_ts_str)
                     # 允许相邻毫秒（50ms 内）的 Process SQL DETAIL 块，避免死锁 DETAIL 与 LOG 时间戳差 1ms 导致丢失
-                    if next_ts is None or (next_ts - current_ts).total_seconds() > 0.050:
+                    if next_ts is None or current_ts is None or (next_ts - current_ts).total_seconds() > 0.050:
                         break
                     # 只合并包含 Process X: SQL 的 DETAIL 块，避免 ERROR/HINT/STATEMENT 等后续日志混入 SQL 提取
                     if re.search(r'Process\s+\d+:\s', next_block, re.IGNORECASE):
@@ -17808,10 +17876,14 @@ def parse_all_events(start_n, blocks, total_list, deadlock_list, lock_event_list
 
                 v_params = ''
                 if i + 3 < len(blocks) and "parameters:" in blocks[i + 3]:
-                    try:
-                        v_params = PARAMETERS_PATTERN.split(blocks[i + 3])[1].strip()
-                    except IndexError:
-                        v_params = ''
+                    _pcand = blocks[i + 3]
+                    # 并发交错时 blocks[i+3] 可能是别的会话的新记录：宁可不要参数，
+                    # 也别把别人的绑定值填进本条 SQL
+                    if ('execute ' not in _pcand) and ('duration:' not in _pcand) and ('statement: ' not in _pcand):
+                        try:
+                            v_params = PARAMETERS_PATTERN.split(_pcand)[1].strip()
+                        except IndexError:
+                            v_params = ''
 
                 # --mode error 模式不提取 SQL；query/all 模式保留所有 SQL（DML+DDL）
                 if statement_filter == 'error':
@@ -18077,6 +18149,8 @@ if __name__ == "__main__":
                 'count': len(group),
                 'max_times': max_duration_item['time'],
                 'min_times': min_duration_item['time'],
+                'first_time': min(item['time'] for item in group),
+                'last_time': max(item['time'] for item in group),
                 'qry_params': group[0]['qry_params'],
                 'IP': group[0]['IP'],
                 'database': group[0]['database'],
@@ -18117,8 +18191,8 @@ if __name__ == "__main__":
         else:
                 all_times = []
                 for unique_id, stat in sorted_data:
-                    all_times.append(stat['min_times'])
-                    all_times.append(stat['max_times'])
+                    all_times.append(stat['first_time'])
+                    all_times.append(stat['last_time'])
                 overall_min_time = min(all_times) if all_times else None
                 overall_max_time = max(all_times) if all_times else None
         
@@ -18175,12 +18249,15 @@ PYTHON_EOF
 
     # Execute the python script with the provided arguments
     python3 "$TEMP_SCRIPT" "$@"
-    
-    # Clean up
+    _vb_py_rc=$?
+    # Clean up (rc captured BEFORE rm: the trailing rm used to mask python's rc)
     rm -f "$TEMP_SCRIPT"
+    return $_vb_py_rc
 }
 
 run_sqlhc() {
+    # SQL text may hold non-ASCII: keep python3 stdout UTF-8 even under LANG=C
+    export PYTHONIOENCODING=utf-8
 local output_to_file=0
     local duration_threshold_sec=300
     local unique_id=""
@@ -18192,6 +18269,7 @@ local output_to_file=0
                 shift
                 ;;
             -s)
+                [ $# -lt 2 ] && { echo "Error: -s requires a value (seconds)" >&2; return 2; }
                 duration_threshold_sec="$2"
                 shift 2
                 ;;
@@ -18223,8 +18301,11 @@ local output_to_file=0
     local log_file=""
     if [[ $output_to_file -eq 1 ]]; then
         log_file="/tmp/vb_tool_sqlhc_${unique_id}_$(date +%Y%m%d_%H%M%S).txt"
-        exec 3>&2
+        # save BOTH fds (old code kept only stderr on fd3 and never restored);
+        # RETURN trap gives them back on any exit path of this function
+        exec 3>&1 4>&2
         exec > "$log_file" 2>&1
+        trap 'exec >&3 2>&4 3>&- 4>&-' RETURN
 		echo "SQLHC ... Output saved to: $log_file" > /dev/tty
     fi
 
@@ -18290,7 +18371,11 @@ def get_log_line_prefix():
             ['psql', '-t', '-A', '-c', "SHOW log_line_prefix", '-d', 'postgres'],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True
         )
-        stdout, _ = p.communicate(timeout=5)
+        try:
+            stdout, _ = p.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            p.kill(); p.communicate()
+            return None
         if p.returncode == 0 and stdout.strip():
             return stdout.strip()
     except Exception:
@@ -18301,7 +18386,11 @@ def get_log_line_prefix():
             ['psql', '-t', '-A', '-c', "SHOW config_file", '-d', 'postgres'],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True
         )
-        stdout, _ = p.communicate(timeout=5)
+        try:
+            stdout, _ = p.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            p.kill(); p.communicate()
+            return None
         if p.returncode == 0:
             config_file = stdout.strip()
             if config_file and os.path.exists(config_file):
@@ -18399,7 +18488,10 @@ def extract_meta(line):
     return db, user, pid
 
 def normalize_user(user):
-    return 'public' if user.lower() == 'vastbase' else user
+    # strip/lower (2nd historical def) AND the vastbase->public schema mapping
+    # (1st def): the default user's unqualified tables live in schema public
+    user = user.strip().lower()
+    return 'public' if user == 'vastbase' else user
 
 KW_NEWLINE = re.compile(
     r'\b('
@@ -18457,9 +18549,6 @@ _SQL_KW = {
     'intersect', 'except', 'minus', 'tablesample', 'sample',
 }
 
-
-def normalize_user(u):
-    return u.strip().lower()
 
 
 def extract_tables(sql_text, default_user):
@@ -18886,19 +18975,38 @@ PYEOF
         if [[ "$_nw" == "ANALYZE" || "$_nw" == "PERFORMANCE" ]]; then
             sql_exec=$(echo "$sql_exec" | awk '{$1=""; print $0}' | sed 's/^[[:space:]]*//')
         fi
+        # EXPLAIN (ANALYZE, BUFFERS) SELECT ...: strip the option group too
+        if [[ "$_nw" == \(* ]]; then
+            sql_exec=$(echo "$sql_exec" | sed 's/^([^)]*)[[:space:]]*//')
+        fi
     done
 
+    # DML/DDL detection must run on the STRIPPED statement: leading block
+    # comments and WITH ... INSERT wrappers must not sneak past (EXPLAIN
+    # PERFORMANCE == ANALYZE: it would really execute & commit writes)
+    _sql_nc=$(printf '%s' "$sql_exec" | python3 -c "
+import sys, re
+s = sys.stdin.read()
+s = re.sub(r'^\s*(/\*.*?\*/\s*)+', '', s, flags=re.S)
+print(s.strip())
+")
+    _fw_nc=$(echo "$_sql_nc" | awk '{print toupper($1)}')
     is_dml_ddl=0
-    case "$sql_first_word" in
+    case "$_fw_nc" in
         INSERT|DELETE|UPDATE|DROP|CREATE|MERGE|UPSERT)
             is_dml_ddl=1
             ;;
     esac
+    # WITH cte AS (...) INSERT/UPDATE/DELETE ...: CTE wrapper still writes
+    if [[ "$_fw_nc" == "WITH" ]] && printf '%s' "$_sql_nc" | grep -qiE '(^|[[:space:](])(INSERT|UPDATE|DELETE|MERGE)([[:space:];(]|$)'; then
+        is_dml_ddl=1
+        _fw_nc="WITH-DML"
+    fi
 
     if [[ $is_dml_ddl -eq 1 ]]; then
         explain_type="EXPLAIN"
         echo ""
-        echo "SQL type is ${sql_first_word}, EXPLAIN PERFORMANCE not supported, using EXPLAIN ..."
+        echo "SQL type is ${_fw_nc}, EXPLAIN PERFORMANCE not supported, using EXPLAIN ..."
     elif awk "BEGIN {exit !($duration_ms >= 0 && $duration_ms < $((duration_threshold_sec * 1000)))}"; then
         explain_type="EXPLAIN PERFORMANCE"
         echo ""
@@ -18910,7 +19018,7 @@ PYEOF
     fi
     echo ""
 
-    psql -d "$db_name" -X -q << PSQLEOF
+    PGCONNECT_TIMEOUT=5 psql -d "$db_name" -X -q << PSQLEOF
 SET search_path = ${user_name}, public;
 \echo '================'
 \echo '   query plan   '
@@ -18934,8 +19042,7 @@ print(','.join(pairs))
     fi
 
     echo ""
-    psql -d "$db_name" -X << PSQLEOF
-\pset footer off
+    PGCONNECT_TIMEOUT=5 psql -d "$db_name" -X -P footer=off << PSQLEOF
 \echo '================'
 \echo 'table statistics'
 \echo '================'
@@ -19240,8 +19347,7 @@ LEFT JOIN (
         ) b ON a.attname=b.attname and a.tablename=b.tablename and a.schemaname=b.schemaname;
 PSQLEOF
 
-    psql -d postgres -X -v "unique_sql_id=${unique_id}" << 'PSQLEOF'
-\pset footer off
+    psql -d postgres -X -v "unique_sql_id=${unique_id}" -P footer=off << 'PSQLEOF'
 \echo '======================'
 \echo 'sqltext from statement'
 \echo '======================'
@@ -19345,7 +19451,7 @@ round(n_blocks_fetched/n_calls,1) avg_cr,
 round((n_blocks_fetched-n_blocks_hit)/n_calls,1) avg_pr,
 round((n_returned_rows+n_insert_rows+n_update_rows+n_delete_rows)/n_calls,1) avg_rows
 from
-(SELECT snap_user_name,to_char(start_ts,'yyyy-mm-dd hh24:mi:ss') snap_time,
+(SELECT snap_user_name,to_char(start_ts,'yyyy-mm-dd hh24:mi:ss') snap_time, start_ts,
     snap_n_calls-coalesce(lag(snap_n_calls)over(partition by snap_user_name,snap_unique_sql_id order by a.snapshot_id),0) n_calls,
     snap_db_time-coalesce(lag(snap_db_time)over(partition by snap_user_name,snap_unique_sql_id order by a.snapshot_id),0) db_time,
     snap_execution_time-coalesce(lag(snap_execution_time)over(partition by snap_user_name,snap_unique_sql_id order by a.snapshot_id),0) execution_time,
@@ -19359,8 +19465,7 @@ from
     snap_n_tuples_deleted-coalesce(lag(snap_n_tuples_deleted)over(partition by snap_user_name,snap_unique_sql_id order by a.snapshot_id),0) n_delete_rows
     FROM snapshot.snap_summary_statement a,snapshot.snapshot b
     WHERE snap_unique_sql_id=:'unique_sql_id'
-      and a.snapshot_id=b.snapshot_id
-      and start_ts>now()-3) where n_calls>0 order by 2) where snap_time<(select max(start_ts) from snapshot.snapshot);
+      and a.snapshot_id=b.snapshot_id) where n_calls>0 and start_ts>now()-3 order by 2) where snap_time<(select max(start_ts) from snapshot.snapshot);
 \echo '=========================='
 \echo '        opt params        '
 \echo '=========================='
@@ -19417,6 +19522,12 @@ _vtop_disk_dev() {
     local src try i
     src=$(df -P "$1" 2>/dev/null | awk 'NR==2{print $1}')
     [ -z "$src" ] && return 1
+    # LVM/multipath: df reports /dev/mapper/vg-lv (or /dev/vg/lv, /dev/disk/by-*),
+    # none of which exist as names in /proc/diskstats -- resolve the symlink to
+    # its real /dev/dm-N first, otherwise the DSK section can never match.
+    if [ -L "$src" ]; then
+        src=$(readlink -f "$src" 2>/dev/null || echo "$src")
+    fi
     try="${src#/dev/}"
     i=0
     while [ "$i" -lt 4 ]; do
@@ -19488,8 +19599,8 @@ _vtop_print_os() { # oratop-style coded-header sections; reads caller-scope vars
     printf '%s' "$os_col"
     printf '        %5.1f %5.1f %5.1f %5.1f %13s %7s %7s %8.1f %8.1f\n' \
         "$a_us" "$a_sy" "$a_id" "$a_wa" \
-        "$(_vtop_hum $((mt - ma)))/$(_vtop_hum "$mt")" "$(_vtop_hum "$ma")" \
-        "$(_vtop_hum $((mst - msf)))" "$n_rx" "$n_tx"
+        "$(_vtop_hum $((mt - ${ma:-0})))/$(_vtop_hum "$mt")" "$(_vtop_hum "$ma")" \
+        "$(_vtop_hum $((mst - ${msf:-0})))" "$n_rx" "$n_tx"
     printf '%s' "$c_off"
     if [ -n "$dev" ]; then
         local dpar dsz drot dsch dqd
@@ -19548,8 +19659,10 @@ run_vtop() {
     local interval=5 topn=10 once=0
     while [ $# -gt 0 ]; do
         case "$1" in
-            -i)       interval="${2:-}"; shift 2;;
-            -n)       topn="${2:-}"; shift 2;;
+            -i)       [ $# -lt 2 ] && { echo "Error: -i requires a value (seconds)" >&2; return 2; }
+                      interval="$2"; shift 2;;
+            -n)       [ $# -lt 2 ] && { echo "Error: -n requires a value (top N)" >&2; return 2; }
+                      topn="$2"; shift 2;;
             --once)   once=1; shift;;
             -h|--help) vtop_help; return 0;;
             *)        echo "Error: unknown option '$1' (usage: vb_tool vtop [-i sec] [-n topn] [--once])" >&2; return 2;;
@@ -19642,7 +19755,7 @@ SELECT lvl,
        ELSE 'gone' END AS state,
   tree.holder AS sid,
   COALESCE(a.usename, px.owner, '-') AS usename,
-  (SELECT count(*) FROM tree p WHERE p.w_chain ~ ('^'||tree.w_chain) AND NOT p.w_chain=tree.w_chain) blocked,
+  (SELECT count(*) FROM tree p WHERE p.w_chain LIKE tree.w_chain || '.%') blocked,
   extract(epoch from (clock_timestamp() - COALESCE(a.xact_start, px.prepared)))::bigint age_s,
   COALESCE(substr(regexp_replace(regexp_replace(a.query,'(\r|\n)+',' '),' {2,}',' '),1,40),
            CASE WHEN tree.holder LIKE 'P:%' THEN '[prepared] '||px.gid END) AS query
@@ -19717,6 +19830,7 @@ order by s.sz desc;"
         read -r a_us a_sy a_id a_wa a_st <<< "$(awk -v a="$c0" -v b="$c1" 'BEGIN{split(a,x);split(b,y);d=y[1]-x[1];if(d<=0)d=1;printf "%.1f %.1f %.1f %.1f %.1f", (y[2]-x[2])*100/d, (y[3]-x[3])*100/d, (y[4]-x[4])*100/d, (y[5]-x[5])*100/d, (y[6]-x[6])*100/d}')"
         read -r d_rops d_rmb d_rms d_wops d_wmb d_wms d_util <<< "$(awk -v a="$d0" -v b="$d1" -v ms="$dt" 'BEGIN{split(a,x);split(b,y);for(i=1;i<=7;i++){if(x[i]=="")x[i]=0;if(y[i]=="")y[i]=0}
             ro=y[1]-x[1]; rs=(y[2]-x[2])*512; rt=y[3]-x[3]; wo=y[4]-x[4]; ws=(y[5]-x[5])*512; wt=y[6]-x[6]; it=y[7]-x[7];
+            if(ro<0)ro=0; if(rs<0)rs=0; if(rt<0)rt=0; if(wo<0)wo=0; if(ws<0)ws=0; if(wt<0)wt=0; if(it<0)it=0;
             s=ms/1000; rl=(ro>0)?rt/ro:0; wl=(wo>0)?wt/wo:0; u=(it*100/ms); if(u>100)u=100;
             printf "%.0f %.1f %.1f %.0f %.1f %.1f %.0f", ro/s, rs/1048576/s, rl, wo/s, ws/1048576/s, wl, u}')"
         read -r n_rx n_tx <<< "$(awk -v a="$n0" -v b="$n1" -v ms="$dt" 'BEGIN{split(a,x);split(b,y);s=ms/1000; printf "%.1f %.1f", (y[1]-x[1])/1048576/s, (y[2]-x[2])/1048576/s}')"
@@ -19730,7 +19844,7 @@ order by s.sz desc;"
         local cpupairs="0,0" VT_TOP
         if [ -n "$pm_pid" ]; then
             cpupairs=$(top -b -d0.3 -n2 -H -p "$pm_pid" 2>/dev/null \
-                | awk '/^ *PID USER/ {n++; next} n==2 && /^ *[0-9]+ / {print $1 "," $9}' \
+                | awk '/^ *PID USER/ {n++; ci=0; for(i=1;i<=NF;i++) if($i=="%CPU") ci=i; next} n==2 && /^ *[0-9]+ / {if(ci) print $1 "," $ci}' \
                 | paste -sd ';')
         fi
         [ -n "$cpupairs" ] || cpupairs="0,0"
@@ -20038,13 +20152,15 @@ _awr_next_id() {
     mkdir -p "$root" 2>/dev/null || { echo "Error: cannot create $root" >&2; return 1; }
     local seq="$root/sequence"
     local cur
-    cur=$(
+    cur=$( (
+        # NB: the 9> redirect must wrap the subshell -- a redirect on the
+        # assignment itself never reaches inside $( ) (bash expands first)
         flock 9
         v=$(cat "$seq" 2>/dev/null)
         case "$v" in ''|*[!0-9]*) v=1;; esac
         echo $((v + 1)) > "$seq"
         echo "$v"
-    ) 9>"$seq.lock"
+    ) 9>"$seq.lock" )
     [ -z "$cur" ] && { echo "Error: snap_id allocation failed" >&2; return 1; }
     echo "$cur"
 }
@@ -20454,7 +20570,7 @@ def load_window(d):
     for phase in ("begin", "end"):
         for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi"):
             p = os.path.join(d, "os", phase, f)
-            w["os"][(phase, f)] = open(p).read() if os.path.isfile(p) else ""
+            w["os"][(phase, f)] = _read_os_text(p) if os.path.isfile(p) else ""
         for t in ("statement", "wait_events", "instance_time", "database", "pagewriter",
                   "memory_node_detail", "shared_memory", "session_memory", "session_by_sess",
                   "object_tables", "object_indexes", "object_dead"):
@@ -20474,7 +20590,7 @@ def load_snap(d):
             s["meta"] = {}
     for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi"):
         p = os.path.join(d, "os", f)
-        s["os"][f] = open(p).read() if os.path.isfile(p) else ""
+        s["os"][f] = _read_os_text(p) if os.path.isfile(p) else ""
     for t in ("statement", "wait_events", "instance_time", "database", "pagewriter",
               "memory_node_detail", "shared_memory", "session_memory", "session_by_sess",
               "pg_settings",
@@ -21001,9 +21117,19 @@ def platform_label(dmi_txt, cpuinfo_txt):
     return None
 
 def _dd(e, b, k):
-    """Delta of an optional counter (None on either side -> None)."""
+    """Delta of an optional counter (None on either side -> None; clamped at 0)."""
     ev, bv = e.get(k), b.get(k)
-    return None if (ev is None or bv is None) else ev - bv
+    return None if (ev is None or bv is None) else max(0, ev - bv)
+
+def _read_os_text(p):
+    """Read a snapshot os/ file tolerantly: unreadable (perms, partial copy,
+    non-UTF-8) -> '' so the missing-file degrade path stays usable."""
+    try:
+        with open(p, "r", errors="replace") as fh:
+            return fh.read()
+    except OSError:
+        return ""
+
 
 def _cell(m, k):
     """Trimmed meta value; '-' for empty or literal '-'."""
@@ -21093,7 +21219,7 @@ def netstat_core_cols(bm, em, dur):
         if bv is None and ev is None:
             continue  # omit if absent from BOTH sides
         cols.append({"proto": proto, "name": raw_name, "label": label})
-        delta = (ev - bv) if (bv is not None and ev is not None) else None
+        delta = max(0, ev - bv) if (bv is not None and ev is not None) else None
         per_sec = (delta / dur) if (dur and delta is not None) else None
         if proto not in data:
             data[proto] = {}
@@ -21114,7 +21240,7 @@ def netstat_core_rows(os_data, dur):
         ev = em.get(proto, {}).get(raw_name)
         if bv is None and ev is None:
             continue  # omit if absent from BOTH sides
-        delta = (ev - bv) if (bv is not None and ev is not None) else None
+        delta = max(0, ev - bv) if (bv is not None and ev is not None) else None
         per_sec = (delta / dur) if (dur and delta is not None) else None
         rows.append((proto, raw_name, label, delta, per_sec))
     return rows
@@ -21138,8 +21264,8 @@ def netstat_core_rows_awrdiff(os_data1, dur1, os_data2, dur2):
         ev2 = em2.get(proto, {}).get(raw_name)
         if (bv1 is None and ev1 is None) and (bv2 is None and ev2 is None):
             continue  # omit if absent from BOTH sides of BOTH periods
-        delta1 = (ev1 - bv1) if (bv1 is not None and ev1 is not None) else None
-        delta2 = (ev2 - bv2) if (bv2 is not None and ev2 is not None) else None
+        delta1 = max(0, ev1 - bv1) if (bv1 is not None and ev1 is not None) else None
+        delta2 = max(0, ev2 - bv2) if (bv2 is not None and ev2 is not None) else None
         delta_diff = None
         if delta1 is not None and delta2 is not None:
             delta_diff = delta2 - delta1
@@ -21239,7 +21365,8 @@ def os_window_deltas(win):
         d = {"name": nm}
         for k in ("rx_bytes","rx_packets","rx_errs","rx_drop",
                   "tx_bytes","tx_packets","tx_errs","tx_drop"):
-            d[k] = e.get(k,0) - b.get(k,0)
+            # iface reset/renamed away mid-window -> negative; clamp to 0
+            d[k] = max(0.0, e.get(k,0) - b.get(k,0))
         ifaces.append(d)
         net_bytes += d["rx_bytes"] + d["tx_bytes"]
 
@@ -21251,13 +21378,14 @@ def os_window_deltas(win):
     rd_bytes = wr_bytes = 0.0
     for nm in sorted(set(bd) | set(ed)):
         e = ed.get(nm, {}); b = bd.get(nm, {})
-        rd_ios_d = e.get("rd_ios",0)   - b.get("rd_ios",0)
-        wr_ios_d = e.get("wr_ios",0)   - b.get("wr_ios",0)
-        rd_sec_d = e.get("rd_sectors",0) - b.get("rd_sectors",0)
-        wr_sec_d = e.get("wr_sectors",0) - b.get("wr_sectors",0)
-        rd_tick_d = e.get("rd_ticks",0) - b.get("rd_ticks",0)
-        wr_tick_d = e.get("wr_ticks",0) - b.get("wr_ticks",0)
-        wtick_d  = e.get("weighted_ticks",0) - b.get("weighted_ticks",0)
+        # dev vanished / dm rename / counter reset mid-window -> clamp at 0
+        rd_ios_d = max(0, e.get("rd_ios",0)   - b.get("rd_ios",0))
+        wr_ios_d = max(0, e.get("wr_ios",0)   - b.get("wr_ios",0))
+        rd_sec_d = max(0, e.get("rd_sectors",0) - b.get("rd_sectors",0))
+        wr_sec_d = max(0, e.get("wr_sectors",0) - b.get("wr_sectors",0))
+        rd_tick_d = max(0, e.get("rd_ticks",0) - b.get("rd_ticks",0))
+        wr_tick_d = max(0, e.get("wr_ticks",0) - b.get("wr_ticks",0))
+        wtick_d  = max(0, e.get("weighted_ticks",0) - b.get("weighted_ticks",0))
         dc_ios_d  = _dd(e, b, "dc_ios")
         dc_sec_d  = _dd(e, b, "dc_sectors")
         fl_ios_d  = _dd(e, b, "fl_ios")
@@ -21305,13 +21433,13 @@ def os_window_deltas(win):
                 "iowait": cpupct("iowait"), "irq": cpupct("irq"),
                 "softirq": cpupct("softirq"), "steal": cpupct("steal"),
                 "idle": cpupct("idle")},
-        "ctxt_per_sec": (ex["ctxt"] - bx["ctxt"]) / dur,
-        "intr_per_sec": (ex["intr"] - bx["intr"]) / dur,
+        "ctxt_per_sec": max(0, ex["ctxt"] - bx["ctxt"]) / dur,
+        "intr_per_sec": max(0, ex["intr"] - bx["intr"]) / dur,
         "runq_begin": bx["runq"],
         "runq_end": ex["runq"],
         "load_begin": bld,
         "load_end": eld,
-        "vm": {k: ((evm[k] - bvm[k]) / dur) for k in bvm},
+        "vm": {k: (max(0.0, evm[k] - bvm[k]) / dur) for k in bvm},
         "disks": disks,
         "ifaces": ifaces,
         "softirqs": softirqs,
@@ -22280,8 +22408,8 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     # ================= Cache Hit Ratio =================
     sec("Cache Hit Ratio")
     parts.append('<table class="t"><tr><th>Database</th>'
-                 '<th class="n">Begin Hit%</th><th class="n">End Hit%</th>'
-                 '<th class="n">Δ</th></tr>')
+                 '<th class="n">Begin Hit% *</th><th class="n">End Hit% *</th>'
+                 '<th class="n">Window Hit%</th></tr>')
     _cr_dns = set()
     for _ph in ("begin", "end"):
         for _r in win["db"].get((_ph, "database"), []):
@@ -22296,14 +22424,21 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             continue
         _rb = (_bhb / _tb * 100.0) if _tb else 0.0
         _re = (_bhe / _te * 100.0) if _te else 0.0
-        _cr_items.append((_dn, _rb, _re, _te))
+        # window ratio from deltas: cumulative ratios dilute months of history
+        # and their diff (~0.01%) hides real degradation inside this window
+        _dh = _bhe - _bhb; _dr = _bre - _brb; _dt = _dh + _dr
+        _rw = (_dh / _dt * 100.0) if _dt > 0 else None
+        _cr_items.append((_dn, _rb, _re, _te, _rw))
     _cr_items.sort(key=lambda x: x[3], reverse=True)
     if not _cr_items:
         parts.append('<tr><td colspan="4" class="note">no data</td></tr>')
-    for _dn, _rb, _re, _ in _cr_items:
+    for _dn, _rb, _re, _, _rw in _cr_items:
+        _rws = ('%.2f%%' % _rw) if _rw is not None else '-'
         parts.append('<tr><td>%s</td><td class="n">%.2f%%</td><td class="n">%.2f%%</td>'
-                     '<td class="n">%+.2f%%</td></tr>' % (esc(_dn), _rb, _re, _re - _rb))
+                     '<td class="n">%s</td></tr>' % (esc(_dn), _rb, _re, _rws))
     parts.append('</table>')
+    parts.append('<p class="note">* Begin/End are ratios since the last stats reset; '
+                 "Window Hit% is computed from this window's own delta.</p>")
 
     # ================= Database Memory (vb_tool mem style) =================
     sec("Database Memory")
@@ -23531,7 +23666,8 @@ _awr_create() {
     local root_override=""
     while [ $# -gt 0 ]; do
         case "$1" in
-            --root)    root_override="$2"; shift 2;;
+            --root)    [ $# -lt 2 ] && { echo "Error: --root requires a path" >&2; return 2; }
+                       root_override="$2"; shift 2;;
             -h|--help) awr_help; return 0;;
             -d)        echo "Error: 'awr create' is a single-point snapshot (no -d). Use 'awr config interval <min>' + 'awr enable' for periodic capture." >&2; return 2;;
             --force)   echo "Error: --force not applicable to single-point snapshots" >&2; return 2;;
@@ -23566,8 +23702,10 @@ _awr_awrrpt() {
     local begin_id="" end_id=""
     while [ $# -gt 0 ]; do
         case "$1" in
-            begin)     begin_id="$2"; shift 2;;
-            end)       end_id="$2"; shift 2;;
+            begin)     [ $# -lt 2 ] && { echo "Error: 'begin' requires a snap_id" >&2; return 2; }
+                       begin_id="$2"; shift 2;;
+            end)       [ $# -lt 2 ] && { echo "Error: 'end' requires a snap_id" >&2; return 2; }
+                       end_id="$2"; shift 2;;
             -h|--help) awr_help; return 0;;
             *)         echo "Error: unknown token '$1' (usage: awrrpt begin <id> end <id>)" >&2; return 2;;
         esac
@@ -23683,8 +23821,8 @@ _awr_enable() {
 _awr_disable() {
     local port="${PGPORT:-5432}"
     local removed=0
-    if crontab -l 2>/dev/null | { grep -qF "# vb_tool_awr_p$port" || grep -qF "# vb_tool_awr_repl_p$port" || grep -Eq '# vb_tool_awr(_repl)? *$'; }; then
-        crontab -l 2>/dev/null | grep -vF "# vb_tool_awr_repl_p$port" | grep -vF "# vb_tool_awr_p$port" \
+    if crontab -l 2>/dev/null | { grep -qE "# vb_tool_awr_p${port}\$" || grep -qE "# vb_tool_awr_repl_p${port}\$" || grep -Eq '# vb_tool_awr(_repl)? *$'; }; then
+        crontab -l 2>/dev/null | grep -vE "# vb_tool_awr_repl_p${port}\$" | grep -vE "# vb_tool_awr_p${port}\$" \
             | grep -vE '# vb_tool_awr(_repl)? *$' | crontab -
         removed=1
     fi
@@ -23757,8 +23895,8 @@ _awr_show() {
     local snapent="" replent="" others=""
     if command -v crontab >/dev/null 2>&1; then
         local out; out=$(crontab -l 2>/dev/null)
-        snapent=$(printf '%s\n' "$out" | grep -F "# vb_tool_awr_p$port")
-        replent=$(printf '%s\n' "$out" | grep -F "# vb_tool_awr_repl_p$port")
+        snapent=$(printf '%s\n' "$out" | grep -E "# vb_tool_awr_p${port}\$")
+        replent=$(printf '%s\n' "$out" | grep -E "# vb_tool_awr_repl_p${port}\$")
         others=$(printf '%s\n' "$out" | grep -oE '# vb_tool_awr_p[0-9]+' | sed 's/# vb_tool_awr_p//' | sort -un | grep -vx "$port" | tr '\n' ' ')
     fi
     local nextid; nextid=$(cat "$root/sequence" 2>/dev/null)
@@ -23826,8 +23964,8 @@ PY
         echo "status        : DISABLED (no periodic snapshot / sampler crontab entries for port $port)"
     else
         echo "status        : ENABLED"
-        if [ -n "$snapent" ]; then echo "  snapshot:          $snapent"
-        else echo "  snapshot:          (entry missing -- re-run 'awr enable' to fix)"; fi
+        if [ -n "$snapent" ]; then echo "  snapshot:           $snapent"
+        else echo "  snapshot:           (entry missing -- re-run 'awr enable' to fix)"; fi
         if [ -n "$replent" ]; then echo "  replication sampler: $replent"
         else echo "  replication sampler: (entry missing -- re-run 'awr enable' to fix)"; fi
         [ -n "$ageline" ] && echo "$ageline"
@@ -24036,14 +24174,14 @@ _awr_config() {
             # entries (same generator as enable; keeps sampler entry and other
             # ports' entries, heals half-open)
             local cport="${PGPORT:-5432}"
-            if crontab -l 2>/dev/null | grep -qF "# vb_tool_awr_repl_p$cport" || \
-               crontab -l 2>/dev/null | grep -qF "# vb_tool_awr_p$cport"; then
+            if crontab -l 2>/dev/null | grep -qE "# vb_tool_awr_repl_p${cport}\$" || \
+               crontab -l 2>/dev/null | grep -qE "# vb_tool_awr_p${cport}\$"; then
                 local self; self=$(readlink -f "$0" 2>/dev/null || echo "$0")
                 local minspec="*/$val"
                 [ "$val" -eq 60 ] && minspec="0"
                 local entry="$minspec * * * * /bin/bash -lc 'PGPORT=$cport $self awr create >/dev/null 2>&1'  # vb_tool_awr_p$cport"
                 local rentry="* * * * * /bin/bash -lc 'PGPORT=$cport $self awr _repl-sample >/dev/null 2>&1'  # vb_tool_awr_repl_p$cport"
-                ( crontab -l 2>/dev/null | grep -vF "# vb_tool_awr_repl_p$cport" | grep -vF "# vb_tool_awr_p$cport"; echo "$rentry"; echo "$entry" ) | crontab -
+                ( crontab -l 2>/dev/null | grep -vE "# vb_tool_awr_repl_p${cport}\$" | grep -vE "# vb_tool_awr_p${cport}\$"; echo "$rentry"; echo "$entry" ) | crontab -
                 echo "awr config: periodic capture is ENABLED on port $cport -- crontab entry rewritten to every ${val}min"
                 echo "  $entry"
             fi

@@ -90,6 +90,7 @@ vb_tool list
 
 | 版本 | 日期 | 要点 |
 |------|------|------|
+| v2.0.6 | 2026-08-26 | 全量审计修复版（24575 行分区审查+204 实证）：`tps` 修复（\prompt 未执行致命令不可用）；`slow` 非交互场景修复（管道/cron 下提示吃掉脚本）；`vtop -i`、`awr awrrpt begin` 等 7 处缺参死循环补 guard；`mem` 修复 CTAS 标签泄漏+memory guc 节被吞；vtop DSK 段支持 LVM 逻辑卷（/dev/mapper 解析至 dm-N，此前 PGDATA 在 LV 时无 I/O 数据）+设备消失负值钳零；sqlhc 修复默认用户表统计整组空表（normalize_user 重复定义遮蔽）并堵住 EXPLAIN PERFORMANCE 误执行 DML（注释/WITH/已带 EXPLAIN 三类穿透）；ssh_setup 改追加模式不再覆盖远端 authorized_keys；lockchain/lock_details/vtop 锁树 w_chain 改 LIKE 匹配（正则 `.` 通配符误配兄弟链）+lock_details 补 2PC 持锁者；wdr_summary 整数除法、redundant_index 关联失效、sqlstat lag 前置、relxlog 列错位、tabsize 分区关联/默认库/笛卡尔、kill 白名单统一等 SQL 修复；collect_log timeline 硬编码/dbinfo 覆盖/tar 失败保护；analyze_log_v2 修复 --mode error 失效、csv 列序串列、时间戳格式兼容等 16 项；awr marker 端口前缀互撞锚定；awrrpt Cache Hit 第三列改为真窗口命中率（Window Hit%）；全局清除 31 处 `Default footer is off.` 输出污染；banner 版本号改动态 |
 | v2.0.5 | 2026-08-24 | 修复 `tabsize` 输出顺序不定：内层子查询有序但外层缺 ORDER BY（与 v2.0.4 TOPMEM 同款模式），外层补 `order by tt.total_size desc`（限定列引用，避开外层 pretty 别名的字典序） |
 | v2.0.4 | 2026-08-24 | 修复 vtop TOPMEM 会话内存排行未按内存降序：内层子查询有序但外层 join 缺 ORDER BY，行序不定；现携带聚合值排序输出（显示列同时省去一次重复聚合） |
 | v2.0.3 | 2026-08-24 | awrrpt/awrdiff 报告头 vb_tool 版本格改为 `采集版本 / 生成版本` 双值（生成版本取运行时版本，区分"旧快照+新报告"场景） |
