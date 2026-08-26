@@ -681,17 +681,16 @@ tps_help() {
 }
 
 run_tps() {
-    # \prompt only works on a tty: on piped/cron stdin psql reads the heredoc
-    # itself as the "typed" answer, breaking the SQL. Non-tty runs use defaults.
-    local _vb_pfx _vb_pv=""
-    if [ -t 0 ]; then
-        _vb_pfx="\\prompt 'please input begin date: ' begin_date
-\\prompt 'please input end date: ' end_date
-"
-    else
-        _vb_pv="-v begin_date= -v end_date="
-    fi
-    { printf '%s' "$_vb_pfx"; cat <<'VBTPSQLEOF'
+    # \prompt only prompts for real when psql's own stdin is the TERMINAL --
+    # with a piped script it eats script lines as the "typed" answers (the
+    # historical breakage). Terminal -> psql -f (stdin stays the tty, real
+    # prompts); piped/cron -> no prompt lines + empty -v defaults (the SQL
+    # coalesce then applies the documented defaults).
+    local _vb_sql _vb_pv="" _vb_rc
+    _vb_sql=$(mktemp /tmp/vb_tps.XXXXXX.sql) || { echo "Error: mktemp failed" >&2; return 1; }
+    {
+        [ -t 0 ] && printf '\\prompt %s\n' "'please input begin date: ' begin_date" "'please input end date: ' end_date"
+        cat <<'VBTPSQLEOF'
 \echo 'default begin date is 2000-01-01; default end date is tomorrow 00:00:00'
 select time_range,total_trans,tps from
 (select st_timestamp, to_char(st_timestamp, 'mmdd hh24:mi:ss') || '--' || COALESCE(to_char(lead(st_timestamp) OVER (ORDER BY st_timestamp), 'mmdd hh24:mi:ss'),to_char(now(),'mmdd hh24:mi:ss')) time_range,
@@ -702,7 +701,12 @@ select time_range,total_trans,tps from
 	where to_char(st_timestamp,'yyyy-mm-dd hh24:mi:ss')>=COALESCE(NULLIF(:'begin_date',''),'2000-01-01 00:00:00') and to_char(st_timestamp,'yyyy-mm-dd hh24:mi:ss')<=COALESCE(NULLIF(:'end_date',''),to_char(trunc(now()+1),'yyyy-mm-dd hh24:mi:ss')) and el<1000
  order by st_timestamp;
 VBTPSQLEOF
-    } | psql $_vb_pv -d postgres -P footer=off
+    } > "$_vb_sql"
+    [ -t 0 ] || _vb_pv="-v begin_date= -v end_date="
+    psql $_vb_pv -d postgres -P footer=off -f "$_vb_sql"
+    _vb_rc=$?
+    rm -f "$_vb_sql"
+    return $_vb_rc
 }
 
 run_lsds() {
@@ -6718,18 +6722,14 @@ WHERE a.application_name LIKE '%'||b.slot_name||'%'
 }
 
 run_slow() {
-    # \prompt only works on a tty: on piped/cron stdin psql reads the heredoc
-    # itself as the "typed" answer, breaking the SQL. Non-tty runs use defaults.
-    local _vb_pfx _vb_pv=""
-    if [ -t 0 ]; then
-        _vb_pfx="\\prompt 'Enter begin date: ' begin_date
-\\prompt 'Enter end date: ' end_date
-\\prompt 'Enter top_n: ' top_n
-"
-    else
-        _vb_pv="-v begin_date= -v end_date= -v top_n="
-    fi
-    { printf '%s' "$_vb_pfx"; cat <<'VBSLOWEOF'
+    # same \prompt/terminal contract as run_tps: -f keeps psql stdin = tty on
+    # interactive runs (real prompts); piped/cron runs get no prompts and
+    # empty -v defaults (SQL falls back to last-5-min/top10 defaults)
+    local _vb_sql _vb_pv="" _vb_rc
+    _vb_sql=$(mktemp /tmp/vb_slow.XXXXXX.sql) || { echo "Error: mktemp failed" >&2; return 1; }
+    {
+        [ -t 0 ] && printf '\\prompt %s\n' "'Enter begin date: ' begin_date" "'Enter end date: ' end_date" "'Enter top_n: ' top_n"
+        cat <<'VBSLOWEOF'
 \echo 'Default begin date: trunc(now()-5/24/60,'MI')'
 \echo 'Default end date: trunc(now()+1/24/60,'MI')'
 \echo 'Default top_n: 10'
@@ -6774,7 +6774,12 @@ group by substr(trunc(start_time,'MI'),1,19),user_name,schema_name,unique_query_
 where rn<=(case when :'top_n'='' or :'top_n' is null then '10' else :'top_n' end)
 order by 1,execs*db_ms desc;
 VBSLOWEOF
-    } | psql $_vb_pv -d postgres -P footer=off
+    } > "$_vb_sql"
+    [ -t 0 ] || _vb_pv="-v begin_date= -v end_date= -v top_n="
+    psql $_vb_pv -d postgres -P footer=off -f "$_vb_sql"
+    _vb_rc=$?
+    rm -f "$_vb_sql"
+    return $_vb_rc
 }
 
 run_xloghc() {
@@ -19003,7 +19008,18 @@ print(s.strip())
         _fw_nc="WITH-DML"
     fi
 
-    if [[ $is_dml_ddl -eq 1 ]]; then
+    explain_type="EXPLAIN"
+    case "$_fw_nc" in
+        SET|RESET|SHOW|BEGIN|START|COMMIT|END|ROLLBACK|SAVEPOINT|RELEASE|DISCARD|CLOSE|FETCH|MOVE|NOTIFY|LISTEN|UNLISTEN|LOAD|CALL|DO)
+            explain_type=""   # utility statement: not explainable at all
+            echo ""
+            echo "SQL type is ${_fw_nc} (utility statement), EXPLAIN not applicable, skipped."
+            ;;
+    esac
+
+    if [ -z "$explain_type" ]; then
+        :   # utility statement: skip decision already made above
+    elif [[ $is_dml_ddl -eq 1 ]]; then
         explain_type="EXPLAIN"
         echo ""
         echo "SQL type is ${_fw_nc}, EXPLAIN PERFORMANCE not supported, using EXPLAIN ..."
@@ -19018,6 +19034,7 @@ print(s.strip())
     fi
     echo ""
 
+    if [ -n "$explain_type" ]; then
     PGCONNECT_TIMEOUT=5 psql -d "$db_name" -X -q << PSQLEOF
 SET search_path = ${user_name}, public;
 \echo '================'
@@ -19027,6 +19044,7 @@ ${explain_type}
 ${sql_exec}
 ;
 PSQLEOF
+    fi
 
     local tables_in_clause
     tables_in_clause=$(echo "$meta_json" | python3 -c "
