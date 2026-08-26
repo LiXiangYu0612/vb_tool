@@ -20113,7 +20113,7 @@ counter delta between two snapshots (end - begin).
   delete  until <time>      delete snapshots (by ts), html reports (by mtime) and
                             old repl_*.log (by whole day) older than <time>;
                             e.g. '2026-08-11' or '2026-08-11 12:00:00'
-  config  retention <days>  set retention in days (default 30; 0 = never purge).
+  config  retention <days>  set retention in days (default 8; 0 = never purge).
                             Immediately purges already-expired snaps, repl/slot
                             logs and html reports.
   config  interval <min>    set sampling interval in minutes (default 60,
@@ -20123,7 +20123,7 @@ counter delta between two snapshots (end - begin).
 Storage (per snapshot; <root> = $VB_TOOL_HOME/awrs/<port>, per instance):
   snapshot:   <root>/snap_<id>/{meta.json, os/<proc files>, db/<views>.csv}
   sequence:   <root>/sequence            (next snap_id to allocate)
-  retention:  <root>/retention           (days to keep; default 30, 0 = forever)
+  retention:  <root>/retention           (days to keep; default 8, 0 = forever)
   interval:   <root>/interval            (snapshot interval min; default 60)
   html:       ~/.vb_tool/awr_reports/awr_{db}_{begin}_{end}.html  (by compare_render.py)
   repl logs:  <root>/repl_<YYYYMMDD>.log  per-minute pg_stat_replication samples
@@ -24102,13 +24102,13 @@ _awr_delete_until() {
     return 0
 }
 
-# _awr_retention_read  -> retention days from <root>/retention (default 30 when
+# _awr_retention_read  -> retention days from <root>/retention (default 8 when
 # absent/garbage; 0 = keep forever). Echoed on stdout.
 _awr_retention_read() {
     local root; root=$(_awr_root)
     local v
     v=$(cat "$root/retention" 2>/dev/null)
-    case "$v" in ''|*[!0-9]*) v=30;; esac
+    case "$v" in ''|*[!0-9]*) v=8;; esac
     echo "$v"
 }
 

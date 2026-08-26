@@ -50,7 +50,7 @@ vb_tool list
 | `awr list [YYYY-MM-DD]` | 快照清单（snap_id 倒序，默认最新 30 条；指定日期列出全天） |
 | `awr show` | 总览：运行状态 / 采样间隔 / 保留期 / 最老最新快照 |
 | `awr delete until <time>` | 手动按时间清理快照 / 采样日志 / HTML 报告 |
-| `awr config retention <days>` | 保留期（默认 30 天，0=永久；改小立即清理过期数据） |
+| `awr config retention <days>` | 保留期（默认 8 天，0=永久；改小立即清理过期数据） |
 | `awr config interval <min>` | 采样间隔（1-60 分钟，默认 60；enabled 状态下改完即时生效） |
 | `analyze_log` / `analyze_log_v2` | 数据库日志分析（v2 输出 HTML 报告） |
 | `wdr_summary` / `wdr_topsql` / `wdr_tabstat` / `wdr_event` | WDR 报告数据提取分析 |
@@ -71,7 +71,7 @@ vb_tool list
 ~/.vb_tool/awrs/
 └── <port>/                  # 按实例隔离（$PGPORT，默认 5432）
     ├── sequence             # snap_id 序列
-    ├── retention            # 保留天数（默认 30，0=永久）
+    ├── retention            # 保留天数（默认 8，0=永久）
     ├── interval             # 采样间隔分钟（默认 60）
     ├── snap_<id>/           # 每快照: meta.json + os/ + db/*.csv
     ├── repl_<YYYYMMDD>.log  # pg_stat_replication 每分钟采样
@@ -90,7 +90,7 @@ vb_tool list
 
 | 版本 | 日期 | 要点 |
 |------|------|------|
-| v2.0.6 | 2026-08-26 | 全量审计修复版（24575 行分区审查+204 实证）：`tps` 修复（\prompt 未执行致命令不可用）；`slow` 非交互场景修复（管道/cron 下提示吃掉脚本）；`vtop -i`、`awr awrrpt begin` 等 7 处缺参死循环补 guard；`mem` 修复 CTAS 标签泄漏+memory guc 节被吞；vtop DSK 段支持 LVM 逻辑卷（/dev/mapper 解析至 dm-N，此前 PGDATA 在 LV 时无 I/O 数据）+设备消失负值钳零；sqlhc 修复默认用户表统计整组空表（normalize_user 重复定义遮蔽）并堵住 EXPLAIN PERFORMANCE 误执行 DML（注释/WITH/已带 EXPLAIN 三类穿透）；ssh_setup 改追加模式不再覆盖远端 authorized_keys；lockchain/lock_details/vtop 锁树 w_chain 改 LIKE 匹配（正则 `.` 通配符误配兄弟链）+lock_details 补 2PC 持锁者；wdr_summary 整数除法、redundant_index 关联失效、sqlstat lag 前置、relxlog 列错位、tabsize 分区关联/默认库/笛卡尔、kill 白名单统一等 SQL 修复；collect_log timeline 硬编码/dbinfo 覆盖/tar 失败保护；analyze_log_v2 修复 --mode error 失效、csv 列序串列、时间戳格式兼容等 16 项；awr marker 端口前缀互撞锚定；awrrpt Cache Hit 第三列改为真窗口命中率（Window Hit%）；全局清除 31 处 `Default footer is off.` 输出污染；banner 版本号改动态 |
+| v2.0.6 | 2026-08-26 | 全量审计修复版（24575 行分区审查+204 实证）：`tps` 修复（\prompt 未执行致命令不可用）；`slow` 非交互场景修复（管道/cron 下提示吃掉脚本）；`vtop -i`、`awr awrrpt begin` 等 7 处缺参死循环补 guard；`mem` 修复 CTAS 标签泄漏+memory guc 节被吞；vtop DSK 段支持 LVM 逻辑卷（/dev/mapper 解析至 dm-N，此前 PGDATA 在 LV 时无 I/O 数据）+设备消失负值钳零；sqlhc 修复默认用户表统计整组空表（normalize_user 重复定义遮蔽）并堵住 EXPLAIN PERFORMANCE 误执行 DML（注释/WITH/已带 EXPLAIN 三类穿透）；ssh_setup 改追加模式不再覆盖远端 authorized_keys；lockchain/lock_details/vtop 锁树 w_chain 改 LIKE 匹配（正则 `.` 通配符误配兄弟链）+lock_details 补 2PC 持锁者；wdr_summary 整数除法、redundant_index 关联失效、sqlstat lag 前置、relxlog 列错位、tabsize 分区关联/默认库/笛卡尔、kill 白名单统一等 SQL 修复；collect_log timeline 硬编码/dbinfo 覆盖/tar 失败保护；analyze_log_v2 修复 --mode error 失效、csv 列序串列、时间戳格式兼容等 16 项；awr marker 端口前缀互撞锚定；awrrpt Cache Hit 第三列改为真窗口命中率（Window Hit%）；全局清除 31 处 `Default footer is off.` 输出污染；banner 版本号改动态；retention 默认 30→8 天（2026-08-26 就地并入） |
 | v2.0.5 | 2026-08-24 | 修复 `tabsize` 输出顺序不定：内层子查询有序但外层缺 ORDER BY（与 v2.0.4 TOPMEM 同款模式），外层补 `order by tt.total_size desc`（限定列引用，避开外层 pretty 别名的字典序） |
 | v2.0.4 | 2026-08-24 | 修复 vtop TOPMEM 会话内存排行未按内存降序：内层子查询有序但外层 join 缺 ORDER BY，行序不定；现携带聚合值排序输出（显示列同时省去一次重复聚合） |
 | v2.0.3 | 2026-08-24 | awrrpt/awrdiff 报告头 vb_tool 版本格改为 `采集版本 / 生成版本` 双值（生成版本取运行时版本，区分"旧快照+新报告"场景） |
