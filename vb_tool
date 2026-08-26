@@ -4020,6 +4020,15 @@ run_xlogcom() {
 }
 
 run_mem() {
+    # sar -B needs a fixed 1s sample window; start it up-front so it overlaps
+    # the meminfo/psql sections instead of serializing the whole report.
+    local _vb_sar_out
+    _vb_sar_out=$(mktemp /tmp/vb_mem_sar.XXXXXX 2>/dev/null || echo "/tmp/vb_mem_sar.$$")
+    local _vb_sar_pid=""
+    if command -v sar >/dev/null 2>&1; then
+        sar -B 1 1 > "$_vb_sar_out" 2>/dev/null &
+        _vb_sar_pid=$!
+    fi
     echo "====================" && \
     echo " os memory monitor" && \
     echo "====================" && \
@@ -4027,20 +4036,19 @@ run_mem() {
     echo "====================" && \
     echo "    memory info" && \
     echo "====================" && \
-    (cat /proc/meminfo | grep -i -E "shm|active|buffer|cache|free|swap|slab|srec|sunr|dirty|pagetable|top|total|ava" | \
-      grep -v Cma | grep -v HugePages | grep -v Vmall | \
-      awk 'BEGIN {count=0} {printf "%-20s %12s kB\t", $1, $2; count++; if(count%3==0) print ""} END {if(count%3!=0) print ""}' | \
+    (awk 'tolower($0) ~ /shm|active|buffer|cache|free|swap|slab|srec|sunr|dirty|pagetable|top|total|ava/ && $0 !~ /Cma|HugePages|Vmall/ {printf "%-20s %12s kB\t", $1, $2; count++; if(count%3==0) print ""} END {if(count%3!=0) print ""}' /proc/meminfo | \
       column -t -s $'\t') && \
-    echo "====================" && \
-    echo " Paging statistics" && \
-    echo "====================" && \
-    sar -B 1 1 | grep -v Linux | grep -v Ave && \
     echo "====================" && \
     echo "    memory frag" && \
     echo "====================" && \
     cat /proc/buddyinfo && \
     psql -d postgres<<EOF
 \pset footer off
+-- materialize session memory detail once: the view walks every session's
+-- memory contexts under lock, scanning it 3x is the dominant cost on
+-- instances with many sessions
+create temp table _vb_smd as select sessid,contextname,totalsize,freesize,usedsize from gs_session_memory_detail
+\g /dev/null
 \echo ====================
 \echo      memory guc
 \echo ====================
@@ -4059,7 +4067,7 @@ select memorytype,pg_size_pretty(memorymbytes*1024*1024::numeric(100,0)) size fr
 \echo ============================
 \echo top 10 shared memory context
 \echo ============================
-select 
+select
     contextname,
     count(*) context_cnt,
     pg_size_pretty(sum(totalsize)::numeric(100,0)) total_size,
@@ -4068,17 +4076,17 @@ select
     pg_size_pretty(max(totalsize)::numeric(100,0)) max_size,
     pg_size_pretty(min(totalsize)::numeric(100,0)) min_size,
     pg_size_pretty(avg(totalsize)::numeric(100,0)) avg_size
-from 
-    gs_shared_memory_detail 
-group by 
-    contextname 
-order by 
-    sum(totalsize) desc 
+from
+    gs_shared_memory_detail
+group by
+    contextname
+order by
+    sum(totalsize) desc
 limit 10;
 \echo =============================
 \echo top 10 session memory context
 \echo =============================
-select 
+select
     contextname,
     count(*) context_cnt,
     pg_size_pretty(sum(totalsize)::numeric(100,0)) total_size,
@@ -4087,23 +4095,38 @@ select
     pg_size_pretty(max(totalsize)::numeric(100,0)) max_size,
     pg_size_pretty(min(totalsize)::numeric(100,0)) min_size,
     pg_size_pretty(avg(totalsize)::numeric(100,0)) avg_size
-from 
-    gs_session_memory_detail 
-group by 
-    contextname 
-order by 
-    sum(totalsize) desc 
+from
+    _vb_smd
+group by
+    contextname
+order by
+    sum(totalsize) desc
 limit 10;
 \echo =============================
 \echo top 10 session memory used
 \echo =============================
 select count(*) sess_cnt,pg_size_pretty(sum(totalsize)::numeric(100,0)) sess_total_size,pg_size_pretty(avg((totalsize)::numeric(100,0))) sess_avg_size,pg_size_pretty(min((totalsize)::numeric(100,0))) sess_min_size,pg_size_pretty(max((totalsize)::numeric(100,0))) sess_max_size from
-(select sessid,sum(totalsize) totalsize from gs_session_memory_detail group by sessid);
+(select sessid,sum(totalsize) totalsize from _vb_smd group by sessid);
 
 select a.sessionid,application_name,to_char(backend_start,'yyyy-mm-dd hh24:mi:ss') backend_start,state,pg_size_pretty(sum(t1.totalsize)::numeric(100,0)) total_size,substr(REGEXP_REPLACE(REGEXP_REPLACE(query, '(\r|\n)+', ' '),' {2,}', ' '),1,50) sql_text
- from pg_stat_activity a, gs_session_memory_detail t1  where a.sessionid = split_part(sessid,'.',2)
+ from pg_stat_activity a, _vb_smd t1  where a.sessionid = split_part(sessid,'.',2)
 group by a.sessionid,application_name,state,to_char(backend_start,'yyyy-mm-dd hh24:mi:ss'),substr(REGEXP_REPLACE(REGEXP_REPLACE(query, '(\r|\n)+', ' '),' {2,}', ' '),1,50) order by sum(t1.totalsize) desc limit 10;
 EOF
+    local _vb_rc=$?
+    if [ -n "$_vb_sar_pid" ]; then
+        wait $_vb_sar_pid
+        echo "===================="
+        echo " Paging statistics"
+        echo "===================="
+        grep -v Linux "$_vb_sar_out" | grep -v Ave
+    else
+        echo "===================="
+        echo " Paging statistics"
+        echo "===================="
+        echo "[SKIP] sar not installed"
+    fi
+    rm -f "$_vb_sar_out"
+    return $_vb_rc
 }
 
 run_net() {
@@ -23811,7 +23834,7 @@ PY
     fi
     [ -n "$others" ] && echo "other ports   : awr also enabled on: $others"
     cat <<EOF
-port           : $port
+port          : $port
 data dir      : $rootabs (snap_<id>/ per snapshot)
 interval      : ${mins} min
 retention     : $rdesc
