@@ -7755,10 +7755,13 @@ filtered_data AS (
     FROM 
         time_counts
     WHERE 
-        table_type = CASE 
-            WHEN (SELECT has_a_records FROM has_a_data) THEN 'a'
-            ELSE 'b'
-        END
+        /* per-sample-time merge: local_active_session rows win; gs_asp rows
+           fill the sample times local does not cover (local is a short ring
+           buffer, gs_asp holds the flushed history) */
+        table_type = 'a'
+        OR NOT EXISTS (SELECT 1 FROM time_counts a2
+                       WHERE a2.table_type = 'a'
+                         AND a2.sample_time = time_counts.sample_time)
 ),
 five_min_intervals AS (
     SELECT 
@@ -7852,10 +7855,13 @@ filtered_data AS (
     FROM 
         time_counts
     WHERE 
-        table_type = CASE 
-            WHEN (SELECT has_a_records FROM has_a_data) THEN 'a'
-            ELSE 'b'
-        END
+        /* per-sample-time merge: local_active_session rows win; gs_asp rows
+           fill the sample times local does not cover (local is a short ring
+           buffer, gs_asp holds the flushed history) */
+        table_type = 'a'
+        OR NOT EXISTS (SELECT 1 FROM time_counts a2
+                       WHERE a2.table_type = 'a'
+                         AND a2.sample_time = time_counts.sample_time)
 ),
 five_min_intervals AS (
     SELECT 
@@ -7959,10 +7965,13 @@ filtered_data AS (
     FROM 
         time_counts
     WHERE 
-        table_type = CASE 
-            WHEN (SELECT has_a_records FROM has_a_data) THEN 'a'
-            ELSE 'b'
-        END
+        /* per-sample-time merge: local_active_session rows win; gs_asp rows
+           fill the sample times local does not cover (local is a short ring
+           buffer, gs_asp holds the flushed history) */
+        table_type = 'a'
+        OR NOT EXISTS (SELECT 1 FROM time_counts a2
+                       WHERE a2.table_type = 'a'
+                         AND a2.sample_time = time_counts.sample_time)
 ),
 five_min_intervals AS (
     SELECT 
@@ -8041,10 +8050,13 @@ filtered_data AS (
     FROM 
         time_counts
     WHERE 
-        table_type = CASE 
-            WHEN (SELECT has_a_records FROM has_a_data) THEN 'a'
-            ELSE 'b'
-        END
+        /* per-sample-time merge: local_active_session rows win; gs_asp rows
+           fill the sample times local does not cover (local is a short ring
+           buffer, gs_asp holds the flushed history) */
+        table_type = 'a'
+        OR NOT EXISTS (SELECT 1 FROM time_counts a2
+                       WHERE a2.table_type = 'a'
+                         AND a2.sample_time = time_counts.sample_time)
 ),
 five_min_intervals AS (
     SELECT 
@@ -8151,10 +8163,13 @@ filtered_data AS (
     FROM 
         time_counts
     WHERE 
-        table_type = CASE 
-            WHEN (SELECT has_a_records FROM has_a_data) THEN 'a'
-            ELSE 'b'
-        END
+        /* per-sample-time merge: local_active_session rows win; gs_asp rows
+           fill the sample times local does not cover (local is a short ring
+           buffer, gs_asp holds the flushed history) */
+        table_type = 'a'
+        OR NOT EXISTS (SELECT 1 FROM time_counts a2
+                       WHERE a2.table_type = 'a'
+                         AND a2.sample_time = time_counts.sample_time)
 ),
 five_min_intervals AS (
     SELECT 
@@ -8220,10 +8235,13 @@ filtered_data AS (
     FROM 
         time_counts
     WHERE 
-        table_type = CASE 
-            WHEN (SELECT has_a_records FROM has_a_data) THEN 'a'
-            ELSE 'b'
-        END
+        /* per-sample-time merge: local_active_session rows win; gs_asp rows
+           fill the sample times local does not cover (local is a short ring
+           buffer, gs_asp holds the flushed history) */
+        table_type = 'a'
+        OR NOT EXISTS (SELECT 1 FROM time_counts a2
+                       WHERE a2.table_type = 'a'
+                         AND a2.sample_time = time_counts.sample_time)
 ),
 five_min_intervals AS (
     SELECT 
