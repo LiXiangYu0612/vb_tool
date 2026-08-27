@@ -22833,6 +22833,8 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     sql_block("SQL ordered by DB Time", "db_time", "DB Time (s)", s_of, "total_pe", sum_dbt_sql)
     sql_block("SQL ordered by CPU Time", "cpu_time", "CPU Time (s)", s_of, "total_pe", sum_cpu_sql)
     sql_block("SQL ordered by IO Time", "data_io_time", "IO Time (s)", s_of, "total_pe", sum_io_sql)
+    sum_plan_sql = sum(d.get("plan_time", 0.0) for d in ST.values())
+    sql_block("SQL ordered by Plan Time", "plan_time", "Plan Time (s)", s_of, "total_pe", sum_plan_sql)
     sql_block("SQL ordered by Logical Reads", "n_blocks_fetched", "logical reads", fmt_int, "total_only", sum_gets)
     sql_block("SQL ordered by Physical Reads", "physical_reads", "physical reads", fmt_int, "total_only", sum_phys_sql)
     sql_block("SQL ordered by Executions", "n_calls", "Executions", fmt_int, "none", sum_calls)
