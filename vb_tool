@@ -22866,7 +22866,8 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         _num = [False] * len(key_cols)
         for _c, _mode in col_specs:
             if _mode == "be":
-                _hdr += [_c + " Begin", _c + " End"]
+                _hdr += [_c + " (Begin)", _c + " (End)"]
+                _num += [True]   # be emits TWO headers; extra flag so zip() keeps (End)
             elif _mode == "d":
                 _hdr += [_c + " Δ"]
             else:
