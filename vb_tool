@@ -8399,7 +8399,7 @@ blocker_stats AS (
 )
 SELECT /*+set(enable_mergejoin off) set(enable_nestloop off) set(enable_index_nestloop off)*/ 
     las.sample_time::timestamp(0) without time zone sample_time,
-    las.sessionid||'('||case when $condition7 then 'a' else 'iit' end||')'||'('||$condition9||')' root_block_sessid,
+    CONCAT(las.sessionid::text, '(', case when $condition7 then 'a' else 'iit' end, '(', $condition9::text, ')') root_block_sessid,
     bs.blocked_count as b_cnt,
     substr(las.unique_query,1,50) h_sql,
     substr(blocked_las.unique_query,1,50) w_sql
@@ -8492,7 +8492,7 @@ local_part AS (
            a.sample_time::timestamp(0) without time zone AS sample_time,
            DATE_TRUNC('hour', a.sample_time::timestamp(0) without time zone)
              + FLOOR(EXTRACT(MINUTE FROM a.sample_time::timestamp(0) without time zone) / 5) * INTERVAL '5 min' AS interval_start,
-           b.final_block_sessionid||'('||case when $condition6 then 'a' else 'iit' end||')'||'('||$condition8||')' root_block_sessid,
+           CONCAT(b.final_block_sessionid::text, '(', case when $condition6 then 'a' else 'iit' end, '(', $condition8::text, ')') root_block_sessid,
            b.cnt as b_cnt,
            substr(a.unique_query,1,50) h_sql,
            substr(c.unique_query,1,50) w_sql
@@ -8505,7 +8505,7 @@ gs_part AS (
            las.sample_time::timestamp(0) without time zone AS sample_time,
            DATE_TRUNC('hour', las.sample_time::timestamp(0) without time zone)
              + FLOOR(EXTRACT(MINUTE FROM las.sample_time::timestamp(0) without time zone) / 5) * INTERVAL '5 min' AS interval_start,
-           las.sessionid||'('||case when $condition7 then 'a' else 'iit' end||')'||'('||$condition9||')' root_block_sessid,
+           CONCAT(las.sessionid::text, '(', case when $condition7 then 'a' else 'iit' end, '(', $condition9::text, ')') root_block_sessid,
            bs.blocked_count as b_cnt,
            substr(las.unique_query,1,50) h_sql,
            substr(blocked_las.unique_query,1,50) w_sql
@@ -9260,17 +9260,17 @@ EOF
             case "$order_by" in
                 io|IO|total_iotime)
                     order_field="(a.data_io_time - COALESCE(b.data_io_time, 0))"
-                    total_time_sql="ROUND((a.data_io_time - COALESCE(b.data_io_time, 0)) / 1e3) || '(' || ROUND(100*(a.data_io_time - COALESCE(b.data_io_time, 0)) / 1e3 / NULLIF(c.total_iotime, 0), 2) || '%)' AS total_iotime"
+                    total_time_sql="CONCAT(ROUND((a.data_io_time - COALESCE(b.data_io_time, 0)) / 1e3), '(', ROUND(100*(a.data_io_time - COALESCE(b.data_io_time, 0)) / 1e3 / NULLIF(c.total_iotime, 0), 2), '%)') AS total_iotime"
                     total_time_label="total_iotime"
                     ;;
                 cpu|CPU|total_cputime)
                     order_field="(a.cpu_time - COALESCE(b.cpu_time, 0))"
-                    total_time_sql="ROUND((a.cpu_time - COALESCE(b.cpu_time, 0)) / 1e3) || '(' || ROUND(100*(a.cpu_time - COALESCE(b.cpu_time, 0)) / 1e3 / NULLIF(c.total_cputime, 0), 2) || '%)' AS total_cputime"
+                    total_time_sql="CONCAT(ROUND((a.cpu_time - COALESCE(b.cpu_time, 0)) / 1e3), '(', ROUND(100*(a.cpu_time - COALESCE(b.cpu_time, 0)) / 1e3 / NULLIF(c.total_cputime, 0), 2), '%)') AS total_cputime"
                     total_time_label="total_cputime"
                     ;;
                 dbtime|DBTIME|total_dbtime|*)
                     order_field="(a.db_time - COALESCE(b.db_time, 0))"
-                    total_time_sql="ROUND((a.db_time - COALESCE(b.db_time, 0)) / 1e3) || '(' || ROUND(100*(a.db_time - COALESCE(b.db_time, 0)) / 1e3 / NULLIF(c.total_dbtime, 0), 2) || '%)' AS total_dbtime"
+                    total_time_sql="CONCAT(ROUND((a.db_time - COALESCE(b.db_time, 0)) / 1e3), '(', ROUND(100*(a.db_time - COALESCE(b.db_time, 0)) / 1e3 / NULLIF(c.total_dbtime, 0), 2), '%)') AS total_dbtime"
                     total_time_label="total_dbtime"
                     ;;
             esac
