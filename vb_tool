@@ -24047,8 +24047,38 @@ _awr_list() {
     local root; root=$(_awr_root)
     if [ ! -d "$root" ]; then echo "(no snaps at $root)"; return 0; fi
     python3 - "$root" "$date_filter" <<'PY'
-import json, os, sys, glob
+import json, os, sys, glob, gzip
 root, date_filter = sys.argv[1], sys.argv[2]
+
+def _dbstart_short(v):
+    # '2026-08-17 10:46:18.309219+08' -> '08-17 10:46' (same-year compact)
+    v = str(v or "")
+    return v[5:16] if len(v) >= 16 else (v or "-")
+
+def _dbtime(d):
+    # cumulative DB_TIME (us) from the snap's instance_time csv (gz or plain)
+    for fn, opener in (("db/instance_time.csv.gz", gzip.open), ("db/instance_time.csv", open)):
+        p = os.path.join(d, fn)
+        if os.path.isfile(p):
+            try:
+                with opener(p, "rt") as f:
+                    next(f)
+                    for ln in f:
+                        parts = ln.strip().split(",")
+                        if len(parts) >= 3 and parts[1] == "DB_TIME":
+                            return int(float(parts[2]))
+            except Exception:
+                return None
+    return None
+
+def _hum_us(v):
+    if v is None: return "-"
+    sec = v / 1e6
+    if sec >= 86400: return "%.1fd" % (sec / 86400)
+    if sec >= 3600:  return "%.1fh" % (sec / 3600)
+    if sec >= 60:    return "%.1fm" % (sec / 60)
+    return "%.0fs" % sec
+
 rows = []
 for d in glob.glob(os.path.join(root, "snap_*")):
     if not os.path.isdir(d): continue
@@ -24058,7 +24088,21 @@ for d in glob.glob(os.path.join(root, "snap_*")):
     sid = m.get("snap_id", os.path.basename(d).replace("snap_", ""))
     try: sid = int(sid)
     except Exception: pass
-    rows.append((sid, m.get("ts", "?"), m.get("hostname", "?"), m.get("db_name", "?")))
+    rows.append((sid, m.get("ts", "?"), m.get("hostname", "?"), m.get("db_name", "?"),
+                 _dbstart_short(m.get("db_start_time", "")), _dbtime(d)))
+# per-snap DB_TIME delta vs the PREVIOUS snap (lower id): shown only when
+# both snaps share the same db_start_time (same instance uptime); restart
+# boundary or missing counter -> '-'
+delta = {}
+_asc = sorted([r for r in rows if not isinstance(r[0], str)], key=lambda r: r[0])
+for i, r in enumerate(_asc):
+    if i == 0 or r[5] is None:
+        delta[r[0]] = "-"; continue
+    pr = _asc[i - 1]
+    if pr[5] is None or pr[4] != r[4] or r[5] < pr[5]:
+        delta[r[0]] = "-"; continue
+    delta[r[0]] = _hum_us(r[5] - pr[5])
+
 if date_filter:
     rows = [r for r in rows if str(r[1])[:10] == date_filter]
 # newest first: numeric snap_ids descending, non-numeric fallback ids last
@@ -24069,8 +24113,8 @@ if not rows:
 total = len(rows)
 if not date_filter and total > 30:
     rows = rows[:30]
-print("%-8s %-20s %-14s %s" % ("SNAP_ID", "TS", "HOST", "DB"))
-for r in rows: print("%-8s %-20s %-14s %s" % r)
+print("%-8s %-20s %-12s %-8s %-14s %s" % ("SNAP_ID", "TS", "DB_START", "DB_TIME", "HOST", "DB"))
+for r in rows: print("%-8s %-20s %-12s %-8s %-14s %s" % (r[0], r[1], r[4], delta.get(r[0], "-"), r[2], r[3]))
 if not date_filter and total > 30:
     print("(showing latest 30 of %d; 'vb_tool awr list YYYY-MM-DD' for a specific day)" % total)
 PY
