@@ -7,7 +7,7 @@
 #-- Author:      MVS & Second-line Team 
 #--------------------------------------------------------------------------------
 set -o pipefail
-export VB_TOOL_VERSION="v2.0.6"
+export VB_TOOL_VERSION="v2.0.7"
 show_help() {
     echo "Vastbase Script Tool (vb_tool)"
     echo ""
@@ -20280,10 +20280,10 @@ counter delta between two snapshots (end - begin).
                             count; while ENABLED also last-snap age
                             (ok / STALE liveness hint)
   delete  until <time>      delete snapshots (by ts), html reports (by mtime) and
-                            old repl_*.log (by whole day) older than <time>;
-                            e.g. '2026-08-11' or '2026-08-11 12:00:00'
+                            old repl_*.log / os_*.log (by whole day) older than
+                            <time>; e.g. '2026-08-11' or '2026-08-11 12:00:00'
   config  retention <days>  set retention in days (default 8; 0 = never purge).
-                            Immediately purges already-expired snaps, repl/slot
+                            Immediately purges already-expired snaps, repl/slot/os
                             logs and html reports.
   config  interval <min>    set sampling interval in minutes (default 60,
                             1-60, cron minute-field limit). If periodic capture
@@ -20300,6 +20300,9 @@ Storage (per snapshot; <root> = $VB_TOOL_HOME/awrs/<port>, per instance):
   slot logs:  <root>/slot_<YYYYMMDD>.log  per-minute pg_replication_slots samples
               (ts,slot,plugin,type,db,active,xmin,cat_xmin,restart_lsn,dummy,conf_flush;
                no slot -> ts,null)
+  os logs:    <root>/os_<YYYYMMDD>.log  per-minute OS counters for awrrpt detail
+              (cpu/pg/mem numeric rows + dsk/net raw /proc lines; same cron as
+               repl/slot sampling -- 'awr enable' starts all three)
 
 Env: VB_TOOL_HOME  base dir (default ~/.vb_tool); snaps under $VB_TOOL_HOME/awrs/<port>/snap_<id>/
 Port:   -P <port> anywhere on the command line selects the instance (default: current $PGPORT)
@@ -20329,7 +20332,7 @@ _awr_root() {
             [ ! -d "$root" ] && ls "$base"/snap_* >/dev/null 2>&1 || exit 0
             mkdir -p "$root"
             mv "$base"/snap_* "$base"/sequence "$base"/retention "$base"/interval \
-               "$base"/repl_*.log "$base"/slot_*.log "$root"/ 2>/dev/null
+               "$base"/repl_*.log "$base"/slot_*.log "$base"/os_*.log "$base"/os_*.log.gz "$root"/ 2>/dev/null
             echo "awr: migrated existing snapshots/config into per-port layout $root" >&2
         ) 9>"$base/.migrate.lock"
     fi
@@ -20560,7 +20563,7 @@ Cumulative-counter model:
 Emits a self-contained HTML report. Standalone here; embedded as a heredoc in
 vb_tool_dev (so keep it dependency-free stdlib only, single file, no argv trickery).
 """
-import csv, json, os, sys, html, subprocess, glob, re, gzip
+import csv, json, os, sys, html, subprocess, glob, re, gzip, time
 
 # version of the vb_tool binary generating this report (exported by the bash
 # wrapper, inherited via env); distinct from the per-snap vb_tool_version in
@@ -20986,6 +20989,295 @@ def slots_subtable_html(slots):
                         esc(f[7]), esc(f[5]), esc(f[6]), esc(f[8]), esc(f[9])))
     parts.append('</table>')
     return "".join(parts)
+
+# ---- OS per-minute sampler (awrrpt only; written by _awr_repl_sample in bash) ----
+# os_<YYYYMMDD>.log[.gz] row grammar (the sampler gzips every PAST day's file):
+#   cpu,<ts>,user,nice,system,idle,iowait,irq,softirq,steal,procs_running,procs_blocked
+#   pg,<ts>,pgpgin,pgpgout,pswpin,pswpout,pgfault,pgmajfault            (/proc/vmstat)
+#   mem,<ts>,MemTotal,MemFree,MemAvailable,Buffers,Cached,Slab,SwapFree  (kB gauges)
+#   dsk,<ts>,<raw /proc/diskstats line>     (re-parsed via proc_disk_devs so the
+#                                            partition filter matches the window table)
+#   net,<ts>,<raw /proc/net/dev iface line> (re-parsed via proc_net_ifaces likewise)
+
+def _ts_epoch(ts):
+    try:
+        return time.mktime(time.strptime(str(ts), "%Y-%m-%d %H:%M:%S"))
+    except Exception:
+        return None
+
+def _ts_shift(ts, secs):
+    e = _ts_epoch(ts)
+    if e is None:
+        return str(ts or "")
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(e + secs))
+
+def load_os_samples(sdir, begin_ts, end_ts):
+    """Read os_*.log[.gz] sample rows with ts in [begin-65s, end] (inclusive);
+    the one pre-begin sample gives the first in-window minute its rate.
+    Same pre-filter-by-day / re-filter-by-row discipline as load_repl_samples().
+    Returns {"cpu":[(ts,[10 floats])], "pg":[(ts,[6 floats])],
+             "mem":[(ts,[7 or 11 floats])], "dsk":[(ts,raw)], "net":[(ts,raw)],
+             "files":[names]}. Malformed rows (wrong comma count, non-numeric
+    payload) are silently dropped, like the repl/slot loaders. mem rows carry
+    11 values when the sampler could read /proc/zoneinfo: 7 meminfo kB gauges
+    + zone watermarks (free/min/low/high kB, summed over all zones); older
+    7-value logs without them stay valid."""
+    out = {"cpu": [], "pg": [], "mem": [], "dsk": [], "net": [], "files": []}
+    if not sdir or not os.path.isdir(sdir):
+        return out
+    lo = _ts_shift(begin_ts, -65)
+    ld = lo[:10].replace("-", "")
+    ed = str(end_ts or "")[:10].replace("-", "")
+    for f in sorted(glob.glob(os.path.join(sdir, "os_*.log")) +
+                    glob.glob(os.path.join(sdir, "os_*.log.gz"))):
+        m = re.search(r"os_(\d{8})\.log(\.gz)?$", f)
+        if m:
+            fd = m.group(1)
+            if ld and fd < ld: continue
+            if ed and fd > ed: continue
+        try:
+            fh = gzip.open(f, "rt", errors="replace") if f.endswith(".gz") else open(f, errors="replace")
+            with fh:
+                lines = fh.read().splitlines()
+        except Exception:
+            continue
+        out["files"].append(os.path.basename(f))
+        for ln in lines:
+            ln = ln.strip()
+            if not ln: continue
+            g = ln.split(",", 2)
+            if len(g) < 3: continue
+            typ, ts, payload = g
+            if ts < lo: continue
+            if end_ts and ts > str(end_ts): continue
+            if typ in ("dsk", "net"):
+                if payload:
+                    out[typ].append((ts, payload))
+                continue
+            want = {"cpu": 12, "pg": 8}.get(typ)
+            if typ == "mem":
+                # 7-value row: 9 fields/8 commas; 11-value (+ zone wm): 13/12
+                if ln.count(",") not in (8, 12): continue
+            elif not want or ln.count(",") != want - 1: continue
+            try:
+                out[typ].append((ts, [float(x) for x in payload.split(",")]))
+            except Exception:
+                continue
+    for k in ("cpu", "pg", "mem", "dsk", "net"):
+        out[k].sort(key=lambda r: r[0])
+    return out
+
+_CPUF = ("busy", "user", "nice", "system", "iowait", "irq", "softirq", "steal", "idle")
+_PGK = ("pgpgin", "pgpgout", "pswpin", "pswpout", "pgfault", "pgmajfault")
+_NETK = ("rx_bytes", "rx_packets", "rx_errs", "rx_drop",
+         "tx_bytes", "tx_packets", "tx_errs", "tx_drop")
+
+def os_minute_cpu_series(samples):
+    """[(ts, {component: %}, r, b)] -- per-minute CPU % from consecutive cpu
+    samples; the rate belongs to the LATER sample's minute. A non-positive
+    total jiffy delta (reboot/counter reset) skips that minute; per-component
+    negatives clamp to 0 (same convention as os_window_deltas)."""
+    rows = samples.get("cpu", [])
+    out = []
+    for (ta, a), (tb, b) in zip(rows, rows[1:]):
+        ea, eb = _ts_epoch(ta), _ts_epoch(tb)
+        if not ea or not eb or eb <= ea: continue
+        dtot = sum(b[:8]) - sum(a[:8])
+        if dtot <= 0: continue
+        # jiffy order: user nice system idle iowait irq softirq steal
+        p = [max(0.0, (b[i] - a[i]) / dtot * 100.0) for i in range(8)]
+        d = {"user": p[0], "nice": p[1], "system": p[2], "idle": p[3],
+             "iowait": p[4], "irq": p[5], "softirq": p[6], "steal": p[7]}
+        d["busy"] = d["user"] + d["nice"] + d["system"] + d["irq"] + d["softirq"] + d["steal"]
+        out.append((tb, d, b[8], b[9]))
+    return out
+
+def os_minute_pg_series(samples):
+    """[(ts, {key: per-second rate})] from consecutive pg samples."""
+    rows = samples.get("pg", [])
+    out = []
+    for (ta, a), (tb, b) in zip(rows, rows[1:]):
+        ea, eb = _ts_epoch(ta), _ts_epoch(tb)
+        if not ea or not eb or eb <= ea: continue
+        dt = eb - ea
+        out.append((tb, {k: max(0.0, (b[i] - a[i]) / dt) for i, k in enumerate(_PGK)}))
+    return out
+
+def os_minute_mem_gauges(samples):
+    """{ts: (used_mb, avail_mb, wm)} -- MemUsed = MemTotal - MemAvailable;
+    wm = (free_mb, min_mb, low_mb, high_mb) summed-zone watermarks when the
+    11-value mem row is present, else None (old logs / zoneinfo unreadable)."""
+    out = {}
+    for ts, v in samples.get("mem", []):
+        if len(v) < 3: continue
+        wm = (v[7] / 1024.0, v[8] / 1024.0, v[9] / 1024.0, v[10] / 1024.0) \
+            if len(v) >= 11 else None
+        out[ts] = ((v[0] - v[2]) / 1024.0, v[2] / 1024.0, wm)
+    return out
+
+def os_minute_disk_series(samples):
+    """({dev: [(ts, rates, r_await_ms, w_await_ms)]}, discard_supported).
+    Consecutive same-device samples give the per-minute delta (idle
+    device-minutes skipped, like the whole-window table skips idle devs)."""
+    per_dev = {}
+    # all dsk rows of one minute form ONE blob: proc_disk_devs drops
+    # partitions (vda1 under vda) only when it can see the parent line,
+    # so parsing per-row would leak partitions into the detail table
+    by_ts = {}
+    for ts, raw in samples.get("dsk", []):
+        by_ts.setdefault(ts, []).append(raw)
+    for ts in sorted(by_ts):
+        for d in proc_disk_devs("\n".join(by_ts[ts])):
+            per_dev.setdefault(d["name"], []).append((ts, d))
+    discard_supported = any(d.get("dc_ios") is not None
+                            for rows in per_dev.values() for _, d in rows)
+    out = {}
+    for dev, rows in per_dev.items():
+        for (ta, a), (tb, b) in zip(rows, rows[1:]):
+            ea, eb = _ts_epoch(ta), _ts_epoch(tb)
+            if not ea or not eb or eb <= ea: continue
+            dt = eb - ea
+            rd_ios = max(0, b.get("rd_ios", 0) - a.get("rd_ios", 0))
+            wr_ios = max(0, b.get("wr_ios", 0) - a.get("wr_ios", 0))
+            rd_sec = max(0, b.get("rd_sectors", 0) - a.get("rd_sectors", 0))
+            wr_sec = max(0, b.get("wr_sectors", 0) - a.get("wr_sectors", 0))
+            rd_tick = max(0, b.get("rd_ticks", 0) - a.get("rd_ticks", 0))
+            wr_tick = max(0, b.get("wr_ticks", 0) - a.get("wr_ticks", 0))
+            wtick = max(0, b.get("weighted_ticks", 0) - a.get("weighted_ticks", 0))
+            dc_ios = _dd(b, a, "dc_ios")
+            fl_ios = _dd(b, a, "fl_ios")
+            if rd_sec == 0 and wr_sec == 0 and rd_ios + wr_ios == 0:
+                continue  # idle device-minute
+            out.setdefault(dev, []).append((tb, {
+                "read_iops": rd_ios / dt, "write_iops": wr_ios / dt,
+                "read_bytes_s": rd_sec * 512.0 / dt, "write_bytes_s": wr_sec * 512.0 / dt,
+                "discard_iops": (dc_ios / dt) if dc_ios is not None else None,
+                "flush_iops": (fl_ios / dt) if fl_ios is not None else None,
+            }, (rd_tick / rd_ios) if rd_ios > 0 else None,
+               (wr_tick / wr_ios) if wr_ios > 0 else None))
+    return out, discard_supported
+
+def os_minute_net_series(samples):
+    """{iface: [(ts, deltas, dt)]} -- bytes/packets deltas carried raw; the
+    table divides by dt for rates and shows errs/drop as per-minute counts
+    (same Δ semantics as the whole-window table)."""
+    per_if = {}
+    for ts, raw in samples.get("net", []):
+        for it in proc_net_ifaces(raw):
+            per_if.setdefault(it["name"], []).append((ts, it))
+    out = {}
+    for ifc, rows in per_if.items():
+        for (ta, a), (tb, b) in zip(rows, rows[1:]):
+            ea, eb = _ts_epoch(ta), _ts_epoch(tb)
+            if not ea or not eb or eb <= ea: continue
+            d = {k: max(0.0, b.get(k, 0) - a.get(k, 0)) for k in _NETK}
+            if (d["rx_bytes"] + d["tx_bytes"] + d["rx_packets"] + d["tx_packets"] +
+                    d["rx_errs"] + d["tx_errs"] + d["rx_drop"] + d["tx_drop"]) == 0:
+                continue  # idle iface-minute
+            out.setdefault(ifc, []).append((tb, d, eb - ea))
+    return out
+
+def _fold(title, body):
+    """Native <details> fold (no JS; no `open` attribute => collapsed by default)."""
+    return '<details class="fold"><summary>%s</summary>%s</details>' % (esc(title), body)
+
+def _osmin_note(samples):
+    if not samples.get("files"):
+        return '<div class="note">no per-minute OS samples in this period (sampler runs while awr is enabled)</div>'
+    return '<div class="note">no usable per-minute samples in this period</div>'
+
+def osmin_cpu_table(samples, begin_ts):
+    series = [r for r in os_minute_cpu_series(samples)
+              if not begin_ts or r[0] >= str(begin_ts)]
+    if not series:
+        return _osmin_note(samples)
+    h = ['<table class="t"><tr><th>Time</th>' +
+         ''.join('<th>%s</th>' % f for f in _CPUF) + '<th>r</th><th>b</th></tr>']
+    for ts, d, r, b in series:
+        h.append('<tr><td>%s</td>%s<td class="n">%d</td><td class="n">%d</td></tr>'
+                 % (esc(ts), ''.join('<td class="n%s">%.1f</td>' % (" b" if f == "busy" else "", d[f])
+                                     for f in _CPUF), r, b))
+    h.append('</table>')
+    return _fold("Per-minute detail", "".join(h))
+
+def osmin_disk_table(samples, begin_ts):
+    per, dsup = os_minute_disk_series(samples)
+    rows = sorted((ts, dev, rt, ra, wa)
+                  for dev, lst in per.items() for ts, rt, ra, wa in lst
+                  if not begin_ts or ts >= str(begin_ts))
+    if not rows:
+        return _osmin_note(samples)
+    head = ('<table class="t"><tr><th>Time</th><th>Device</th><th>r/s</th><th>w/s</th>'
+            '<th>Read B/s</th><th>Write B/s</th>')
+    if dsup:
+        head += '<th>Dscrd/s</th><th>Flush/s</th>'
+    head += '<th>r_await (ms)</th><th>w_await (ms)</th></tr>'
+    h = [head]
+    for ts, dev, rt, ra, wa in rows:
+        cells = ('<td>%s</td><td>%s</td><td class="n">%.1f</td><td class="n">%.1f</td>'
+                 '<td class="n">%s</td><td class="n">%s</td>' % (
+                     esc(ts), esc(dev), rt["read_iops"], rt["write_iops"],
+                     fmt_bytes(rt["read_bytes_s"]), fmt_bytes(rt["write_bytes_s"])))
+        if dsup:
+            cells += ('<td class="n">%s</td><td class="n">%s</td>' % (
+                ("%.1f" % rt["discard_iops"]) if rt["discard_iops"] is not None else "-",
+                ("%.1f" % rt["flush_iops"]) if rt["flush_iops"] is not None else "-"))
+        cells += '<td class="n">%s</td><td class="n">%s</td>' % (
+            ("%.1f" % ra) if ra is not None else "-",
+            ("%.1f" % wa) if wa is not None else "-")
+        h.append('<tr>' + cells + '</tr>')
+    h.append('</table>')
+    return _fold("Per-minute detail", "".join(h))
+
+def osmin_net_table(samples, begin_ts):
+    per = os_minute_net_series(samples)
+    rows = sorted((ts, ifc, d, dt)
+                  for ifc, lst in per.items() for ts, d, dt in lst
+                  if not begin_ts or ts >= str(begin_ts))
+    if not rows:
+        return _osmin_note(samples)
+    h = ['<table class="t"><tr><th>Time</th><th>Interface</th><th>RX B/s</th><th>TX B/s</th>'
+         '<th>RX pkt/s</th><th>TX pkt/s</th><th>rx/tx errs (&Delta;)</th><th>rx/tx drop (&Delta;)</th></tr>']
+    for ts, ifc, d, dt in rows:
+        h.append('<tr><td>%s</td><td>%s</td><td class="n">%s</td><td class="n">%s</td>'
+                 '<td class="n">%.1f</td><td class="n">%.1f</td>'
+                 '<td class="n">%.0f / %.0f</td><td class="n">%.0f / %.0f</td></tr>'
+                 % (esc(ts), esc(ifc), fmt_bytes(d["rx_bytes"] / dt), fmt_bytes(d["tx_bytes"] / dt),
+                    d["rx_packets"] / dt, d["tx_packets"] / dt,
+                    d["rx_errs"], d["tx_errs"], d["rx_drop"], d["tx_drop"]))
+    h.append('</table>')
+    return _fold("Per-minute detail", "".join(h))
+
+def osmin_mem_table(samples, begin_ts):
+    series = {ts: d for ts, d in os_minute_pg_series(samples)
+              if not begin_ts or ts >= str(begin_ts)}
+    gauges = {ts: g for ts, g in os_minute_mem_gauges(samples).items()
+              if not begin_ts or ts >= str(begin_ts)}
+    if not series and not gauges:
+        return _osmin_note(samples)
+    # zone watermarks: columns appear when any row carries them; per-row gaps
+    # (old 7-value logs mixed with new ones) render as "-"
+    has_wm = any(g[2] is not None for g in gauges.values())
+    h = ['<table class="t"><tr><th>Time</th><th>pgpgin/s</th><th>pgpgout/s</th>'
+         '<th>pswpin/s</th><th>pswpout/s</th><th>pgfault/s</th><th>pgmajfault/s</th>'
+         '<th>MemUsed (MB)</th><th>MemAvail (MB)</th>']
+    if has_wm:
+        h.append('<th>WM Free (MB)</th><th>WM Min (MB)</th><th>WM Low (MB)</th><th>WM High (MB)</th>')
+    h.append('</tr>')
+    for ts in sorted(set(series) | set(gauges)):
+        d = series.get(ts)
+        g = gauges.get(ts)
+        wm_tds = ""
+        if has_wm:
+            wm_tds = ''.join('<td class="n">%s</td>' % (("%.0f" % x) if (g and g[2]) else "-")
+                             for x in (g[2] if (g and g[2]) else (0, 0, 0, 0)))
+        h.append(('<tr><td>%s</td>%s<td class="n">%s</td><td class="n">%s</td>%s</tr>'
+                  % (esc(ts),
+                     ''.join('<td class="n">%s</td>' % (fmt_num(d[k]) if d else "-") for k in _PGK),
+                     ("%.0f" % g[0]) if g else "-", ("%.0f" % g[1]) if g else "-",
+                     wm_tds)))
+    h.append('</table>')
+    return _fold("Per-minute detail", "".join(h))
 
 def delta_rows(win, table, key, num_cols):
     """For one table in one window: dict keyed by `key` -> {col: end-begin delta for num_cols, '__row': label row}.
@@ -22279,6 +22571,21 @@ tr:nth-child(even) td { background: #FFFFCC; }
 .muted { color: #9aa5b1; }
 .bad { color: #c0392b; font-weight: bold; }
 .foot { color: #555; font-size: 11px; margin-top: 20px; border-top: 1px solid #cccc99; padding-top: 8px; }
+details.secfold { background: #fff; padding: 0; margin-top: 26px; border: none; }
+details.secfold > summary { display: list-item; cursor: pointer; list-style: none; color: #336699;
+                            font-weight: bold; font-size: 24px; margin: 0; }
+details.secfold > summary .totop { float: right; color: #663300; background: #fff; text-decoration: none;
+                            border: 1px solid #663300; padding: 1px 10px; font-size: 12px; font-weight: bold; margin-top: 8px; }
+details.secfold > summary .totop:hover { background: #FFFFCC; }
+details.secfold > summary::-webkit-details-marker { display: none; }
+details.secfold > summary::before { content: "\\25B8 "; color: #663300; }
+details.secfold[open] > summary::before { content: "\\25BE "; }
+details.fold { margin: 2px 0 8px 0; }
+details.fold > summary { display: list-item; cursor: pointer; list-style: none; color: #336699;
+                         font-weight: bold; font-size: 13px; margin-top: 8px; }
+details.fold > summary::-webkit-details-marker { display: none; }
+details.fold > summary::before { content: "\\25B8 "; color: #663300; }
+details.fold[open] > summary::before { content: "\\25BE "; }
 .sqlblock { border: 1px solid #cccc99; margin: 6px 0; padding: 6px 8px; background: #fff; }
 .sqlid { font-weight: bold; color: #336699; font-size: 12px; margin-bottom: 4px; }
 .sqlfull { font-family: 'Courier New', Courier, monospace; font-size: 11px; white-space: pre-wrap;
@@ -22353,10 +22660,25 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             slug = "%s-%d" % (s, i); i += 1
         _used_slugs.add(slug)
         return slug
-    def sec(t):
+    _foldsec_open = False
+    def _close_foldsec():
+        nonlocal _foldsec_open
+        if _foldsec_open:
+            parts.append('</details>')
+            _foldsec_open = False
+    def sec(t, fold=False):
+        nonlocal _foldsec_open
+        _close_foldsec()
         _id = _slug(t)
         _toc.append((t, _id))
-        parts.append('<div class="sec" id="%s"><h2>%s <a class="totop" href="#toc">↑ Top</a></h2></div>' % (_id, esc(t)))
+        if fold:
+            # whole section collapsed by default; the id rides on <details> so
+            # the TOC anchor still jumps here
+            parts.append('<details class="secfold" id="%s"><summary>%s <a class="totop" href="#toc">↑ Top</a></summary>'
+                         % (_id, esc(t)))
+            _foldsec_open = True
+        else:
+            parts.append('<div class="sec" id="%s"><h2>%s <a class="totop" href="#toc">↑ Top</a></h2></div>' % (_id, esc(t)))
     def sub(t):
         parts.append('<div class="sub">%s</div>' % esc(t))
     def note(t):
@@ -22383,6 +22705,11 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             esc(m.get("duration", "?")), s_of(dbt),
         ))
     _toc_pos = len(parts)
+
+    # per-minute OS detail samples (awrrpt path only; os_*.log[.gz] from the
+    # cron sampler; the window tables stay snap-delta based and untouched)
+    os_smp = (load_os_samples(repl_dir, m.get("begin_ts", ""), m.get("end_ts", ""))
+              if repl_dir is not None else None)
 
     # ================= OS Statistics =================
     sec("OS Statistics")
@@ -22412,6 +22739,8 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         '<td class="n%s">%.1f</td>' % (' b' if f == "busy" else '',
                                        osd["cpu"].get(f, 0.0)) for f in _cf) + '</tr>')
     parts.append('</table>')
+    if os_smp is not None:
+        parts.append(osmin_cpu_table(os_smp, m.get("begin_ts", "")))
     _ntop = parse_numa(win["os"].get(("end", "numa"), "")
                        or win["os"].get(("begin", "numa"), ""))
     if _ntop:
@@ -22421,9 +22750,9 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         parts.append(numa_html_table(_ntop,
                      lambda nid, key: _numa_stat_delta(_nbeg, _nend, nid, key)))
     sub("System Activity")
-    parts.append('<table class="t"><tr><th></th><th class="n" colspan="2">Per Second</th></tr>'
-                 '<tr><th></th><th class="n">Context Switches</th><th class="n">Interrupts</th></tr>')
-    parts.append('<tr><td></td><td class="n">%.0f</td><td class="n">%.0f</td></tr>'
+    parts.append('<table class="t"><tr><th class="n">Context Switches per Sec</th>'
+                 '<th class="n">Interrupts per Sec</th></tr>')
+    parts.append('<tr><td class="n">%.0f</td><td class="n">%.0f</td></tr>'
                  % (osd.get("ctxt_per_sec", 0), osd.get("intr_per_sec", 0)))
     parts.append('</table>')
     sub("OS Memory Usage")
@@ -22457,6 +22786,8 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     vmrow("minor fault (pgfault)", "pgfault")
     vmrow("major fault (pgmajfault)", "pgmajfault")
     parts.append('</table>')
+    if os_smp is not None:
+        parts.append(osmin_mem_table(os_smp, m.get("begin_ts", "")))
     sub("Disk I/O per device")
     _dmeta = osd.get("disk_meta") or {}
     _dh = '<th>Device</th>'
@@ -22490,6 +22821,8 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         row += '<td class="n">%s</td><td class="n">%s</td></tr>' % (ra, wa)
         parts.append(row)
     parts.append('</table>')
+    if os_smp is not None:
+        parts.append(osmin_disk_table(os_smp, m.get("begin_ts", "")))
     sub("Network per interface")
     dur_os = osd.get("dur", 1.0) or 1.0
     def nrate(it, key):
@@ -22514,6 +22847,8 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         row += '</tr>'
         parts.append(row)
     parts.append('</table>')
+    if os_smp is not None:
+        parts.append(osmin_net_table(os_smp, m.get("begin_ts", "")))
 
     if osd.get("netstat_ok"):
         sub("Network Protocol Errors")
@@ -22911,7 +23246,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         lambda v: v["idx_scan"][1] - v["idx_scan"][0])
 
     # ================= Wait Events =================
-    sec("Wait Events")
+    sec("Wait Events", fold=True)
     parts.append('<table class="t"><tr><th>Event</th><th>Class</th><th class="n">Waits</th>'
                  '<th class="n">Total Wait Time (s)</th><th class="n">Avg wait (ms)</th>'
                  '<th class="n">% DB time</th></tr>')
@@ -22927,7 +23262,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     parts.append('</table>')
 
     # ================= SQL Text (full normalized queries, AWR-style) =================
-    sec("SQL Text")
+    sec("SQL Text", fold=True)
     if not shown_sql:
         parts.append('<div class="note">no data</div>')
     else:
@@ -22940,7 +23275,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         parts.append('</table>')
 
     # ================= Database Parameters (pg_settings, live query) =================
-    sec("Database Parameters")
+    sec("Database Parameters", fold=True)
     pgset = fetch_pg_settings()
     parts.append('<table class="t params"><colgroup>'
                  '<col style="width:24%"><col style="width:14%"><col style="width:12%"><col style="width:50%">'
@@ -22970,6 +23305,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     parts.insert(_toc_pos, _toc_html)
 
     # ================= Footer =================
+    _close_foldsec()
     parts.append('<div class="foot">Generated by vb_tool awr report &middot; '
                  'single-window report &middot; all values = window(end-begin) &middot; '
                  '% DB time = metric / DB_TIME.</div>')
@@ -23013,6 +23349,21 @@ tr:nth-child(even) td { background: #FFFFCC; }
 .note { color: #555; font-size: 11px; font-style: italic; margin: 2px 0 6px 0; }
 .bad { color: #c0392b; font-weight: bold; }
 .foot { color: #555; font-size: 11px; margin-top: 20px; border-top: 1px solid #cccc99; padding-top: 8px; }
+details.secfold { background: #fff; padding: 0; margin-top: 26px; border: none; }
+details.secfold > summary { display: list-item; cursor: pointer; list-style: none; color: #336699;
+                            font-weight: bold; font-size: 24px; margin: 0; }
+details.secfold > summary .totop { float: right; color: #663300; background: #fff; text-decoration: none;
+                            border: 1px solid #663300; padding: 1px 10px; font-size: 12px; font-weight: bold; margin-top: 8px; }
+details.secfold > summary .totop:hover { background: #FFFFCC; }
+details.secfold > summary::-webkit-details-marker { display: none; }
+details.secfold > summary::before { content: "\\25B8 "; color: #663300; }
+details.secfold[open] > summary::before { content: "\\25BE "; }
+details.fold { margin: 2px 0 8px 0; }
+details.fold > summary { display: list-item; cursor: pointer; list-style: none; color: #336699;
+                         font-weight: bold; font-size: 13px; margin-top: 8px; }
+details.fold > summary::-webkit-details-marker { display: none; }
+details.fold > summary::before { content: "\\25B8 "; color: #663300; }
+details.fold[open] > summary::before { content: "\\25BE "; }
 .sqlblock { border: 1px solid #cccc99; margin: 6px 0; padding: 6px 8px; background: #fff; }
 .sqlid { font-weight: bold; color: #336699; font-size: 12px; margin-bottom: 4px; }
 .sqlfull { font-family: 'Courier New', Courier, monospace; font-size: 11px; white-space: pre-wrap;
@@ -23082,9 +23433,22 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         while slug in _used:
             slug = "%s-%d" % (s, i); i += 1
         _used.add(slug); return slug
-    def sec(t):
+    _foldsec_open = False
+    def _close_foldsec():
+        nonlocal _foldsec_open
+        if _foldsec_open:
+            parts.append('</details>')
+            _foldsec_open = False
+    def sec(t, fold=False):
+        nonlocal _foldsec_open
+        _close_foldsec()
         _id = _slug(t); _toc.append((t, _id))
-        parts.append('<div class="sec" id="%s"><h2>%s <a class="totop" href="#toc">↑ Top</a></h2></div>' % (_id, esc(t)))
+        if fold:
+            parts.append('<details class="secfold" id="%s"><summary>%s <a class="totop" href="#toc">↑ Top</a></summary>'
+                         % (_id, esc(t)))
+            _foldsec_open = True
+        else:
+            parts.append('<div class="sec" id="%s"><h2>%s <a class="totop" href="#toc">↑ Top</a></h2></div>' % (_id, esc(t)))
     def sub(t):
         parts.append('<div class="sub">%s</div>' % esc(t))
     def note(t):
@@ -23583,7 +23947,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     sql_block_diff("SQL ordered by Executions", "n_calls", "Executions", fmt_int)
 
     # ================= Wait Events (full) =================
-    sec("Wait Events")
+    sec("Wait Events", fold=True)
     _we_all = sorted(set(WE1) | set(WE2),
                      key=lambda k: max(WE1.get(k, {}).get("total_wait_time", 0), WE2.get(k, {}).get("total_wait_time", 0)),
                      reverse=True)
@@ -23603,7 +23967,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     parts.append('</table>')
 
     # ================= SQL Text (union of both periods) =================
-    sec("SQL Text")
+    sec("SQL Text", fold=True)
     if not shown_sql:
         parts.append('<div class="note">no data</div>')
     else:
@@ -23619,7 +23983,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     # pg_settings is a STATE snapshot (not a cumulative counter), so each period is
     # represented by its END snap's value. Only params whose decoded setting differs
     # between period1.end and period2.end are shown.
-    sec("Database Parameters (changed only)")
+    sec("Database Parameters (changed only)", fold=True)
     _pgs1 = win1["db"].get(("end", "pg_settings"), [])
     _pgs2 = win2["db"].get(("end", "pg_settings"), [])
     def _pgmap(rows):
@@ -23673,6 +24037,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         '<li><a href="#%s">%s</a></li>' % (_id, esc(t)) for t, _id in _toc) + '</ul></div>'
     parts.insert(_toc_pos, _toc_html)
 
+    _close_foldsec()
     parts.append('<div class="foot">Generated by vb_tool awr awrdiff &middot; diff report &middot; '
                  'each value = period(end-begin); &Delta; = P2-P1; %%Diff = (P2-P1)/|P1|.</div>')
     parts.append('</body></html>')
@@ -23789,18 +24154,31 @@ VB_BL_COMPARE_PY
 
 # _awr_repl_sample  -- ONE pg_stat_replication sample appended to
 # <root>/repl_<YYYYMMDD>.log, plus ONE pg_replication_slots sample appended
-# to <root>/slot_<YYYYMMDD>.log. Row grammar (both logs):
+# to <root>/slot_<YYYYMMDD>.log, plus ONE OS counters sample appended to
+# <root>/os_<YYYYMMDD>.log (per-minute OS detail for awrrpt; the name keeps
+# "_repl" because deployed crontabs call `awr _repl-sample` -- do not rename).
+# Row grammar (repl/slot logs):
 #   data : ts,<view columns as selected below>
 #   null : ts,null     (view = 0 rows: no standby / no slot)
 #   error: ts,error    (psql failed; sampler keeps running, cron stays quiet)
 # The slot query is independent: its failure never disturbs the stat rows
 # (and vice versa -- each log gets its own data/error/null row per minute).
+# The OS sample is independent too: /proc reads only, no psql, its own log.
+# os_<YYYYMMDD>.log row grammar (renderer = load_os_samples in the python):
+#   cpu,<ts>,user,nice,system,idle,iowait,irq,softirq,steal,procs_running,procs_blocked
+#   pg,<ts>,pgpgin,pgpgout,pswpin,pswpout,pgfault,pgmajfault          (vmstat)
+#   mem,<ts>,MemTotal,MemFree,MemAvailable,Buffers,Cached,Slab,SwapFree (kB)
+#          [,ZoneFree,ZoneMin,ZoneLow,ZoneHigh] (kB; zone watermarks summed
+#          over all zones, appended when /proc/zoneinfo was readable)
+#   dsk,<ts>,<raw /proc/diskstats line>   (spaces, no commas; renderer
+#          re-parses with proc_disk_devs so partition filtering matches)
+#   net,<ts>,<raw /proc/net/dev iface line>  (same; proc_net_ifaces filters)
 # Always returns 0 (cron-friendly; failures are data, not exit codes).
 _awr_repl_sample() {
     local root; root=$(_awr_root)
     umask 077   # per-minute logs carry standby addrs/LSNs: 0600 like snapshots
     mkdir -p "$root" 2>/dev/null || return 0
-    local f ts out sf
+    local f ts out sf of og od8 today
     f="$root/repl_$(date +%Y%m%d).log"
     sf="$root/slot_$(date +%Y%m%d).log"
     # Non-blocking mutual exclusion: if the previous run is still alive (DB
@@ -23833,6 +24211,62 @@ _awr_repl_sample() {
     else
         printf '%s\n' "$out" | sed "s|^|$ts,|" >> "$sf"
     fi
+    # ---- OS counters sample: same minute, same lock, own log; /proc reads
+    # only (no psql) so it cannot hang; a failed read just writes fewer rows.
+    # One awk over five /proc files; dsk/net rows carry the raw line (fields
+    # are space-separated, never contain commas), cpu/pg/mem carry numbers.
+    of="$root/os_$(date +%Y%m%d).log"
+    awk -v ts="$ts" -v pgkb="$(( $(getconf PAGE_SIZE 2>/dev/null || echo 4096) / 1024 ))" '
+        /^cpu /           { if (!cudone) { cu=$2","$3","$4","$5","$6","$7","$8","$9; cudone=1 } }
+        /^procs_running / { pr=$2 }
+        /^procs_blocked / { pb=$2 }
+        /^pgpgin /        { pgi=$2 }
+        /^pgpgout /       { pgo=$2 }
+        /^pswpin /        { psi=$2 }
+        /^pswpout /       { pso=$2 }
+        /^pgfault /       { pf=$2 }
+        /^pgmajfault /    { pmf=$2 }
+        /^MemTotal:/      { mt=$2 }
+        /^MemFree:/       { mfr=$2 }
+        /^MemAvailable:/  { mav=$2 }
+        /^Buffers:/       { buf=$2 }
+        /^Cached:/        { cach=$2 }
+        /^Slab:/          { slab=$2 }
+        /^SwapFree:/      { swf=$2 }
+        # zoneinfo watermarks, summed over all zones (pages -> kB via pgkb);
+        # EOL-anchored so the per-cpu pageset "high:" lines cannot match
+        /^ +pages free +[0-9]+$/ { zf += $3 }
+        /^ +min +[0-9]+$/        { zn++; zmin += $2 }
+        /^ +low +[0-9]+$/        { zlow += $2 }
+        /^ +high +[0-9]+$/       { zhigh += $2 }
+        # diskstats line shape: <major> <minor> <name> <14+ counters>, all-numeric
+        # fields; skip ramN/loopN (always idle, never rendered, ~24 junk rows/min)
+        NF>=14 && $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ && $3 !~ /^(ram|loop)[0-9]+$/ { print "dsk," ts "," $0 }
+        # net/dev iface line shape: <iface>: <16 counters> (header lines have no colon-terminated $1)
+        $1 ~ /:$/ && NF>=17 { print "net," ts "," $0 }
+        END {
+            if (cu) print "cpu," ts "," cu "," pr+0 "," pb+0
+            if (pgi != "") print "pg," ts "," pgi+0 "," pgo+0 "," psi+0 "," pso+0 "," pf+0 "," pmf+0
+            if (mt != "") {
+                s = "mem," ts "," mt+0 "," mfr+0 "," mav+0 "," buf+0 "," cach+0 "," slab+0 "," swf+0
+                if (zn) s = s "," zf*pgkb "," zmin*pgkb "," zlow*pgkb "," zhigh*pgkb
+                print s
+            }
+        }
+    ' /proc/stat /proc/vmstat /proc/meminfo /proc/zoneinfo /proc/diskstats /proc/net/dev >> "$of" 2>/dev/null
+    # ---- gzip past days' os logs (~10x smaller on these repetitive lines;
+    # the renderer reads both os_*.log and os_*.log.gz). Today's file stays
+    # plain so the per-minute append keeps working. ----
+    today=$(date +%Y%m%d)
+    for og in "$root"/os_*.log; do
+        [ -f "$og" ] || continue
+        od8=$(basename "$og" .log); od8="${od8#os_}"
+        case "$od8" in
+            [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
+            *) continue;;
+        esac
+        [ "$od8" -lt "$today" ] && gzip -f "$og" 2>/dev/null
+    done
     return 0
 }
 
@@ -24015,7 +24449,7 @@ _awr_enable() {
     local entry="$minspec * * * * /bin/bash -lc 'PGPORT=$port $self awr create >/dev/null 2>&1'  $marker"
     local rentry="* * * * * /bin/bash -lc 'PGPORT=$port $self awr _repl-sample >/dev/null 2>&1'  $rmarker"
     ( crontab -l 2>/dev/null | grep -vF "$rmarker" | grep -vF "$marker"; echo "$rentry"; echo "$entry" ) | crontab -
-    echo "awr enable: port $port, capturing a snapshot every ${mins}min (see 'awr config interval') + replication sample every 1min via crontab"
+    echo "awr enable: port $port, capturing a snapshot every ${mins}min (see 'awr config interval') + replication/slot/OS sample every 1min via crontab"
     echo "  $entry"
     echo "  $rentry"
     echo "  (run 'awr disable' to stop both; other ports keep their own entries)"
@@ -24238,7 +24672,7 @@ EOF
 }
 
 # _awr_purge_core <until_ep>  -- delete everything older than <until_ep> (epoch):
-# snaps (by meta ts), repl_/slot_ logs (by whole day), html reports (by mtime).
+# snaps (by meta ts), repl_/slot_/os_ logs (by whole day), html reports (by mtime).
 # Echoes "S R H" (the three counts) on stdout; WARNs on unparseable items go to
 # stderr. Shared by 'awr delete until' and the retention auto-purge so both
 # paths always delete exactly the same set of things.
@@ -24289,11 +24723,12 @@ PY
     elif [ -d "$root" ]; then
         echo "  [WARN] python3 not found -- snap expiry scan skipped" >&2
     fi
-    # repl_/slot_<YYYYMMDD>.log: delete only when the WHOLE day is before until
+    # repl_/slot_/os_<YYYYMMDD>.log[.gz]: delete only when the WHOLE day is before until
     local rcount=0 rf rd d_ep
-    for rf in "$root"/repl_*.log "$root"/slot_*.log; do
+    for rf in "$root"/repl_*.log "$root"/slot_*.log "$root"/os_*.log "$root"/os_*.log.gz; do
         [ -f "$rf" ] || continue
-        rd=$(basename "$rf" .log); rd="${rd#repl_}"; rd="${rd#slot_}"
+        rd=$(basename "$rf"); rd="${rd%.gz}"; rd="${rd%.log}"
+        rd="${rd#repl_}"; rd="${rd#slot_}"; rd="${rd#os_}"
         case "$rd" in
             [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9])
                 d_ep=$(date -d "${rd:0:4}-${rd:4:2}-${rd:6:2}" +%s 2>/dev/null)
@@ -24328,7 +24763,7 @@ _awr_delete_until() {
     local counts
     counts=$(_awr_purge_core "$until_ep")
     set -- $counts
-    echo "deleted $1 snap(s) (by ts), $2 repl/slot log(s) (by day), and $3 html report(s) (by mtime) older than $until_time"
+    echo "deleted $1 snap(s) (by ts), $2 sampler log(s) (by day), and $3 html report(s) (by mtime) older than $until_time"
     return 0
 }
 
@@ -24358,7 +24793,7 @@ _awr_purge_expired() {
     counts=$(_awr_purge_core "$cutoff_ep" 2>/dev/null)
     set -- $counts
     [ "$1" -eq 0 ] && [ "$2" -eq 0 ] && [ "$3" -eq 0 ] && return 0
-    echo "awr auto-purge (retention ${days}d): removed $1 snap(s), $2 repl/slot log(s), $3 html report(s) older than $(date -d "@$cutoff_ep" '+%F %T' 2>/dev/null)"
+    echo "awr auto-purge (retention ${days}d): removed $1 snap(s), $2 sampler log(s), $3 html report(s) older than $(date -d "@$cutoff_ep" '+%F %T' 2>/dev/null)"
     return 0
 }
 
