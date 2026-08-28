@@ -21017,12 +21017,13 @@ def load_os_samples(sdir, begin_ts, end_ts):
     Same pre-filter-by-day / re-filter-by-row discipline as load_repl_samples().
     Returns {"cpu":[(ts,[10 floats])], "pg":[(ts,[6 floats])],
              "mem":[(ts,[7 or 11 floats])], "dsk":[(ts,raw)], "net":[(ts,raw)],
+             "tcp":[(ts,[6 floats])],
              "files":[names]}. Malformed rows (wrong comma count, non-numeric
     payload) are silently dropped, like the repl/slot loaders. mem rows carry
     11 values when the sampler could read /proc/zoneinfo: 7 meminfo kB gauges
     + zone watermarks (free/min/low/high kB, summed over all zones); older
     7-value logs without them stay valid."""
-    out = {"cpu": [], "pg": [], "mem": [], "dsk": [], "net": [], "files": []}
+    out = {"cpu": [], "pg": [], "mem": [], "dsk": [], "net": [], "tcp": [], "files": []}
     if not sdir or not os.path.isdir(sdir):
         return out
     lo = _ts_shift(begin_ts, -65)
@@ -21054,7 +21055,7 @@ def load_os_samples(sdir, begin_ts, end_ts):
                 if payload:
                     out[typ].append((ts, payload))
                 continue
-            want = {"cpu": 12, "pg": 8}.get(typ)
+            want = {"cpu": 12, "pg": 8, "tcp": 7}.get(typ)   # tcp: 7 fields/6 commas
             if typ == "mem":
                 # 7-value row: 9 fields/8 commas; 11-value (+ zone wm): 13/12
                 if ln.count(",") not in (8, 12): continue
@@ -21063,7 +21064,7 @@ def load_os_samples(sdir, begin_ts, end_ts):
                 out[typ].append((ts, [float(x) for x in payload.split(",")]))
             except Exception:
                 continue
-    for k in ("cpu", "pg", "mem", "dsk", "net"):
+    for k in ("cpu", "pg", "mem", "dsk", "net", "tcp"):
         out[k].sort(key=lambda r: r[0])
     return out
 
@@ -21186,6 +21187,24 @@ def _osmin_note(samples):
         return '<div class="note">no per-minute OS samples in this period (sampler runs while awr is enabled)</div>'
     return '<div class="note">no usable per-minute samples in this period</div>'
 
+def os_minute_tcp_series(samples):
+    """[(ts, {opens_s, retrans_s, retrans_pct}, currestab)] from consecutive
+    tcp samples. Rates are per-second minute averages; Retrans% =
+    dRetransSegs/dOutSegs*100 (None when no outbound segments in the minute);
+    CurrEstab is an instantaneous gauge from the LATER sample."""
+    rows = samples.get("tcp", [])
+    out = []
+    for (ta, a), (tb, b) in zip(rows, rows[1:]):
+        ea, eb = _ts_epoch(ta), _ts_epoch(tb)
+        if not ea or not eb or eb <= ea: continue
+        dt = eb - ea
+        dop = max(0, (b[0] + b[1]) - (a[0] + a[1]))
+        drs = max(0, b[4] - a[4])    # RetransSegs
+        dosg = max(0, b[3] - a[3])   # OutSegs
+        out.append((tb, {"opens_s": dop / dt, "retrans_s": drs / dt,
+                         "retrans_pct": (drs * 100.0 / dosg) if dosg > 0 else None}, b[2]))
+    return out
+
 def osmin_cpu_table(samples, begin_ts):
     series = [r for r in os_minute_cpu_series(samples)
               if not begin_ts or r[0] >= str(begin_ts)]
@@ -21234,18 +21253,33 @@ def osmin_net_table(samples, begin_ts):
     rows = sorted((ts, ifc, d, dt)
                   for ifc, lst in per.items() for ts, d, dt in lst
                   if not begin_ts or ts >= str(begin_ts))
-    if not rows:
+    tser = [r for r in os_minute_tcp_series(samples)
+            if not begin_ts or r[0] >= str(begin_ts)]
+    if not rows and not tser:
         return _osmin_note(samples)
-    h = ['<table class="t"><tr><th>Time</th><th>Interface</th><th>RX B/s</th><th>TX B/s</th>'
-         '<th>RX pkt/s</th><th>TX pkt/s</th><th>rx/tx errs (&Delta;)</th><th>rx/tx drop (&Delta;)</th></tr>']
-    for ts, ifc, d, dt in rows:
-        h.append('<tr><td>%s</td><td>%s</td><td class="n">%s</td><td class="n">%s</td>'
-                 '<td class="n">%.1f</td><td class="n">%.1f</td>'
-                 '<td class="n">%.0f / %.0f</td><td class="n">%.0f / %.0f</td></tr>'
-                 % (esc(ts), esc(ifc), fmt_bytes(d["rx_bytes"] / dt), fmt_bytes(d["tx_bytes"] / dt),
-                    d["rx_packets"] / dt, d["tx_packets"] / dt,
-                    d["rx_errs"], d["tx_errs"], d["rx_drop"], d["tx_drop"]))
-    h.append('</table>')
+    h = []
+    if rows:
+        h.append('<table class="t"><tr><th>Time</th><th>Interface</th><th>RX B/s</th><th>TX B/s</th>'
+                 '<th>RX pkt/s</th><th>TX pkt/s</th><th>rx/tx errs (&Delta;)</th><th>rx/tx drop (&Delta;)</th></tr>')
+        for ts, ifc, d, dt in rows:
+            h.append('<tr><td>%s</td><td>%s</td><td class="n">%s</td><td class="n">%s</td>'
+                     '<td class="n">%.1f</td><td class="n">%.1f</td>'
+                     '<td class="n">%.0f / %.0f</td><td class="n">%.0f / %.0f</td></tr>'
+                     % (esc(ts), esc(ifc), fmt_bytes(d["rx_bytes"] / dt), fmt_bytes(d["tx_bytes"] / dt),
+                        d["rx_packets"] / dt, d["tx_packets"] / dt,
+                        d["rx_errs"], d["tx_errs"], d["rx_drop"], d["tx_drop"]))
+        h.append('</table>')
+    if tser:
+        # system-wide TCP counters (L4, not attributable per interface)
+        h.append('<div class="sub">TCP (system-wide)</div>')
+        h.append('<table class="t"><tr><th>Time</th><th>Opens/s</th><th>Retrans/s</th>'
+                 '<th>Retrans %</th><th>CurrEstab</th></tr>')
+        for ts, d, ce in tser:
+            h.append('<tr><td>%s</td><td class="n">%.1f</td><td class="n">%.2f</td>'
+                     '<td class="n">%s</td><td class="n">%.0f</td></tr>'
+                     % (esc(ts), d["opens_s"], d["retrans_s"],
+                        ("%.3f" % d["retrans_pct"]) if d["retrans_pct"] is not None else "-", ce))
+        h.append('</table>')
     return _fold("Per-minute detail", "".join(h))
 
 def osmin_mem_table(samples, begin_ts):
@@ -21468,8 +21502,9 @@ def numa_html_table(topology, stats_delta_factory):
     return "".join(parts)
 
 def proc_stat_extras(txt):
-    """context switches (ctxt), total interrupts (intr first col), procs_running."""
-    ctxt = 0.0; intr = 0.0; runq = 0
+    """context switches (ctxt), total interrupts (intr first col), procs_running,
+    cumulative forks (processes)."""
+    ctxt = 0.0; intr = 0.0; runq = 0; forks = 0.0
     for line in (txt or "").splitlines():
         f = line.split()
         if len(f) < 2:
@@ -21483,7 +21518,10 @@ def proc_stat_extras(txt):
         elif f[0] == "procs_running":
             try: runq = int(float(f[1]))
             except Exception: pass
-    return {"ctxt": ctxt, "intr": intr, "runq": runq}
+        elif f[0] == "processes":
+            try: forks = float(f[1])
+            except Exception: pass
+    return {"ctxt": ctxt, "intr": intr, "runq": runq, "processes": forks}
 
 def proc_net_ifaces(txt):
     """Per-interface counters from /proc/net/dev: rx/tx bytes/packets/errs/drop/fifo/frame/compressed/multicast/colls/carrier."""
@@ -21824,6 +21862,29 @@ def proc_softirqs(txt):
             pass
     return out
 
+def _tcp_window_stats(bsnmp, esnmp, dur):
+    """Whole-window TCP rates from the two snaps' /proc/net/snmp copies.
+    None values when either side lacks the Tcp counters (old snaps)."""
+    def _g(txt):
+        try:
+            return _netstat_merged([("snmp", txt)])["Tcp"]
+        except Exception:
+            return {}
+    b, e = _g(bsnmp), _g(esnmp)
+    if not b or not e:
+        return {"opens_per_sec": None, "retrans_per_sec": None,
+                "retrans_pct": None, "currestab_begin": None, "currestab_end": None}
+    dop = max(0, (e.get("ActiveOpens", 0) + e.get("PassiveOpens", 0))
+              - (b.get("ActiveOpens", 0) + b.get("PassiveOpens", 0)))
+    drs = max(0, e.get("RetransSegs", 0) - b.get("RetransSegs", 0))
+    dosg = max(0, e.get("OutSegs", 0) - b.get("OutSegs", 0))
+    return {"opens_per_sec": dop / dur if dur else 0.0,
+            "retrans_per_sec": drs / dur if dur else 0.0,
+            "retrans_pct": (drs * 100.0 / dosg) if dosg > 0 else (0.0 if drs == 0 else None),
+            "currestab_begin": b.get("CurrEstab"),
+            "currestab_end": e.get("CurrEstab")}
+
+
 def os_window_deltas(win):
     dur = to_num(win.get("meta", {}).get("duration"))
     if not dur or dur <= 0:
@@ -21924,6 +21985,11 @@ def os_window_deltas(win):
                 "idle": cpupct("idle")},
         "ctxt_per_sec": max(0, ex["ctxt"] - bx["ctxt"]) / dur,
         "intr_per_sec": max(0, ex["intr"] - bx["intr"]) / dur,
+        "forks_per_sec": max(0, ex["processes"] - bx["processes"]) / dur
+            if (bx.get("processes") or ex.get("processes")) else None,
+        "tcp": _tcp_window_stats(
+            win["os"].get(("begin", "net_snmp"), ""),
+            win["os"].get(("end", "net_snmp"), ""), dur),
         "runq_begin": bx["runq"],
         "runq_end": ex["runq"],
         "load_begin": bld,
@@ -22750,11 +22816,26 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         parts.append(numa_html_table(_ntop,
                      lambda nid, key: _numa_stat_delta(_nbeg, _nend, nid, key)))
     sub("System Activity")
-    parts.append('<table class="t"><tr><th class="n">Context Switches per Sec</th>'
-                 '<th class="n">Interrupts per Sec</th></tr>')
-    parts.append('<tr><td class="n">%.0f</td><td class="n">%.0f</td></tr>'
-                 % (osd.get("ctxt_per_sec", 0), osd.get("intr_per_sec", 0)))
-    parts.append('</table>')
+    _th = ['<th class="n">Context Switches per Sec</th>', '<th class="n">Interrupts per Sec</th>']
+    _td = ['<td class="n">%.0f</td>' % osd.get("ctxt_per_sec", 0),
+           '<td class="n">%.0f</td>' % osd.get("intr_per_sec", 0)]
+    if osd.get("forks_per_sec") is not None:
+        _th.append('<th class="n">Forks per Sec</th>')
+        _td.append('<td class="n">%.1f</td>' % osd["forks_per_sec"])
+    _t = osd.get("tcp") or {}
+    if _t.get("opens_per_sec") is not None:
+        _th.append('<th class="n">TCP Opens per Sec</th>')
+        _td.append('<td class="n">%.1f</td>' % _t["opens_per_sec"])
+        _th.append('<th class="n">TCP Retrans per Sec</th>')
+        _td.append('<td class="n">%.2f</td>' % _t["retrans_per_sec"])
+        _th.append('<th class="n">TCP Retrans %</th>')
+        _td.append('<td class="n">%s</td>' % (("%.3f" % _t["retrans_pct"])
+                                              if _t["retrans_pct"] is not None else "-"))
+        if _t.get("currestab_begin") is not None:
+            _th.append('<th class="n">TCP CurrEstab (Begin/End)</th>')
+            _td.append('<td class="n">%d / %d</td>' % (_t["currestab_begin"], _t["currestab_end"]))
+    parts.append('<table class="t"><tr>%s</tr><tr>%s</tr></table>'
+                 % ("".join(_th), "".join(_td)))
     sub("OS Memory Usage")
     _bm = parse_meminfo(win["os"].get(("begin", "meminfo"), ""))
     _em = parse_meminfo(win["os"].get(("end", "meminfo"), ""))
@@ -23564,15 +23645,31 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             parts.append('<tr><td colspan="10" class="note">no data</td></tr>')
         parts.append('</table>')
     sub("System Activity (per second)")
-    parts.append('<table class="t"><tr><th></th><th class="n">Context Switches</th>'
-                 '<th class="n">Interrupts</th></tr>')
-    parts.append('<tr><td class="k">P1</td><td class="n">%.0f</td><td class="n">%.0f</td></tr>'
-                 % (osd1.get("ctxt_per_sec", 0), osd1.get("intr_per_sec", 0)))
-    parts.append('<tr><td class="k">P2</td><td class="n">%.0f</td><td class="n">%.0f</td></tr>'
-                 % (osd2.get("ctxt_per_sec", 0), osd2.get("intr_per_sec", 0)))
-    parts.append('<tr><td class="k">&Delta;</td><td class="n">%+.0f</td><td class="n">%+.0f</td></tr>'
-                 % (osd2.get("ctxt_per_sec", 0) - osd1.get("ctxt_per_sec", 0),
-                    osd2.get("intr_per_sec", 0) - osd1.get("intr_per_sec", 0)))
+    _t1, _t2 = osd1.get("tcp") or {}, osd2.get("tcp") or {}
+    _has_f = osd1.get("forks_per_sec") is not None or osd2.get("forks_per_sec") is not None
+    _has_t = _t1.get("opens_per_sec") is not None and _t2.get("opens_per_sec") is not None
+    _hdr = '<th class="n">Context Switches</th><th class="n">Interrupts</th>'
+    if _has_f: _hdr += '<th class="n">Forks</th>'
+    if _has_t: _hdr += '<th class="n">TCP Opens</th><th class="n">TCP Retrans</th>'
+    _c1 = [(osd1.get("ctxt_per_sec", 0) or 0), (osd1.get("intr_per_sec", 0) or 0)]
+    _c2 = [(osd2.get("ctxt_per_sec", 0) or 0), (osd2.get("intr_per_sec", 0) or 0)]
+    if _has_f:
+        _c1.append(osd1.get("forks_per_sec") or 0.0)
+        _c2.append(osd2.get("forks_per_sec") or 0.0)
+    if _has_t:
+        _c1 += [(_t1.get("opens_per_sec") or 0.0), (_t1.get("retrans_per_sec") or 0.0)]
+        _c2 += [(_t2.get("opens_per_sec") or 0.0), (_t2.get("retrans_per_sec") or 0.0)]
+    def _row(label, vals, plus):
+        _f1, _f2 = ("%+.0f", "%.1f") if plus else ("%.0f", "%.1f")
+        # first two cols integer, extras one/two decimals
+        cells = ['<td class="n">%s</td>' % (_f1 % vals[0]), '<td class="n">%s</td>' % (_f1 % vals[1])]
+        for i, v in enumerate(vals[2:]):
+            cells.append('<td class="n">%s</td>' % ((_f2 if i < 1 else "%.2f" if not plus else "%+.2f") % v))
+        return '<tr><td class="k">%s</td>%s</tr>' % (label, "".join(cells))
+    parts.append('<table class="t"><tr><th></th>%s</tr>' % _hdr)
+    parts.append(_row("P1", _c1, False))
+    parts.append(_row("P2", _c2, False))
+    parts.append(_row("&Delta;", [b - a for a, b in zip(_c1, _c2)], True))
     parts.append('</table>')
     sub("OS Memory (period-end snapshot, MB)")
     _m1 = parse_meminfo(win1["os"].get(("end", "meminfo"), ""))
@@ -24173,6 +24270,7 @@ VB_BL_COMPARE_PY
 #   dsk,<ts>,<raw /proc/diskstats line>   (spaces, no commas; renderer
 #          re-parses with proc_disk_devs so partition filtering matches)
 #   net,<ts>,<raw /proc/net/dev iface line>  (same; proc_net_ifaces filters)
+#   tcp,<ts>,ActiveOpens,PassiveOpens,CurrEstab,OutSegs,RetransSegs  (snmp)
 # Always returns 0 (cron-friendly; failures are data, not exit codes).
 _awr_repl_sample() {
     local root; root=$(_awr_root)
@@ -24213,7 +24311,7 @@ _awr_repl_sample() {
     fi
     # ---- OS counters sample: same minute, same lock, own log; /proc reads
     # only (no psql) so it cannot hang; a failed read just writes fewer rows.
-    # One awk over five /proc files; dsk/net rows carry the raw line (fields
+    # One awk over seven /proc files; dsk/net rows carry the raw line (fields
     # are space-separated, never contain commas), cpu/pg/mem carry numbers.
     of="$root/os_$(date +%Y%m%d).log"
     awk -v ts="$ts" -v pgkb="$(( $(getconf PAGE_SIZE 2>/dev/null || echo 4096) / 1024 ))" '
@@ -24239,6 +24337,14 @@ _awr_repl_sample() {
         /^ +min +[0-9]+$/        { zn++; zmin += $2 }
         /^ +low +[0-9]+$/        { zlow += $2 }
         /^ +high +[0-9]+$/       { zhigh += $2 }
+        # snmp proto lines (header AND values) are consumed here with `next`
+        # so the net/dev rule below can never mistake "Ip:"/"Tcp:" lines
+        # (colon-terminated $1, NF>=17) for iface rows; the Tcp VALUES line
+        # ($2 numeric) yields the tcp row counters
+        /^(Ip|Icmp|IcmpMsg|Tcp|Udp|UdpLite): / {
+            if ($1 == "Tcp:" && $2 ~ /^[0-9]+$/) { taop=$6; tpop=$7; tces=$10; tosg=$12; trsg=$13; tcpok=1 }
+            next
+        }
         # diskstats line shape: <major> <minor> <name> <14+ counters>, all-numeric
         # fields; skip ramN/loopN (always idle, never rendered, ~24 junk rows/min)
         NF>=14 && $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ && $3 !~ /^(ram|loop)[0-9]+$/ { print "dsk," ts "," $0 }
@@ -24252,8 +24358,9 @@ _awr_repl_sample() {
                 if (zn) s = s "," zf*pgkb "," zmin*pgkb "," zlow*pgkb "," zhigh*pgkb
                 print s
             }
+            if (tcpok) print "tcp," ts "," taop+0 "," tpop+0 "," tces+0 "," tosg+0 "," trsg+0
         }
-    ' /proc/stat /proc/vmstat /proc/meminfo /proc/zoneinfo /proc/diskstats /proc/net/dev >> "$of" 2>/dev/null
+    ' /proc/stat /proc/vmstat /proc/meminfo /proc/zoneinfo /proc/diskstats /proc/net/dev /proc/net/snmp >> "$of" 2>/dev/null
     # ---- gzip past days' os logs (~10x smaller on these repetitive lines;
     # the renderer reads both os_*.log and os_*.log.gz). Today's file stays
     # plain so the per-minute append keeps working. ----
