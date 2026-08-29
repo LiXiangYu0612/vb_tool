@@ -23022,7 +23022,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     # ================= Cache Hit Ratio =================
     sec("Cache Hit Ratio")
     parts.append('<table class="t"><tr><th>Database</th>'
-                 '<th class="n">Begin Hit% *</th><th class="n">End Hit% *</th>'
+                 '<th class="n">Begin Hit%</th><th class="n">End Hit%</th>'
                  '<th class="n">Window Hit%</th></tr>')
     _cr_dns = set()
     for _ph in ("begin", "end"):
@@ -23051,8 +23051,6 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         parts.append('<tr><td>%s</td><td class="n">%.2f%%</td><td class="n">%.2f%%</td>'
                      '<td class="n">%s</td></tr>' % (esc(_dn), _rb, _re, _rws))
     parts.append('</table>')
-    parts.append('<p class="note">* Begin/End are ratios since the last stats reset; '
-                 "Window Hit% is computed from this window's own delta.</p>")
 
     # ================= Database Memory (vb_tool mem style) =================
     sec("Database Memory")
