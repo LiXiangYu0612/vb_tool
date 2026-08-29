@@ -21213,6 +21213,16 @@ def busy_cell_cls(v):
         return " b"
     return ""
 
+def lat_cell_cls(v):
+    # disk await cell highlighting: bold >10ms, red+bold >20ms; None (no I/O) plain
+    if v is None:
+        return ""
+    if v > 20.0:
+        return " b bad"
+    if v > 10.0:
+        return " b"
+    return ""
+
 def osmin_cpu_table(samples, begin_ts):
     series = [r for r in os_minute_cpu_series(samples)
               if not begin_ts or r[0] >= str(begin_ts)]
@@ -21249,9 +21259,9 @@ def osmin_disk_table(samples, begin_ts):
             cells += ('<td class="n">%s</td><td class="n">%s</td>' % (
                 ("%.1f" % rt["discard_iops"]) if rt["discard_iops"] is not None else "-",
                 ("%.1f" % rt["flush_iops"]) if rt["flush_iops"] is not None else "-"))
-        cells += '<td class="n">%s</td><td class="n">%s</td>' % (
-            ("%.1f" % ra) if ra is not None else "-",
-            ("%.1f" % wa) if wa is not None else "-")
+        cells += '<td class="n%s">%s</td><td class="n%s">%s</td>' % (
+            lat_cell_cls(ra), ("%.1f" % ra) if ra is not None else "-",
+            lat_cell_cls(wa), ("%.1f" % wa) if wa is not None else "-")
         h.append('<tr>' + cells + '</tr>')
     h.append('</table>')
     return _fold("Per-minute detail", "".join(h))
@@ -22895,8 +22905,10 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         _ncols = 1 + (7 if _dmeta else 0) + 4 + (3 if osd.get("discard_supported") else 0) + 2
         parts.append('<tr><td colspan="%d" class="note">no active disk devices</td></tr>' % _ncols)
     for d in disks:
-        ra = "-" if d.get("read_iops", 0) <= 0 else "%.2f" % d.get("r_await_ms", 0.0)
-        wa = "-" if d.get("write_iops", 0) <= 0 else "%.2f" % d.get("w_await_ms", 0.0)
+        _rav = d.get("r_await_ms", 0.0) if d.get("read_iops", 0) > 0 else None
+        _wav = d.get("w_await_ms", 0.0) if d.get("write_iops", 0) > 0 else None
+        ra = "-" if _rav is None else "%.2f" % _rav
+        wa = "-" if _wav is None else "%.2f" % _wav
         row = '<tr><td>%s</td>' % esc(d["name"])
         if _dmeta:
             row += ''.join('<td class="n">%s</td>' % esc(c) for c in disk_meta_cells(d["name"], _dmeta))
@@ -22907,7 +22919,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             row += '<td class="n">%.1f</td><td class="n">%s</td><td class="n">%.1f</td>' % (
                    d.get("discard_iops") or 0.0, fmt_bytes((d.get("discard_bytes") or 0) / ddur),
                    d.get("flush_iops") or 0.0)
-        row += '<td class="n">%s</td><td class="n">%s</td></tr>' % (ra, wa)
+        row += '<td class="n%s">%s</td><td class="n%s">%s</td></tr>' % (lat_cell_cls(_rav), ra, lat_cell_cls(_wav), wa)
         parts.append(row)
     parts.append('</table>')
     if os_smp is not None:
