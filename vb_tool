@@ -1,13 +1,13 @@
 #!/bin/bash
 #--------------------------------------------------------------------------------
 #-- File name:   vb_tool
-#-- Version  ：  v2.0.6
-#-- Commit at：  2026-08-26 15:30:00
+#-- Version  ：  v2.0.8
+#-- Commit at：  2026-08-29 15:05:00
 #-- Purpose:     Vastbase Script Tool
 #-- Author:      MVS & Second-line Team 
 #--------------------------------------------------------------------------------
 set -o pipefail
-export VB_TOOL_VERSION="v2.0.7"
+export VB_TOOL_VERSION="v2.0.8"
 show_help() {
     echo "Vastbase Script Tool (vb_tool)"
     echo ""
@@ -20376,6 +20376,7 @@ _awr_collect() {
     else echo "  [WARN] /proc/net/dev not readable" >&2; fi
     if [ -r /proc/net/snmp ]; then cp /proc/net/snmp "$osd/net_snmp" 2>/dev/null; fi
     if [ -r /proc/net/netstat ]; then cp /proc/net/netstat "$osd/net_netstat" 2>/dev/null; fi
+    if [ -r /proc/net/softnet_stat ]; then cp /proc/net/softnet_stat "$osd/softnet_stat" 2>/dev/null; fi
     # ---- NUMA topology + numastat (per-node cumulative counters; renderer computes end-begin) ----
     # File format (one stanza per node, blank-line separated):
     #   node <id>
@@ -20520,9 +20521,13 @@ _awr_write_meta() {
     # postmaster start time: stable per DB uptime, changes on restart. Used by
     # awrrpt to refuse a diff that spans a restart (cumulative counters reset).
     m_start=$(PGCONNECT_TIMEOUT=$_ct PGOPTIONS="$_st" psql -d postgres -tAq -c "select pg_postmaster_start_time();" 2>/dev/null | tr -d '"\r\n')
+    # db role: primary vs physical standby (awr supports snapshotting a standby;
+    # recovery-mode flag is the only reliable local discriminator)
+    m_role=$(PGCONNECT_TIMEOUT=$_ct PGOPTIONS="$_st" psql -d postgres -tAq -c "select case when pg_is_in_recovery() then 'physical standby' else 'primary' end;" 2>/dev/null | head -1 | tr -d '"\r\n')
     [ -z "$m_host" ]  && m_host="?"
     [ -z "$m_dbver" ] && m_dbver="unavailable"
     [ -z "$m_dbname" ] && m_dbname="?"
+    [ -z "$m_role" ]  && m_role="?"
     python3 -c "
 import json, sys, os
 def _int(v):
@@ -20537,9 +20542,10 @@ print(json.dumps({
   'db_version': sys.argv[6],
   'db_start_time': sys.argv[7],
   'vb_tool_version': sys.argv[8],
+  'db_role': sys.argv[9],
   'port': _int(os.environ.get('PGPORT') or 5432),
 }, indent=2, ensure_ascii=False))
-" "$sid" "$ts" "$ts_ep" "$m_host" "$m_dbname" "$m_dbver" "$m_start" "${VB_TOOL_VERSION:-unknown}" > "$dir/meta.json"
+" "$sid" "$ts" "$ts_ep" "$m_host" "$m_dbname" "$m_dbver" "$m_start" "${VB_TOOL_VERSION:-unknown}" "$m_role" > "$dir/meta.json"
 }
 
 # _awr_render <args...> -- write the python renderer to a temp file and run it.
@@ -20762,7 +20768,7 @@ def load_window(d):
         except Exception:
             w["meta"] = {}
     for phase in ("begin", "end"):
-        for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi"):
+        for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi", "softnet_stat"):
             p = os.path.join(d, "os", phase, f)
             w["os"][(phase, f)] = _read_os_text(p) if os.path.isfile(p) else ""
         for t in ("statement", "wait_events", "instance_time", "database", "pagewriter",
@@ -20782,7 +20788,7 @@ def load_snap(d):
             s["meta"] = json.load(open(mp))
         except Exception:
             s["meta"] = {}
-    for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi"):
+    for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi", "softnet_stat"):
         p = os.path.join(d, "os", f)
         s["os"][f] = _read_os_text(p) if os.path.isfile(p) else ""
     for t in ("statement", "wait_events", "instance_time", "database", "pagewriter",
@@ -20799,7 +20805,7 @@ def build_window_from_snaps(begin_dir, end_dir):
     b = load_snap(begin_dir)
     e = load_snap(end_dir)
     win = {"meta": {}, "os": {}, "db": {}}
-    for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi"):
+    for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi", "softnet_stat"):
         win["os"][("begin", f)] = b["os"].get(f, "")
         win["os"][("end", f)] = e["os"].get(f, "")
     for t in ("statement", "wait_events", "instance_time", "database", "pagewriter",
@@ -20814,12 +20820,16 @@ def build_window_from_snaps(begin_dir, end_dir):
     begin_ep = to_num(bm.get("ts_epoch"))
     end_ep = to_num(em.get("ts_epoch"))
     duration = int(end_ep - begin_ep) if (begin_ep and end_ep and end_ep >= begin_ep) else 0
+    _r1, _r2 = bm.get("db_role") or "", em.get("db_role") or ""
     win["meta"] = {
         "name": "awrrpt_%s_%s" % (bx, ex),
         "hostname": em.get("hostname", "?"),
         "db_name": em.get("db_name", "?"),
         "db_version": em.get("db_version", "?"),
         "vb_tool_version": em.get("vb_tool_version", "?"),
+        # primary/physical standby; "a -> b" when the window spans a role
+        # change (promote/failover) -- old snaps without the field give "?"
+        "db_role": ("%s -> %s" % (_r1, _r2)) if (_r1 and _r2 and _r1 != _r2) else (_r2 or _r1 or "?"),
         "begin_ts": bm.get("ts", ""),
         "end_ts": em.get("ts", ""),
         "duration": duration,
@@ -21017,13 +21027,13 @@ def load_os_samples(sdir, begin_ts, end_ts):
     Same pre-filter-by-day / re-filter-by-row discipline as load_repl_samples().
     Returns {"cpu":[(ts,[10 floats])], "pg":[(ts,[6 floats])],
              "mem":[(ts,[7 or 11 floats])], "dsk":[(ts,raw)], "net":[(ts,raw)],
-             "tcp":[(ts,[6 floats])],
+             "tcp":[(ts,[6 floats])], "tcpext":[(ts,[4 floats])],
              "files":[names]}. Malformed rows (wrong comma count, non-numeric
     payload) are silently dropped, like the repl/slot loaders. mem rows carry
     11 values when the sampler could read /proc/zoneinfo: 7 meminfo kB gauges
     + zone watermarks (free/min/low/high kB, summed over all zones); older
     7-value logs without them stay valid."""
-    out = {"cpu": [], "pg": [], "mem": [], "dsk": [], "net": [], "tcp": [], "files": []}
+    out = {"cpu": [], "pg": [], "mem": [], "dsk": [], "net": [], "tcp": [], "tcpext": [], "files": []}
     if not sdir or not os.path.isdir(sdir):
         return out
     lo = _ts_shift(begin_ts, -65)
@@ -21055,7 +21065,7 @@ def load_os_samples(sdir, begin_ts, end_ts):
                 if payload:
                     out[typ].append((ts, payload))
                 continue
-            want = {"cpu": 12, "pg": 8, "tcp": 7}.get(typ)   # tcp: 7 fields/6 commas
+            want = {"cpu": 12, "pg": 8, "tcp": 7, "tcpext": 6}.get(typ)   # tcp: 7 fields/6 commas; tcpext: ts+4 counters
             if typ == "mem":
                 # 7-value row: 9 fields/8 commas; 11-value (+ zone wm): 13/12
                 if ln.count(",") not in (8, 12): continue
@@ -21064,7 +21074,7 @@ def load_os_samples(sdir, begin_ts, end_ts):
                 out[typ].append((ts, [float(x) for x in payload.split(",")]))
             except Exception:
                 continue
-    for k in ("cpu", "pg", "mem", "dsk", "net", "tcp"):
+    for k in ("cpu", "pg", "mem", "dsk", "net", "tcp", "tcpext"):
         out[k].sort(key=lambda r: r[0])
     return out
 
@@ -21205,6 +21215,21 @@ def os_minute_tcp_series(samples):
                          "retrans_pct": (drs * 100.0 / dosg) if dosg > 0 else None}, b[2]))
     return out
 
+def os_minute_tcpext_series(samples):
+    """[(ts, {listen_drops_s, listen_overflows_s, timeouts_s, syn_retrans_s})]
+    from consecutive tcpext rows (netstat TcpExt listen/congestion counters)."""
+    rows = samples.get("tcpext", [])
+    out = []
+    for (ta, a), (tb, b) in zip(rows, rows[1:]):
+        ea, eb = _ts_epoch(ta), _ts_epoch(tb)
+        if not ea or not eb or eb <= ea: continue
+        dt = eb - ea
+        out.append((tb, {"listen_drops_s": max(0, b[0] - a[0]) / dt,
+                         "listen_overflows_s": max(0, b[1] - a[1]) / dt,
+                         "timeouts_s": max(0, b[2] - a[2]) / dt,
+                         "syn_retrans_s": max(0, b[3] - a[3]) / dt}))
+    return out
+
 def busy_cell_cls(v):
     # busy cell highlighting: bold >50%, red+bold >80%
     if v > 80.0:
@@ -21303,15 +21328,30 @@ def osmin_net_table(samples, begin_ts):
                         d["rx_errs"], d["tx_errs"], d["rx_drop"], d["tx_drop"]))
         h.append('</table>')
     if tser:
-        # system-wide TCP counters (L4, not attributable per interface)
+        # system-wide TCP counters (L4, not attributable per interface);
+        # tcpext columns appear only when the sampler logged them (new snaps)
+        xser = {ts: d for ts, d in os_minute_tcpext_series(samples)
+                if not begin_ts or ts >= str(begin_ts)}
+        _xh = ('<th>ListenDrops/s</th><th>ListenOverflows/s</th>'
+               '<th>Timeouts/s</th><th>SynRetrans/s</th>') if xser else ''
         h.append('<div class="sub">TCP (system-wide)</div>')
         h.append('<table class="t"><tr><th>Time</th><th>Opens/s</th><th>Retrans/s</th>'
-                 '<th>Retrans %</th><th>CurrEstab</th></tr>')
+                 '<th>Retrans %</th><th>CurrEstab</th>' + _xh + '</tr>')
         for ts, d, ce in tser:
+            _rp = d["retrans_pct"]
+            _xc = ''
+            if xser:
+                x = xser.get(ts)
+                _xc = ('<td class="n">%.2f</td><td class="n">%.2f</td>'
+                       '<td class="n">%.2f</td><td class="n">%.2f</td>'
+                       % (x["listen_drops_s"], x["listen_overflows_s"],
+                          x["timeouts_s"], x["syn_retrans_s"])) if x else \
+                      '<td class="n">-</td>' * 4
             h.append('<tr><td>%s</td><td class="n">%.1f</td><td class="n">%.2f</td>'
-                     '<td class="n">%s</td><td class="n">%.0f</td></tr>'
+                     '<td class="n%s">%s</td><td class="n">%.0f</td>%s</tr>'
                      % (esc(ts), d["opens_s"], d["retrans_s"],
-                        ("%.3f" % d["retrans_pct"]) if d["retrans_pct"] is not None else "-", ce))
+                        thr_cell_cls(_rp, 0.1, 1.0) if _rp is not None else "",
+                        ("%.3f" % _rp) if _rp is not None else "-", ce, _xc))
         h.append('</table>')
     return _fold("Per-minute detail", "".join(h))
 
@@ -21717,6 +21757,19 @@ def net_meta_cells(name, meta):
     txr = "-" if (_cell(m, "tx_cur") == "-" and _cell(m, "tx_max") == "-") else "%s/%s" % (_cell(m, "tx_cur"), _cell(m, "tx_max"))
     return [_cell(m, "speed"), _cell(m, "duplex"), queues, rxr, txr]
 
+def speed_mbps(cell):
+    """Speed cell '1000Mb/s'/'10Gb/s' -> Mbps float; None when '-'/'Unknown!'."""
+    c = (cell or "").strip().lower()
+    if not c or c.startswith("-") or c.startswith("unknown"):
+        return None
+    m = re.match(r"([0-9.]+)\s*([kmgt]?)b", c)
+    if not m:
+        return None
+    try:
+        return float(m.group(1)) * {"": 1.0, "k": 1e-3, "m": 1.0, "g": 1e3, "t": 1e6}[m.group(2)]
+    except ValueError:
+        return None
+
 # generic on purpose: "collapse"/"discard" catch resource-pressure counters (TCPBacklogCollapse, InDiscards) — intentional
 NET_ERR_KEYWORDS = ("err", "drop", "retrans", "timeout", "fail", "overflow", "abort",
                     "reset", "rst", "lost", "prune", "collapse", "discard", "noroute")
@@ -21738,7 +21791,24 @@ NET_ERR_CORE = [
     ("TcpExt", "TCPAbortOnMemory", "AbortOnMemory"), ("TcpExt", "TCPAbortOnTimeout", "AbortOnTimeout"),
     ("TcpExt", "TCPBacklogDrop", "BacklogDrop"), ("TcpExt", "TCPRcvCollapsed", "RcvCollapsed"),
     ("TcpExt", "TCPSynRetrans", "SynRetrans"), ("TcpExt", "TCPFastRetrans", "FastRetrans"),
+    ("TcpExt", "TCPOFOQueue", "OFOQueue"), ("TcpExt", "TCPOFODrop", "OFODrop"),
+    ("TcpExt", "TCPWantZeroWindowAdv", "WantZeroWindowAdv"), ("TcpExt", "TCPToZeroWindowAdv", "ToZeroWindowAdv"),
+    ("TcpExt", "TCPSACKReneging", "SACKReneging"), ("TcpExt", "TCPMemoryPressures", "MemoryPressures"),
 ]
+
+def parse_softnet(txt):
+    """/proc/net/softnet_stat summed over CPUs -> (processed, dropped, time_squeeze).
+    Columns are hex without headers; only the first three are portable."""
+    t = d = s = 0
+    for ln in (txt or "").splitlines():
+        f = ln.split()
+        if len(f) < 3:
+            continue
+        try:
+            t += int(f[0], 16); d += int(f[1], 16); s += int(f[2], 16)
+        except ValueError:
+            continue
+    return t, d, s
 
 def parse_netstat_pairs(txt):
     """/proc/net/{snmp,netstat}: paired lines 'X: n1 n2...' + 'X: v1 v2...' ->
@@ -22030,6 +22100,12 @@ def os_window_deltas(win):
         "load_begin": bld,
         "load_end": eld,
         "vm": {k: (max(0.0, evm[k] - bvm[k]) / dur) for k in bvm},
+        "softnet": (lambda bs, es: None if (bs == (0, 0, 0) and es == (0, 0, 0)) else {
+            "packets": max(0, es[0] - bs[0]),
+            "dropped": max(0, es[1] - bs[1]),
+            "squeezed": max(0, es[2] - bs[2])})(
+            parse_softnet(win["os"].get(("begin", "softnet_stat"), "")),
+            parse_softnet(win["os"].get(("end", "softnet_stat"), ""))),
         "disks": disks,
         "ifaces": ifaces,
         "softirqs": softirqs,
@@ -22795,13 +22871,13 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         '<table>'
         '<tr><td class="k">Instance Name</td><td>%s</td><td class="k">Host</td><td>%s</td></tr>'
         '<tr><td class="k">Release</td><td>%s</td><td class="k">vb_tool (snap / report)</td><td>%s / %s</td></tr>'
-        '<tr><td class="k">AWR</td><td>%s</td><td class="k">DB Compatibility</td><td>%s</td></tr>'
+        '<tr><td class="k">DB Role</td><td>%s</td><td class="k">DB Compatibility</td><td>%s</td></tr>'
         '<tr><td class="k">Begin Snap</td><td>%s</td><td class="k">End Snap</td><td>%s</td></tr>'
         '<tr><td class="k">Duration (s)</td><td>%s</td><td class="k">DB Time (s)</td><td>%s</td></tr>'
         '</table></div>' % (
             esc(m.get("db_name") or m.get("name") or "?"), esc(m.get("hostname", "?")),
             esc(m.get("db_version", "?") or "?"), esc(m.get("vb_tool_version", "?")), esc(_GEN_VER),
-            esc(m.get("name", "?")), esc(_compat),
+            esc(m.get("db_role", "?")), esc(_compat),
             esc(m.get("begin_ts", "?")), esc(m.get("end_ts", "?")),
             esc(m.get("duration", "?")), s_of(dbt),
         ))
@@ -22864,8 +22940,9 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         _th.append('<th class="n">TCP Retrans per Sec</th>')
         _td.append('<td class="n">%.2f</td>' % _t["retrans_per_sec"])
         _th.append('<th class="n">TCP Retrans %</th>')
-        _td.append('<td class="n">%s</td>' % (("%.3f" % _t["retrans_pct"])
-                                              if _t["retrans_pct"] is not None else "-"))
+        _td.append('<td class="n%s">%s</td>' % (
+            thr_cell_cls(_t["retrans_pct"], 0.1, 1.0) if _t["retrans_pct"] is not None else "",
+            ("%.3f" % _t["retrans_pct"]) if _t["retrans_pct"] is not None else "-"))
         if _t.get("currestab_begin") is not None:
             _th.append('<th class="n">TCP CurrEstab (Begin/End)</th>')
             _td.append('<td class="n">%d / %d</td>' % (_t["currestab_begin"], _t["currestab_end"]))
@@ -22951,12 +23028,12 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     _nmeta = osd.get("net_meta") or {}
     _nh = '<th>Interface</th><th class="n">RX B per Sec</th><th class="n">TX B per Sec</th><th class="n">RX Pkt per Sec</th><th class="n">TX Pkt per Sec</th><th class="n">rx/tx errs (Δ)</th><th class="n">rx/tx drop (Δ)</th>'
     if _nmeta:
-        _nh += '<th class="n">Speed</th><th class="n">Duplex</th><th class="n">Queues</th><th class="n">RX ring</th><th class="n">TX ring</th>'
+        _nh += '<th class="n">RX Util %</th><th class="n">TX Util %</th><th class="n">Speed</th><th class="n">Duplex</th><th class="n">Queues</th><th class="n">RX ring</th><th class="n">TX ring</th>'
     _nh += '</tr>'
     parts.append('<table class="t"><tr>' + _nh)
     ifaces = osd.get("ifaces", [])
     if not ifaces:
-        parts.append('<tr><td colspan="%d" class="note">no network interfaces</td></tr>' % (7 + (5 if _nmeta else 0)))
+        parts.append('<tr><td colspan="%d" class="note">no network interfaces</td></tr>' % (7 + (7 if _nmeta else 0)))
     for it in ifaces:
         row = '<tr><td>%s</td><td class="n">%.0f</td><td class="n">%.0f</td><td class="n">%.1f</td><td class="n">%.1f</td><td class="n">%.0f / %.0f</td><td class="n">%.0f / %.0f</td>' % (
                          esc(it["name"]), nrate(it, "rx_bytes"), nrate(it, "tx_bytes"),
@@ -22964,12 +23041,32 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                          it.get("rx_errs", 0.0), it.get("tx_errs", 0.0),
                          it.get("rx_drop", 0.0), it.get("tx_drop", 0.0))
         if _nmeta:
+            # utilization vs negotiated link speed; '-' when speed unknown (virtio)
+            _sp = speed_mbps(_cell(_nmeta.get(it["name"]) or {}, "speed"))
+            _ru = "%.1f" % (nrate(it, "rx_bytes") * 8.0 / (_sp * 1e6) * 100.0) if _sp else "-"
+            _tu = "%.1f" % (nrate(it, "tx_bytes") * 8.0 / (_sp * 1e6) * 100.0) if _sp else "-"
+            row += '<td class="n">%s</td><td class="n">%s</td>' % (_ru, _tu)
             row += ''.join('<td class="n">%s</td>' % esc(c) for c in net_meta_cells(it["name"], _nmeta))
         row += '</tr>'
         parts.append(row)
     parts.append('</table>')
     if os_smp is not None:
         parts.append(osmin_net_table(os_smp, m.get("begin_ts", "")))
+
+    _sn = osd.get("softnet")
+    if _sn is not None:
+        sub("Softnet")
+        parts.append('<table class="t"><tr><th>Metric</th><th class="n">Total</th>'
+                     '<th class="n">Per Second</th></tr>'
+                     '<tr><td>packets processed</td><td class="n">%s</td><td class="n">%s</td></tr>'
+                     '<tr><td>dropped (backlog full)</td><td class="n%s">%s</td><td class="n">%s</td></tr>'
+                     '<tr><td>time_squeeze (softirq starved)</td><td class="n%s">%s</td><td class="n">%s</td></tr>'
+                     '</table>'
+                     % (fmt_num(_sn["packets"]), fmt_num(_sn["packets"] / dur_os),
+                        thr_cell_cls(_sn["dropped"], 0, 100), fmt_num(_sn["dropped"]),
+                        fmt_num(_sn["dropped"] / dur_os) if dur_os else "-",
+                        thr_cell_cls(_sn["squeezed"], 0, 1000), fmt_num(_sn["squeezed"]),
+                        fmt_num(_sn["squeezed"] / dur_os) if dur_os else "-"))
 
     if osd.get("netstat_ok"):
         sub("Network Protocol Errors")
@@ -23582,7 +23679,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         '<div class="rhead"><div class="title">Performance AWR Diff Report</div><table>'
         '<tr><td class="k">Instance Name</td><td>%s</td><td class="k">Host</td><td>%s</td></tr>'
         '<tr><td class="k">Release</td><td>%s</td><td class="k">vb_tool (snap / report)</td><td>%s / %s</td></tr>'
-        '<tr><td class="k">DB Compatibility</td><td>%s</td><td class="k"></td><td></td></tr>'
+        '<tr><td class="k">DB Compatibility</td><td>%s</td><td class="k">DB Role</td><td>%s</td></tr>'
         '<tr><td class="k">Period 1</td><td>%s: %s &rarr; %s (%ss)</td>'
         '<td class="k">Period 2</td><td>%s: %s &rarr; %s (%ss)</td></tr>'
         '<tr><td class="k">DB Time (s)</td><td>%s / %s</td>'
@@ -23591,6 +23688,8 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             esc(m2.get("db_name") or m2.get("name") or "?"), esc(m2.get("hostname", "?")),
             esc(m2.get("db_version", "?") or "?"), esc(m2.get("vb_tool_version", "?")), esc(_GEN_VER),
             esc(_compat),
+            (lambda r1, r2: r1 if r1 == r2 else "%s / %s" % (r1, r2))(
+                m1.get("db_role", "?"), m2.get("db_role", "?")),
             esc(m1.get("name", "?")), esc(m1.get("begin_ts", "?")), esc(m1.get("end_ts", "?")), esc(m1.get("duration", "?")),
             esc(m2.get("name", "?")), esc(m2.get("begin_ts", "?")), esc(m2.get("end_ts", "?")), esc(m2.get("duration", "?")),
             s_of(dbt1), s_of(dbt2), s_of(dbt2 - dbt1),
@@ -23799,6 +23898,24 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         row += '</tr>'
         parts.append(row)
     parts.append('</table>')
+
+    _s1, _s2 = osd1.get("softnet"), osd2.get("softnet")
+    if _s1 is not None or _s2 is not None:
+        sub("Softnet (per second)")
+        parts.append('<table class="t"><tr><th>Metric</th><th class="n">P1</th>'
+                     '<th class="n">P2</th><th class="n">&Delta;</th></tr>')
+        for _lbl, _key, _b, _r in (("packets processed", "packets", None, None),
+                                   ("dropped", "dropped", 0, 100),
+                                   ("time_squeeze", "squeezed", 0, 1000)):
+            _v1 = (_s1 or {}).get(_key, 0) / (du1 or 1.0)
+            _v2 = (_s2 or {}).get(_key, 0) / (du2 or 1.0)
+            parts.append('<tr><td>%s</td><td class="n%s">%s</td><td class="n%s">%s</td>'
+                         '<td class="n">%s</td></tr>'
+                         % (esc(_lbl),
+                            thr_cell_cls(_v1, _b, _r) if _b is not None else "", fmt_num(_v1),
+                            thr_cell_cls(_v2, _b, _r) if _b is not None else "", fmt_num(_v2),
+                            fmt_num(_v2 - _v1)))
+        parts.append('</table>')
 
     if osd1.get("netstat_ok") or osd2.get("netstat_ok"):
         sub("Network Protocol Errors")
@@ -24312,6 +24429,7 @@ VB_BL_COMPARE_PY
 #          re-parses with proc_disk_devs so partition filtering matches)
 #   net,<ts>,<raw /proc/net/dev iface line>  (same; proc_net_ifaces filters)
 #   tcp,<ts>,ActiveOpens,PassiveOpens,CurrEstab,OutSegs,RetransSegs  (snmp)
+#   tcpext,<ts>,ListenDrops,ListenOverflows,Timeouts,SynRetrans      (netstat TcpExt)
 # Always returns 0 (cron-friendly; failures are data, not exit codes).
 _awr_repl_sample() {
     local root; root=$(_awr_root)
@@ -24386,6 +24504,23 @@ _awr_repl_sample() {
             if ($1 == "Tcp:" && $2 ~ /^[0-9]+$/) { taop=$6; tpop=$7; tces=$10; tosg=$12; trsg=$13; tcpok=1 }
             next
         }
+        # netstat TcpExt/IpExt: header line lays down column names, values line
+        # (numeric $2) picks listen/congestion counters; `next` keeps these
+        # colon-terminated NF>=17 lines out of the net/dev iface rule below
+        $1 == "TcpExt:" || $1 == "IpExt:" {
+            if ($1 == "TcpExt:") {
+                if ($2 ~ /^[0-9]+$/) {
+                    for (i = 2; i <= NF; i++) {
+                        if (extn[i] == "ListenDrops") tld = $i
+                        else if (extn[i] == "ListenOverflows") tlo = $i
+                        else if (extn[i] == "TCPTimeouts") tto = $i
+                        else if (extn[i] == "TCPSynRetrans") tsr = $i
+                    }
+                    extok = 1
+                } else { for (i = 2; i <= NF; i++) extn[i] = $i }
+            }
+            next
+        }
         # diskstats line shape: <major> <minor> <name> <14+ counters>, all-numeric
         # fields; skip ramN/loopN (always idle, never rendered, ~24 junk rows/min)
         NF>=14 && $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ && $3 !~ /^(ram|loop)[0-9]+$/ { print "dsk," ts "," $0 }
@@ -24400,8 +24535,9 @@ _awr_repl_sample() {
                 print s
             }
             if (tcpok) print "tcp," ts "," taop+0 "," tpop+0 "," tces+0 "," tosg+0 "," trsg+0
+            if (extok) print "tcpext," ts "," tld+0 "," tlo+0 "," tto+0 "," tsr+0
         }
-    ' /proc/stat /proc/vmstat /proc/meminfo /proc/zoneinfo /proc/diskstats /proc/net/dev /proc/net/snmp >> "$of" 2>/dev/null
+    ' /proc/stat /proc/vmstat /proc/meminfo /proc/zoneinfo /proc/diskstats /proc/net/dev /proc/net/snmp /proc/net/netstat >> "$of" 2>/dev/null
     # ---- gzip past days' os logs (~10x smaller on these repetitive lines;
     # the renderer reads both os_*.log and os_*.log.gz). Today's file stays
     # plain so the per-minute append keeps working. ----
