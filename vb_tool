@@ -21205,6 +21205,14 @@ def os_minute_tcp_series(samples):
                          "retrans_pct": (drs * 100.0 / dosg) if dosg > 0 else None}, b[2]))
     return out
 
+def busy_cell_cls(v):
+    # busy cell highlighting: bold >50%, red+bold >80%
+    if v > 80.0:
+        return " b bad"
+    if v > 50.0:
+        return " b"
+    return ""
+
 def osmin_cpu_table(samples, begin_ts):
     series = [r for r in os_minute_cpu_series(samples)
               if not begin_ts or r[0] >= str(begin_ts)]
@@ -21214,7 +21222,7 @@ def osmin_cpu_table(samples, begin_ts):
          ''.join('<th>%s</th>' % f for f in _CPUF) + '<th>r</th><th>b</th></tr>']
     for ts, d, r, b in series:
         h.append('<tr><td>%s</td>%s<td class="n">%d</td><td class="n">%d</td></tr>'
-                 % (esc(ts), ''.join('<td class="n%s">%.1f</td>' % (" b" if f == "busy" else "", d[f])
+                 % (esc(ts), ''.join('<td class="n%s">%.1f</td>' % (busy_cell_cls(d[f]) if f == "busy" else "", d[f])
                                      for f in _CPUF), r, b))
     h.append('</table>')
     return _fold("Per-minute detail", "".join(h))
@@ -22797,12 +22805,12 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             parts.append('<tr><td>Platform</td><td class="n">%s</td></tr>' % esc(osd["platform"]))
         parts.append('</table>')
     sub("CPU utilization (%)")
-    # horizontal layout: components as columns, one value row (busy bolded)
+    # horizontal layout: components as columns, one value row (busy bold >50%, red+bold >80%)
     _cf = ("busy", "user", "nice", "system", "iowait", "irq", "softirq", "steal", "idle")
     parts.append('<table class="t"><tr>' +
                  ''.join('<th class="n">%s</th>' % f for f in _cf) + '</tr>')
     parts.append('<tr>' + ''.join(
-        '<td class="n%s">%.1f</td>' % (' b' if f == "busy" else '',
+        '<td class="n%s">%.1f</td>' % (busy_cell_cls(osd["cpu"].get(f, 0.0)) if f == "busy" else '',
                                        osd["cpu"].get(f, 0.0)) for f in _cf) + '</tr>')
     parts.append('</table>')
     if os_smp is not None:
@@ -23587,7 +23595,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                  ''.join('<th class="n">%s</th>' % f for f in _cf) + '</tr>')
     for _rl, _src in (("P1 %", osd1), ("P2 %", osd2)):
         parts.append('<tr><td class="k">%s</td>' % _rl + ''.join(
-            '<td class="n%s">%.1f</td>' % (' b' if f == "busy" else '',
+            '<td class="n%s">%.1f</td>' % (busy_cell_cls(_src["cpu"].get(f, 0.0)) if f == "busy" else '',
                                            _src["cpu"].get(f, 0.0)) for f in _cf) + '</tr>')
     parts.append('<tr><td class="k">&Delta; (pp)</td>' + ''.join(
         '<td class="n%s">%+.1f</td>' % (
