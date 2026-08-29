@@ -20368,7 +20368,7 @@ _awr_collect() {
     mkdir -p "$osd" "$dbd" || { echo "  [ERROR] cannot mkdir $osd / $dbd" >&2; return 1; }
     # ---- OS (/proc) ----
     local f
-    for f in diskstats stat interrupts softirqs meminfo cpuinfo; do
+    for f in diskstats stat interrupts softirqs meminfo cpuinfo vmstat loadavg; do
         if [ -r "/proc/$f" ]; then cp "/proc/$f" "$osd/$f" 2>/dev/null
         else echo "  [WARN] /proc/$f not readable" >&2; fi
     done
@@ -21223,6 +21223,21 @@ def lat_cell_cls(v):
         return " b"
     return ""
 
+# memory/paging rate highlighting (per second): only "abnormal when sustained
+# non-zero" metrics - pgpgin/pgpgout/pgfault are normal workload proxies
+# (like logical reads) and stay plain
+VM_HI = {"pswpin": (10.0, 100.0), "pswpout": (10.0, 100.0), "pgmajfault": (5.0, 50.0)}
+
+def thr_cell_cls(v, bold_above, red_above):
+    # generic threshold highlight: bold >bold_above, red+bold >red_above
+    if v is None:
+        return ""
+    if v > red_above:
+        return " b bad"
+    if v > bold_above:
+        return " b"
+    return ""
+
 def osmin_cpu_table(samples, begin_ts):
     series = [r for r in os_minute_cpu_series(samples)
               if not begin_ts or r[0] >= str(begin_ts)]
@@ -21325,7 +21340,9 @@ def osmin_mem_table(samples, begin_ts):
                              for x in (g[2] if (g and g[2]) else (0, 0, 0, 0)))
         h.append(('<tr><td>%s</td>%s<td class="n">%s</td><td class="n">%s</td>%s</tr>'
                   % (esc(ts),
-                     ''.join('<td class="n">%s</td>' % (fmt_num(d[k]) if d else "-") for k in _PGK),
+                     ''.join('<td class="n%s">%s</td>' % (
+                         (thr_cell_cls(d[k], *VM_HI[k]) if (d and k in VM_HI) else ""),
+                         fmt_num(d[k]) if d else "-") for k in _PGK),
                      ("%.0f" % g[0]) if g else "-", ("%.0f" % g[1]) if g else "-",
                      wm_tds)))
     h.append('</table>')
@@ -22876,8 +22893,11 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     vm = osd.get("vm", {})
     dur_os = osd.get("dur", 1.0) or 1.0
     def vmrow(label, key):
-        parts.append('<tr><td>%s</td><td class="n">%s</td><td class="n">%s</td></tr>'
-                     % (esc(label), fmt_num(vm.get(key, 0.0) * dur_os), fmt_num(vm.get(key, 0.0))))
+        _v = vm.get(key, 0.0)
+        _hi = VM_HI.get(key)
+        parts.append('<tr><td>%s</td><td class="n">%s</td><td class="n%s">%s</td></tr>'
+                     % (esc(label), fmt_num(_v * dur_os),
+                        thr_cell_cls(_v, *_hi) if _hi else "", fmt_num(_v)))
     vmrow("page in (pgpgin)", "pgpgin")
     vmrow("page out (pgpgout)", "pgpgout")
     vmrow("swap in (pswpin)", "pswpin")
@@ -23708,8 +23728,11 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                      ("swap in (pswpin)", "pswpin"), ("swap out (pswpout)", "pswpout"),
                      ("minor fault (pgfault)", "pgfault"), ("major fault (pgmajfault)", "pgmajfault")]:
         v1 = vm1.get(key, 0.0); v2 = vm2.get(key, 0.0)
-        parts.append('<tr><td>%s</td><td class="n">%s</td><td class="n">%s</td>'
-                     '<td class="n">%s</td></tr>' % (esc(lbl), fmt_num(v1), fmt_num(v2), fmt_num(v2 - v1)))
+        _hi = VM_HI.get(key)
+        parts.append('<tr><td>%s</td><td class="n%s">%s</td><td class="n%s">%s</td>'
+                     '<td class="n">%s</td></tr>' % (esc(lbl),
+                        thr_cell_cls(v1, *_hi) if _hi else "", fmt_num(v1),
+                        thr_cell_cls(v2, *_hi) if _hi else "", fmt_num(v2), fmt_num(v2 - v1)))
     parts.append('</table>')
     sub("Disk I/O per device (per second)")
     _d1 = {d["name"]: d for d in osd1.get("disks", [])}
