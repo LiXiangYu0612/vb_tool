@@ -22060,17 +22060,34 @@ def osmin_net_table(samples, begin_ts):
                         d["rx_errs"], d["tx_errs"], d["rx_drop"], d["tx_drop"]))
         h.append('</table>')
     if tser:
-        # system-wide TCP counters (L4, not attributable per interface);
-        # tcpext columns appear only when the sampler logged them (new snaps)
+        # host-aggregate TCP counters (L4 snmp deltas, not attributable per
+        # interface) merged with the per-connection RTT gauges (ssrtt) on the
+        # same minute axis, so Retrans% and RTT read side by side per minute;
+        # tcpext / RTT columns appear only when the sampler logged them
+        # (new snaps); minutes with an ssrtt gap (0 qualifying conns) show "-"
         xser = {ts: d for ts, d in os_minute_tcpext_series(samples)
+                if not begin_ts or ts >= str(begin_ts)}
+        rser = {ts: d for ts, d in os_minute_rtt_series(samples)
                 if not begin_ts or ts >= str(begin_ts)}
         _xh = ('<th>ListenDrops/s</th><th>ListenOverflows/s</th>'
                '<th>Timeouts/s</th><th>SynRetrans/s</th>') if xser else ''
-        h.append('<div class="sub">TCP (system-wide)</div>')
+        _rh = ('<th>RTT Conns</th><th>RTT avg (ms)</th><th>RTT p95 (ms)</th>'
+               '<th>Worst Peer</th>') if rser else ''
+        h.append('<div class="sub">TCP Statistics</div>')
         h.append('<table class="t"><tr><th>Time</th><th>Opens/s</th><th>Retrans/s</th>'
-                 '<th>Retrans %</th><th>CurrEstab</th>' + _xh + '</tr>')
+                 '<th>Retrans %</th><th>CurrEstab</th>' + _rh + _xh + '</tr>')
         for ts, d, ce in tser:
             _rp = d["retrans_pct"]
+            _rc = ''
+            if rser:
+                r = rser.get(ts)
+                _rc = ('<td class="n">%.0f</td><td class="n%s">%.3f</td>'
+                       '<td class="n%s">%.3f</td><td>%s</td>'
+                       % (r["conns"],
+                          thr_cell_cls(r["rtt_avg"], 5.0, 20.0), r["rtt_avg"],
+                          thr_cell_cls(r["rtt_p95"], 5.0, 20.0), r["rtt_p95"],
+                          esc(r["worst_peer"]))) if r else \
+                      '<td class="n">-</td>' * 3 + '<td>-</td>'
             _xc = ''
             if xser:
                 x = xser.get(ts)
@@ -22080,36 +22097,12 @@ def osmin_net_table(samples, begin_ts):
                           x["timeouts_s"], x["syn_retrans_s"])) if x else \
                       '<td class="n">-</td>' * 4
             h.append('<tr><td>%s</td><td class="n">%.1f</td><td class="n">%.2f</td>'
-                     '<td class="n%s">%s</td><td class="n">%.0f</td>%s</tr>'
+                     '<td class="n%s">%s</td><td class="n">%.0f</td>%s%s</tr>'
                      % (esc(ts), d["opens_s"], d["retrans_s"],
                         thr_cell_cls(_rp, 3.0, 5.0) if _rp is not None else "",
-                        ("%.3f" % _rp) if _rp is not None else "-", ce, _xc))
+                        ("%.3f" % _rp) if _rp is not None else "-", ce, _rc, _xc))
         h.append('</table>')
     return _fold("Per-minute detail", "".join(h))
-
-def osmin_rtt_table(samples, begin_ts):
-    """Per-minute TCP RTT fold (gauge series). Returns "" when the window has
-    no ssrtt rows (sampler predates the ssrtt row type, or 0 qualifying conns
-    all window) so old periods render nothing instead of a confusing note."""
-    ser = [(ts, d) for ts, d in os_minute_rtt_series(samples)
-           if not begin_ts or ts >= str(begin_ts)]
-    if not ser:
-        return ""
-    h = ['<table class="t"><tr><th>Time</th><th class="n">Conns</th>'
-         '<th class="n">RTT min</th><th class="n">RTT avg</th>'
-         '<th class="n">RTT max</th><th class="n">RTT p95</th><th>Worst Peer</th></tr>']
-    for ts, d in ser:
-        h.append('<tr><td>%s</td><td class="n">%.0f</td>'
-                 '<td class="n">%.3f</td><td class="n%s">%.3f</td>'
-                 '<td class="n">%.3f</td><td class="n%s">%.3f</td><td>%s</td></tr>'
-                 % (esc(ts), d["conns"],
-                    d["rtt_min"],
-                    thr_cell_cls(d["rtt_avg"], 5.0, 20.0), d["rtt_avg"],
-                    d["rtt_max"],
-                    thr_cell_cls(d["rtt_p95"], 5.0, 20.0), d["rtt_p95"],
-                    esc(d["worst_peer"])))
-    h.append('</table>')
-    return _fold("Per-minute TCP RTT (ms)", "".join(h))
 
 def osmin_mem_table(samples, begin_ts):
     series = {ts: d for ts, d in os_minute_pg_series(samples)
@@ -23868,9 +23861,6 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     parts.append('</table>')
     if os_smp is not None:
         parts.append(osmin_net_table(os_smp, m.get("begin_ts", "")))
-        _rtt_fold = osmin_rtt_table(os_smp, m.get("begin_ts", ""))
-        if _rtt_fold:
-            parts.append(_rtt_fold)
 
     # ---- TCP RTT / Connections: window gauges (per-minute ssrtt) + END-snap
     # per-conn tcp_info. Section hidden when neither source exists (snap(s)
