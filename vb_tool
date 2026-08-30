@@ -21071,6 +21071,16 @@ _awr_collect() {
     if [ -r /proc/net/snmp ]; then cp /proc/net/snmp "$osd/net_snmp" 2>/dev/null; fi
     if [ -r /proc/net/netstat ]; then cp /proc/net/netstat "$osd/net_netstat" 2>/dev/null; fi
     if [ -r /proc/net/softnet_stat ]; then cp /proc/net/softnet_stat "$osd/softnet_stat" 2>/dev/null; fi
+    # net_rtt: raw `ss -tin state established` (END-snap instantaneous per-conn
+    # tcp_info: rtt/cwnd/retrans/send-q; loopback included here, the renderer
+    # filters). Capped at 512 KB so a many-thousand-conn instance cannot bloat
+    # every snap; the possibly-cut tail row dies in the parser. No ss / no conns
+    # -> no file -> the renderer hides the RTT sections (old snaps unaffected).
+    sscmd=$(command -v ss 2>/dev/null || echo /usr/sbin/ss)
+    if [ -x "$sscmd" ]; then
+        "$sscmd" -tin state established 2>/dev/null | head -c 524288 > "$osd/net_rtt"
+        [ -s "$osd/net_rtt" ] || rm -f "$osd/net_rtt"
+    fi
     # ---- NUMA topology + numastat (per-node cumulative counters; renderer computes end-begin) ----
     # File format (one stanza per node, blank-line separated):
     #   node <id>
@@ -21462,7 +21472,7 @@ def load_window(d):
         except Exception:
             w["meta"] = {}
     for phase in ("begin", "end"):
-        for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi", "softnet_stat"):
+        for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi", "softnet_stat", "net_rtt"):
             p = os.path.join(d, "os", phase, f)
             w["os"][(phase, f)] = _read_os_text(p) if os.path.isfile(p) else ""
         for t in ("statement", "wait_events", "instance_time", "database", "pagewriter",
@@ -21482,7 +21492,7 @@ def load_snap(d):
             s["meta"] = json.load(open(mp))
         except Exception:
             s["meta"] = {}
-    for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi", "softnet_stat"):
+    for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi", "softnet_stat", "net_rtt"):
         p = os.path.join(d, "os", f)
         s["os"][f] = _read_os_text(p) if os.path.isfile(p) else ""
     for t in ("statement", "wait_events", "instance_time", "database", "pagewriter",
@@ -21499,7 +21509,7 @@ def build_window_from_snaps(begin_dir, end_dir):
     b = load_snap(begin_dir)
     e = load_snap(end_dir)
     win = {"meta": {}, "os": {}, "db": {}}
-    for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi", "softnet_stat"):
+    for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi", "softnet_stat", "net_rtt"):
         win["os"][("begin", f)] = b["os"].get(f, "")
         win["os"][("end", f)] = e["os"].get(f, "")
     for t in ("statement", "wait_events", "instance_time", "database", "pagewriter",
@@ -21722,12 +21732,14 @@ def load_os_samples(sdir, begin_ts, end_ts):
     Returns {"cpu":[(ts,[10 floats])], "pg":[(ts,[6 floats])],
              "mem":[(ts,[7 or 11 floats])], "dsk":[(ts,raw)], "net":[(ts,raw)],
              "tcp":[(ts,[6 floats])], "tcpext":[(ts,[4 floats])],
+             "ssrtt":[(ts,payload)] (raw: conns,min,avg,max,p95,worst_peer,worst_rtt),
              "files":[names]}. Malformed rows (wrong comma count, non-numeric
     payload) are silently dropped, like the repl/slot loaders. mem rows carry
     11 values when the sampler could read /proc/zoneinfo: 7 meminfo kB gauges
     + zone watermarks (free/min/low/high kB, summed over all zones); older
     7-value logs without them stay valid."""
-    out = {"cpu": [], "pg": [], "mem": [], "dsk": [], "net": [], "tcp": [], "tcpext": [], "files": []}
+    out = {"cpu": [], "pg": [], "mem": [], "dsk": [], "net": [], "tcp": [], "tcpext": [],
+           "ssrtt": [], "files": []}
     if not sdir or not os.path.isdir(sdir):
         return out
     lo = _ts_shift(begin_ts, -65)
@@ -21759,6 +21771,12 @@ def load_os_samples(sdir, begin_ts, end_ts):
                 if payload:
                     out[typ].append((ts, payload))
                 continue
+            if typ == "ssrtt":
+                # gauge row, payload kept raw (worst_peer is non-numeric);
+                # parsed by os_minute_rtt_series, not by the float() path
+                if payload.count(",") == 6:
+                    out[typ].append((ts, payload))
+                continue
             want = {"cpu": 12, "pg": 8, "tcp": 7, "tcpext": 6}.get(typ)   # tcp: 7 fields/6 commas; tcpext: ts+4 counters
             if typ == "mem":
                 # 7-value row: 9 fields/8 commas; 11-value (+ zone wm): 13/12
@@ -21768,7 +21786,7 @@ def load_os_samples(sdir, begin_ts, end_ts):
                 out[typ].append((ts, [float(x) for x in payload.split(",")]))
             except Exception:
                 continue
-    for k in ("cpu", "pg", "mem", "dsk", "net", "tcp", "tcpext"):
+    for k in ("cpu", "pg", "mem", "dsk", "net", "tcp", "tcpext", "ssrtt"):
         out[k].sort(key=lambda r: r[0])
     return out
 
@@ -21924,6 +21942,26 @@ def os_minute_tcpext_series(samples):
                          "syn_retrans_s": max(0, b[3] - a[3]) / dt}))
     return out
 
+def os_minute_rtt_series(samples):
+    """[(ts, gauge)] -- instantaneous per-minute RTT gauges from ssrtt rows
+    (sampler: ss -ti over ESTABLISHED, loopback excluded, kernel smoothed
+    estimate in ms). No consecutive-pair math: each row IS that minute's
+    snapshot, so gaps (0 qualifying conns / ss absent) are simply missing
+    minutes, like idle iface-minutes in the net series."""
+    out = []
+    for ts, payload in samples.get("ssrtt", []):
+        p = (payload or "").split(",")
+        if len(p) != 7:
+            continue
+        try:
+            out.append((ts, {"conns": int(float(p[0])),
+                             "rtt_min": float(p[1]), "rtt_avg": float(p[2]),
+                             "rtt_max": float(p[3]), "rtt_p95": float(p[4]),
+                             "worst_peer": p[5], "worst_rtt": float(p[6])}))
+        except ValueError:
+            continue
+    return out
+
 def busy_cell_cls(v):
     # busy cell highlighting: bold >50%, red+bold >80%
     if v > 80.0:
@@ -22044,10 +22082,34 @@ def osmin_net_table(samples, begin_ts):
             h.append('<tr><td>%s</td><td class="n">%.1f</td><td class="n">%.2f</td>'
                      '<td class="n%s">%s</td><td class="n">%.0f</td>%s</tr>'
                      % (esc(ts), d["opens_s"], d["retrans_s"],
-                        thr_cell_cls(_rp, 0.1, 1.0) if _rp is not None else "",
+                        thr_cell_cls(_rp, 3.0, 5.0) if _rp is not None else "",
                         ("%.3f" % _rp) if _rp is not None else "-", ce, _xc))
         h.append('</table>')
     return _fold("Per-minute detail", "".join(h))
+
+def osmin_rtt_table(samples, begin_ts):
+    """Per-minute TCP RTT fold (gauge series). Returns "" when the window has
+    no ssrtt rows (sampler predates the ssrtt row type, or 0 qualifying conns
+    all window) so old periods render nothing instead of a confusing note."""
+    ser = [(ts, d) for ts, d in os_minute_rtt_series(samples)
+           if not begin_ts or ts >= str(begin_ts)]
+    if not ser:
+        return ""
+    h = ['<table class="t"><tr><th>Time</th><th class="n">Conns</th>'
+         '<th class="n">RTT min</th><th class="n">RTT avg</th>'
+         '<th class="n">RTT max</th><th class="n">RTT p95</th><th>Worst Peer</th></tr>']
+    for ts, d in ser:
+        h.append('<tr><td>%s</td><td class="n">%.0f</td>'
+                 '<td class="n">%.3f</td><td class="n%s">%.3f</td>'
+                 '<td class="n">%.3f</td><td class="n%s">%.3f</td><td>%s</td></tr>'
+                 % (esc(ts), d["conns"],
+                    d["rtt_min"],
+                    thr_cell_cls(d["rtt_avg"], 5.0, 20.0), d["rtt_avg"],
+                    d["rtt_max"],
+                    thr_cell_cls(d["rtt_p95"], 5.0, 20.0), d["rtt_p95"],
+                    esc(d["worst_peer"])))
+    h.append('</table>')
+    return _fold("Per-minute TCP RTT (ms)", "".join(h))
 
 def osmin_mem_table(samples, begin_ts):
     series = {ts: d for ts, d in os_minute_pg_series(samples)
@@ -22503,6 +22565,66 @@ def parse_softnet(txt):
         except ValueError:
             continue
     return t, d, s
+
+def parse_net_rtt(txt):
+    """os/net_rtt = raw `ss -tin state established` snapshot (loopback NOT
+    filtered at capture time; filtered here). -> [conn] for non-loopback peers
+    whose info line yielded an rtt: {peer, lport, sendq, rtt_ms, rttvar_ms,
+    cwnd, retrans, mss}. The 512 KB capture cap can cut mid-block: the tail
+    conn without a parsed rtt is dropped here. A header without a following
+    info line (truncation) is likewise dropped."""
+    out, cur = [], None
+    for ln in (txt or "").splitlines():
+        f = ln.split()
+        # header line, two layouts: with State column (f[0]=ESTAB, peer=f[4],
+        # sendq=f[2]) on older iproute2; State-column-less when filtering by
+        # state on newer iproute2 (f[0]=Recv-Q numeric, peer=f[3], sendq=f[1]).
+        if len(f) >= 5 and f[0] == "ESTAB":
+            peer_f, sendq_f, local_f = 4, 2, 3
+        elif len(f) >= 4 and f[0].isdigit():
+            peer_f, sendq_f, local_f = 3, 1, 2
+        else:
+            peer_f = -1
+        if peer_f >= 0:
+            if cur and cur["rtt_ms"] is not None:
+                out.append(cur)
+            cur = None
+            peer = f[peer_f]
+            if not peer.startswith(("127.", "[::1]", "::1:")):
+                try:
+                    lport = f[local_f].rsplit(":", 1)[1]
+                    sendq = int(f[sendq_f])
+                except (IndexError, ValueError):
+                    lport = None
+                if lport is not None:
+                    cur = {"peer": peer, "lport": lport, "sendq": sendq,
+                           "rtt_ms": None, "rttvar_ms": None,
+                           "cwnd": None, "retrans": None, "mss": None}
+            continue
+        if cur is None:
+            continue
+        if cur["rtt_ms"] is None:
+            m = re.search(r"rtt:([0-9.]+)(?:ms)?/([0-9.]+)", ln)
+            if m:
+                try:
+                    cur["rtt_ms"], cur["rttvar_ms"] = float(m.group(1)), float(m.group(2))
+                except ValueError:
+                    pass
+        if cur["cwnd"] is None:
+            m = re.search(r"\bcwnd:(\d+)", ln)
+            if m:
+                cur["cwnd"] = int(m.group(1))
+        if cur["retrans"] is None:
+            m = re.search(r"\bretrans:(\d+)/", ln)
+            if m:
+                cur["retrans"] = int(m.group(1))
+        if cur["mss"] is None:
+            m = re.search(r"\bmss:(\d+)", ln)
+            if m:
+                cur["mss"] = int(m.group(1))
+    if cur and cur["rtt_ms"] is not None:
+        out.append(cur)
+    return out
 
 def parse_netstat_pairs(txt):
     """/proc/net/{snmp,netstat}: paired lines 'X: n1 n2...' + 'X: v1 v2...' ->
@@ -23635,7 +23757,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         _td.append('<td class="n">%.2f</td>' % _t["retrans_per_sec"])
         _th.append('<th class="n">TCP Retrans %</th>')
         _td.append('<td class="n%s">%s</td>' % (
-            thr_cell_cls(_t["retrans_pct"], 0.1, 1.0) if _t["retrans_pct"] is not None else "",
+            thr_cell_cls(_t["retrans_pct"], 3.0, 5.0) if _t["retrans_pct"] is not None else "",
             ("%.3f" % _t["retrans_pct"]) if _t["retrans_pct"] is not None else "-"))
         if _t.get("currestab_begin") is not None:
             _th.append('<th class="n">TCP CurrEstab (Begin/End)</th>')
@@ -23746,6 +23868,74 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     parts.append('</table>')
     if os_smp is not None:
         parts.append(osmin_net_table(os_smp, m.get("begin_ts", "")))
+        _rtt_fold = osmin_rtt_table(os_smp, m.get("begin_ts", ""))
+        if _rtt_fold:
+            parts.append(_rtt_fold)
+
+    # ---- TCP RTT / Connections: window gauges (per-minute ssrtt) + END-snap
+    # per-conn tcp_info. Section hidden when neither source exists (snap(s)
+    # predate the ssrtt sampler / no ss on the host). ----
+    _rttser = ([(ts, d) for ts, d in os_minute_rtt_series(os_smp)
+                if not m.get("begin_ts") or ts >= str(m.get("begin_ts"))]
+               if os_smp is not None else [])
+    _rttconns = parse_net_rtt(win["os"].get(("end", "net_rtt"), ""))
+    if _rttser or _rttconns:
+        sub("TCP RTT / Connections")
+        if _rttser:
+            _conns_avg = sum(d["conns"] for _, d in _rttser) / len(_rttser)
+            _conns_max = max(d["conns"] for _, d in _rttser)
+            _rtt_avg = sum(d["rtt_avg"] for _, d in _rttser) / len(_rttser)
+            _p95_max = max(d["rtt_p95"] for _, d in _rttser)
+            _worst = max(_rttser, key=lambda r: r[1]["worst_rtt"])
+            _ra_cls = thr_cell_cls(_rtt_avg, 5.0, 20.0)
+            _rows = [
+                '<tr><td>Conns (non-loopback, avg / max)</td>'
+                '<td class="n">%.1f / %.0f</td></tr>' % (_conns_avg, _conns_max),
+                '<tr><td>RTT avg (mean of minutes, ms)</td>'
+                '<td class="n%s">%.3f</td></tr>' % (_ra_cls, _rtt_avg),
+                '<tr><td>RTT p95 (max of minutes, ms)</td>'
+                '<td class="n%s">%.3f</td></tr>' % (thr_cell_cls(_p95_max, 5.0, 20.0), _p95_max),
+                '<tr><td>Worst peer (window)</td>'
+                '<td class="n">%s @ %.3f ms</td></tr>'
+                % (esc(_worst[1]["worst_peer"]), _worst[1]["worst_rtt"]),
+            ]
+            # Mathis per-stream ceiling ~ 1.22*MSS*8 / (RTT * sqrt(loss));
+            # RTT from this window, loss from the window Retrans% -- a rough
+            # "how far can ONE tcp stream go" signal, not a measured rate.
+            _rp = (osd.get("tcp") or {}).get("retrans_pct")
+            _msss = sorted(c["mss"] for c in _rttconns if c.get("mss")) or [1448]
+            _mss = _msss[len(_msss) // 2]
+            if _rtt_avg > 0 and _rp is not None and _rp > 0:
+                _ceil = 1.22 * _mss * 8 / ((_rtt_avg / 1000.0) * (_rp / 100.0) ** 0.5)
+                _rows.append('<tr><td>Per-stream throughput ceiling (Mathis; '
+                             'MSS %d, RTT %.3f ms, Retrans %.3f%%)</td>'
+                             '<td class="n">%s/s</td></tr>'
+                             % (_mss, _rtt_avg, _rp, fmt_bytes(_ceil)))
+            elif _rtt_avg > 0:
+                _rows.append('<tr><td>Per-stream throughput ceiling (Mathis)</td>'
+                             '<td class="n">no loss in window</td></tr>')
+            parts.append('<table class="t"><tr><th>Metric</th><th class="n">Value</th></tr>'
+                         + "".join(_rows) + '</table>')
+        if _rttconns:
+            def _peer_rows(sel):
+                r = []
+                for c in sel:
+                    r.append('<tr><td>%s</td><td class="n">%s</td><td class="n%s">%.3f</td>'
+                             '<td class="n">%.3f</td><td class="n">%s</td><td class="n">%s</td>'
+                             '<td class="n">%s</td></tr>'
+                             % (esc(c["peer"]), esc(c["lport"]),
+                                thr_cell_cls(c["rtt_ms"], 5.0, 20.0), c["rtt_ms"],
+                                c["rttvar_ms"],
+                                c["cwnd"] if c["cwnd"] is not None else "-",
+                                c["retrans"] if c["retrans"] is not None else "-",
+                                fmt_num(c["sendq"])))
+                return "".join(r)
+            _phdr = ('<table class="t"><tr><th>Peer</th><th>Local Port</th><th>RTT (ms)</th>'
+                     '<th>RTTVar</th><th>cwnd</th><th>retr</th><th>Send-Q</th></tr>')
+            parts.append('<div class="sub">Top 10 by Send-Q (END snap, instantaneous)</div>')
+            parts.append(_phdr + _peer_rows(sorted(_rttconns, key=lambda c: -c["sendq"])[:10]) + '</table>')
+            parts.append('<div class="sub">Top 10 by RTT (END snap, instantaneous)</div>')
+            parts.append(_phdr + _peer_rows(sorted(_rttconns, key=lambda c: -c["rtt_ms"])[:10]) + '</table>')
 
     _sn = osd.get("softnet")
     if _sn is not None:
@@ -25124,6 +25314,10 @@ VB_BL_COMPARE_PY
 #   net,<ts>,<raw /proc/net/dev iface line>  (same; proc_net_ifaces filters)
 #   tcp,<ts>,ActiveOpens,PassiveOpens,CurrEstab,OutSegs,RetransSegs  (snmp)
 #   tcpext,<ts>,ListenDrops,ListenOverflows,Timeouts,SynRetrans      (netstat TcpExt)
+#   ssrtt,<ts>,conns,rtt_min,rtt_avg,rtt_max,rtt_p95,worst_peer,worst_rtt
+#          (ss -ti over ESTABLISHED, loopback peers excluded; rtt = kernel
+#           smoothed estimate in ms; worst_rtt is worst_peer's rtt. Row is
+#           omitted when 0 qualifying conns / no ss -> renderer hides RTT)
 # Always returns 0 (cron-friendly; failures are data, not exit codes).
 _awr_repl_sample() {
     local root; root=$(_awr_root)
@@ -25232,6 +25426,53 @@ _awr_repl_sample() {
             if (extok) print "tcpext," ts "," tld+0 "," tlo+0 "," tto+0 "," tsr+0
         }
     ' /proc/stat /proc/vmstat /proc/meminfo /proc/zoneinfo /proc/diskstats /proc/net/dev /proc/net/snmp /proc/net/netstat >> "$of" 2>/dev/null
+    # ---- TCP RTT sample: ss -ti over ESTABLISHED sockets; loopback peers are
+    # excluded (their sub-0.1ms rtt would pin rtt_min to ~0 and drown the real
+    # network signal). One ssrtt row per minute iff >=1 qualifying conn; a
+    # missing/unreadable ss just writes no row (renderer hides the RTT tables).
+    # awk state machine: header line (ESTAB ... peer) opens a conn block, the
+    # following indented info line carries rtt:a/b (kernel smoothed estimate,
+    # ms); p95 via insertion sort (portable awk -- no asort).
+    sscmd=$(command -v ss 2>/dev/null || echo /usr/sbin/ss)
+    if [ -x "$sscmd" ]; then
+        "$sscmd" -tin state established 2>/dev/null | awk -v ts="$ts" '
+            function flushconn() {
+                if (peer != "" && keep && rttv != "") {
+                    n++; sum += rttv; v[n] = rttv
+                    if (minv == "" || rttv < minv) minv = rttv
+                    if (rttv > maxv) { maxv = rttv; wp = peer }
+                }
+                peer = ""; keep = 0; rttv = ""
+            }
+            # header line: with State column ($1=ESTAB, peer=$5) on older
+            # iproute2, or State-column-less ($1=Recv-Q numeric, peer=$4) on
+            # newer iproute2 that drops the column when filtering by state.
+            $1 == "ESTAB" || ($1 ~ /^[0-9]+$/ && NF >= 4) {
+                flushconn()
+                peer = ($1 == "ESTAB") ? $5 : $4
+                keep = (peer !~ /^127\./ && peer !~ /^\[::1\]/ && peer !~ /^::1:/)
+                next
+            }
+            {
+                if (peer != "" && keep && rttv == "" && match($0, /rtt:[0-9]+\.?[0-9]*\//)) {
+                    rttv = substr($0, RSTART + 4, RLENGTH - 5) + 0
+                }
+            }
+            END {
+                flushconn()
+                if (n > 0) {
+                    for (i = 2; i <= n; i++) {
+                        x = v[i]
+                        for (j = i - 1; j >= 1 && v[j] + 0 > x + 0; j--) v[j+1] = v[j]
+                        v[j+1] = x
+                    }
+                    pi = int(n * 0.95); if (pi < 1) pi = 1; if (pi > n) pi = n
+                    printf "ssrtt,%s,%d,%.3f,%.3f,%.3f,%.3f,%s,%.3f\n", \
+                           ts, n, minv, sum / n, maxv, v[pi], wp, maxv
+                }
+            }
+        ' >> "$of" 2>/dev/null
+    fi
     # ---- gzip past days' os logs (~10x smaller on these repetitive lines;
     # the renderer reads both os_*.log and os_*.log.gz). Today's file stays
     # plain so the per-minute append keeps working. ----
