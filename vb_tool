@@ -24655,16 +24655,21 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                              fmt_int(v[1]), fmt_int(v[2])))
             _h.append('</table>')
             parts.append(_fold("Active Session History Top SQL", "".join(_h)))
+        # waitchain header is unconditional within the section: an absent
+        # table reads as "feature missing", an empty one reads as "no chains
+        # in this window" -- the latter is the information the reader wants
+        _h = ['<table class="t"><tr><th>date_time</th><th>root_block_sessid</th>'
+              '<th class="n">max_b_cnt</th><th>h_sql</th><th>w_sql</th></tr>']
         if _ash["waitchain"]:
-            _h = ['<table class="t"><tr><th>date_time</th><th>root_block_sessid</th>'
-                  '<th class="n">max_b_cnt</th><th>h_sql</th><th>w_sql</th></tr>']
             for (dt, rt), v in sorted(_ash["waitchain"].items(),
                                       key=lambda kv: (-kv[1][0], kv[0][0])):
                 _h.append('<tr><td>%s</td><td>%s</td><td class="n">%s</td>'
                           '<td>%s</td><td>%s</td></tr>'
                           % (esc(dt), esc(rt), fmt_int(v[0]), esc(v[1]), esc(v[2])))
-            _h.append('</table>')
-            parts.append(_fold("Active Session History Waitchain", "".join(_h)))
+        else:
+            _h.append('<tr><td colspan="5" class="note">no data</td></tr>')
+        _h.append('</table>')
+        parts.append(_fold("Active Session History Waitchain", "".join(_h)))
 
     # ================= Wait Events =================
     sec("Wait Events", fold=True)
