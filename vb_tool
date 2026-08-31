@@ -23545,7 +23545,7 @@ body { font-family: Arial, Helvetica, Geneva, sans-serif; font-size: 13px; color
 .sec .totop { float: right; color: #663300; background: #fff; text-decoration: none; border: 1px solid #663300;
               padding: 1px 10px; font-size: 12px; font-weight: bold; margin-top: 8px; }
 .sec .totop:hover { background: #FFFFCC; }
-.sub { background: #fff; color: #336699; font-weight: bold; font-size: 17px; padding: 0; margin-top: 16px; border: none; }
+.sub { background: #fff; color: #000000; font-weight: bold; font-size: 13px; padding: 0; margin-top: 14px; border: none; }
 table.t { border-collapse: collapse; width: auto; max-width: 100%; border: 1px solid #000; margin-top: 4px; }
 table.t th { background: #0066CC; color: #fff; font-weight: bold; padding: 3px 6px; border: 1px solid #0066CC; text-align: center; font-size: 11px; }
 table.t td { padding: 3px 6px; border: 1px solid #cccccc; vertical-align: top; font-size: 12px; background: #fff; }
@@ -24428,7 +24428,7 @@ body { font-family: Arial, Helvetica, Geneva, sans-serif; font-size: 13px; color
 .sec .totop { float: right; color: #663300; background: #fff; text-decoration: none; border: 1px solid #663300;
               padding: 1px 10px; font-size: 12px; font-weight: bold; margin-top: 8px; }
 .sec .totop:hover { background: #FFFFCC; }
-.sub { background: #fff; color: #336699; font-weight: bold; font-size: 17px; padding: 0; margin-top: 16px; border: none; }
+.sub { background: #fff; color: #000000; font-weight: bold; font-size: 13px; padding: 0; margin-top: 14px; border: none; }
 table.t { border-collapse: collapse; width: auto; max-width: 100%; border: 1px solid #000; margin-top: 4px; }
 table.t th { background: #0066CC; color: #fff; font-weight: bold; padding: 3px 6px; border: 1px solid #0066CC; text-align: center; font-size: 11px; }
 table.t td { padding: 3px 6px; border: 1px solid #cccccc; vertical-align: top; font-size: 12px; background: #fff; }
