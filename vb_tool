@@ -21172,6 +21172,16 @@ _awr_collect() {
         fi
     done
     if [ -n "$_ash_prev" ]; then ash_b="$_ash_prev"; else ash_b=$(date -d '-60 minutes' '+%F %T'); fi
+    # local_active_session schema version (same probe the asp command uses):
+    # 3 = cur_event+state (204), 2 = cur_event only, 4 = event, 0 = missing.
+    # Drives the waitchain query's condition substitution below.
+    local ash_las_flag ash_c1 ash_c6 ash_c7 ash_c8 ash_c9
+    ash_las_flag=$(PGCONNECT_TIMEOUT=$_ct PGOPTIONS="$_st" psql -d postgres -qAtXc "select is_event + is_curevent + is_state as las_flag from (select coalesce(sum(case when attname='event' then 4 else 0 end),0) is_event, coalesce(sum(case when attname='cur_event' then 2 else 0 end),0) is_curevent, coalesce(sum(case when attname='state' then 1 else 0 end),0) is_state from pg_attribute a, pg_class b, pg_namespace c where a.attrelid=b.oid and b.relnamespace=c.oid and b.relname='local_active_session' and c.nspname='dbe_perf')" 2>/dev/null)
+    case "$ash_las_flag" in
+        3) ash_c1="state='active'"; ash_c6="a.state='active'"; ash_c7="las.state='active'"
+           ash_c8="a.xact_start_time::timestamp(0)"; ash_c9="las.xact_start_time::timestamp(0)";;
+        *) ash_c1="1=1"; ash_c6="1=1"; ash_c7="1=1"; ash_c8="' '"; ash_c9="' '";;
+    esac
     # ---- DB: \copy views to CSV with header (column order stable per view) ----
     # unquoted heredoc so $dbd expands; no other $ in the SQL. psql continues
     # past a missing view (no ON_ERROR_STOP) -> we warn about empty CSVs below.
@@ -21192,6 +21202,20 @@ _awr_collect() {
 \copy (SELECT * FROM (WITH per_sec AS (SELECT sample_time::timestamp(0) AS sec, a.event AS event, b.type AS event_type, count(*) AS cnt FROM gs_asp a LEFT JOIN dbe_perf.wait_events b ON a.event = b.event WHERE sample_time > '$ash_b' AND sample_time <= '$ash_e' AND a.state = 'active' AND a.event IS NOT NULL AND a.event <> 'none' GROUP BY sample_time::timestamp(0), a.event, b.type) SELECT 'g' AS src, DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min' AS bucket, event_type, event, max(cnt) AS max_cnt, round(avg(cnt)) AS avg_cnt FROM per_sec GROUP BY DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min', event_type, event UNION ALL SELECT * FROM (WITH per_sec AS (SELECT sample_time::timestamp(0) AS sec, a.cur_event AS event, b.type AS event_type, count(*) AS cnt FROM dbe_perf.local_active_session a LEFT JOIN dbe_perf.wait_events b ON a.cur_event = b.event WHERE sample_time > '$ash_b' AND sample_time <= '$ash_e' AND a.state = 'active' AND a.cur_event IS NOT NULL AND a.cur_event <> 'none' GROUP BY sample_time::timestamp(0), a.cur_event, b.type) SELECT 'l' AS src, DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min' AS bucket, event_type, event, max(cnt) AS max_cnt, round(avg(cnt)) AS avg_cnt FROM per_sec GROUP BY DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min', event_type, event) x) u ORDER BY bucket, max_cnt DESC LIMIT 800) TO '$dbd/ash_event.csv' WITH CSV HEADER
 \copy (SELECT * FROM (WITH per_sec AS (SELECT sample_time::timestamp(0) AS sec, unique_query_id, substr(REGEXP_REPLACE(REGEXP_REPLACE(unique_query, '(\r|\n)+', ' '), ' {2,}', ' '), 1, 50) AS uq, count(*) AS cnt FROM gs_asp WHERE sample_time > '$ash_b' AND sample_time <= '$ash_e' AND state = 'active' AND unique_query_id > 0 GROUP BY sample_time::timestamp(0), unique_query_id, substr(REGEXP_REPLACE(REGEXP_REPLACE(unique_query, '(\r|\n)+', ' '), ' {2,}', ' '), 1, 50)) SELECT * FROM (SELECT 'g' AS src, DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min' AS bucket, unique_query_id, uq AS unique_query, max(cnt) AS max_cnt, round(avg(cnt)) AS avg_cnt, ROW_NUMBER() OVER (PARTITION BY DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min' ORDER BY max(cnt) DESC) AS rn FROM per_sec GROUP BY DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min', unique_query_id, uq) t WHERE rn <= 5 UNION ALL SELECT * FROM (WITH per_sec AS (SELECT sample_time::timestamp(0) AS sec, unique_query_id, substr(REGEXP_REPLACE(REGEXP_REPLACE(unique_query, '(\r|\n)+', ' '), ' {2,}', ' '), 1, 50) AS uq, count(*) AS cnt FROM dbe_perf.local_active_session WHERE sample_time > '$ash_b' AND sample_time <= '$ash_e' AND state = 'active' AND unique_query_id > 0 GROUP BY sample_time::timestamp(0), unique_query_id, substr(REGEXP_REPLACE(REGEXP_REPLACE(unique_query, '(\r|\n)+', ' '), ' {2,}', ' '), 1, 50)) SELECT * FROM (SELECT 'l' AS src, DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min' AS bucket, unique_query_id, uq AS unique_query, max(cnt) AS max_cnt, round(avg(cnt)) AS avg_cnt, ROW_NUMBER() OVER (PARTITION BY DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min' ORDER BY max(cnt) DESC) AS rn FROM per_sec GROUP BY DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min', unique_query_id, uq) t2 WHERE rn <= 5) x) u ORDER BY bucket, max_cnt DESC) TO '$dbd/ash_sql.csv' WITH CSV HEADER
 PSQL
+    # ---- ASH waitchain (recursive blocker-chain analysis, `vb_tool asp
+    # waitchain` port; 5-minute buckets, rn=1 per bucket+root). Two variants:
+    # las present (dual source, gs fills sample-times las lacks) vs absent
+    # (gs_asp only, bucketing added so both emit the same columns). Empty
+    # result on an unblocked window is normal -- no file rows, header only.
+    if [ "$ash_las_flag" = "0" ]; then
+        PGCONNECT_TIMEOUT=$_ct PGOPTIONS="$_st" psql -d postgres 2>&1 <<PSQL2 | grep -v '^$' >&2 || true
+\copy (WITH RECURSIVE g AS (SELECT * FROM gs_asp WHERE sample_time > '$ash_b' AND sample_time <= '$ash_e'), blocking_chain AS (SELECT sampleid, sessionid AS blocked_sessionid, block_sessionid AS blocker_sessionid, 1 AS level, ARRAY[sessionid] AS path FROM g WHERE block_sessionid IS NOT NULL UNION ALL SELECT bc.sampleid, bc.blocked_sessionid, a.block_sessionid, bc.level + 1, bc.path || a.sessionid FROM blocking_chain bc JOIN g a ON bc.sampleid = a.sampleid AND bc.blocker_sessionid = a.sessionid WHERE a.block_sessionid IS NOT NULL AND NOT a.sessionid = ANY(bc.path)), root_blockers AS (SELECT sampleid, blocked_sessionid, blocker_sessionid AS root_blocker FROM blocking_chain WHERE NOT EXISTS (SELECT 1 FROM g a WHERE a.sampleid = blocking_chain.sampleid AND a.sessionid = blocking_chain.blocker_sessionid AND a.block_sessionid IS NOT NULL)), blocker_stats AS (SELECT sampleid, root_blocker, count(blocked_sessionid) AS blocked_count, min(blocked_sessionid) AS example_blocked_sessionid FROM root_blockers GROUP BY sampleid, root_blocker), raw AS (SELECT DATE_TRUNC('hour', las.sample_time) + FLOOR(EXTRACT(MINUTE FROM las.sample_time) / 5) * INTERVAL '5 min' AS interval_start, CONCAT(las.sessionid::text, '(', case when $ash_c7 then 'a' else 'iit' end, '(', $ash_c9::text, ')') AS root_block_sessid, bs.blocked_count AS b_cnt, substr(las.unique_query, 1, 50) AS h_sql, substr(blocked_las.unique_query, 1, 50) AS w_sql FROM blocker_stats bs JOIN g las ON bs.sampleid = las.sampleid AND bs.root_blocker = las.sessionid JOIN g blocked_las ON bs.sampleid = blocked_las.sampleid AND bs.example_blocked_sessionid = blocked_las.sessionid), bucketed AS (SELECT r.*, row_number() OVER (PARTITION BY interval_start, root_block_sessid ORDER BY b_cnt DESC) AS rn FROM raw r) SELECT '[gs_asp] ' || to_char(interval_start, 'YYYY-MM-DD HH24:MI:SS') || '-' || to_char(interval_start + INTERVAL '5 minutes', 'HH24:MI:SS') AS date_time, root_block_sessid, b_cnt AS max_b_cnt, h_sql, w_sql FROM bucketed WHERE rn = 1 ORDER BY interval_start, max_b_cnt DESC LIMIT 1000) TO '$dbd/ash_waitchain.csv' WITH CSV HEADER
+PSQL2
+    else
+        PGCONNECT_TIMEOUT=$_ct PGOPTIONS="$_st" psql -d postgres 2>&1 <<PSQL2 | grep -v '^$' >&2 || true
+\copy (WITH RECURSIVE blocked_sessions AS (SELECT sampleid, sample_time::timestamp(0) AS sample_time, final_block_sessionid, wait_status, max(sessionid) AS w_sessionid, count(*) AS cnt FROM dbe_perf.local_active_session WHERE sample_time > '$ash_b' AND sample_time <= '$ash_e' AND $ash_c1 AND final_block_sessionid IS NOT NULL GROUP BY sampleid, sample_time::timestamp(0), final_block_sessionid, wait_status), gs_asp_1 AS (SELECT gs.* FROM gs_asp gs WHERE gs.sample_time > '$ash_b' AND gs.sample_time <= '$ash_e' AND NOT EXISTS (SELECT 1 FROM dbe_perf.local_active_session l WHERE l.sample_time::timestamp(0) = gs.sample_time::timestamp(0))), blocking_chain AS (SELECT sampleid, sessionid AS blocked_sessionid, block_sessionid AS blocker_sessionid, 1 AS level, ARRAY[sessionid] AS path FROM gs_asp_1 WHERE block_sessionid IS NOT NULL UNION ALL SELECT bc.sampleid, bc.blocked_sessionid, a.block_sessionid, bc.level + 1, bc.path || a.sessionid FROM blocking_chain bc JOIN gs_asp_1 a ON bc.sampleid = a.sampleid AND bc.blocker_sessionid = a.sessionid WHERE a.block_sessionid IS NOT NULL AND NOT a.sessionid = ANY(bc.path)), root_blockers AS (SELECT sampleid, blocked_sessionid, blocker_sessionid AS root_blocker FROM blocking_chain WHERE NOT EXISTS (SELECT 1 FROM gs_asp_1 a WHERE a.sampleid = blocking_chain.sampleid AND a.sessionid = blocking_chain.blocker_sessionid AND a.block_sessionid IS NOT NULL)), blocker_stats AS (SELECT sampleid, root_blocker, count(blocked_sessionid) AS blocked_count, min(blocked_sessionid) AS example_blocked_sessionid FROM root_blockers GROUP BY sampleid, root_blocker), local_part AS (SELECT DATE_TRUNC('hour', a.sample_time) + FLOOR(EXTRACT(MINUTE FROM a.sample_time) / 5) * INTERVAL '5 min' AS interval_start, CONCAT(b.final_block_sessionid::text, '(', case when $ash_c6 then 'a' else 'iit' end, '(', $ash_c8::text, ')') AS root_block_sessid, b.cnt AS b_cnt, substr(a.unique_query, 1, 50) AS h_sql, substr(c.unique_query, 1, 50) AS w_sql FROM dbe_perf.local_active_session a, blocked_sessions b, dbe_perf.local_active_session c WHERE a.sampleid = b.sampleid AND b.final_block_sessionid = a.sessionid AND b.sampleid = c.sampleid AND b.w_sessionid = c.sessionid), gs_part AS (SELECT DATE_TRUNC('hour', las.sample_time) + FLOOR(EXTRACT(MINUTE FROM las.sample_time) / 5) * INTERVAL '5 min' AS interval_start, CONCAT(las.sessionid::text, '(', case when $ash_c7 then 'a' else 'iit' end, '(', $ash_c9::text, ')') AS root_block_sessid, bs.blocked_count AS b_cnt, substr(las.unique_query, 1, 50) AS h_sql, substr(blocked_las.unique_query, 1, 50) AS w_sql FROM blocker_stats bs JOIN gs_asp_1 las ON bs.sampleid = las.sampleid AND bs.root_blocker = las.sessionid JOIN gs_asp_1 blocked_las ON bs.sampleid = blocked_las.sampleid AND bs.example_blocked_sessionid = blocked_las.sessionid), merged AS (SELECT '[local_active_session]' AS src, interval_start, root_block_sessid, b_cnt, h_sql, w_sql FROM local_part UNION ALL SELECT '[gs_asp]' AS src, interval_start, root_block_sessid, b_cnt, h_sql, w_sql FROM gs_part), picked AS (SELECT m.* FROM merged m WHERE m.src = '[gs_asp]' OR NOT EXISTS (SELECT 1 FROM merged m2 WHERE m2.src = '[gs_asp]' AND m2.interval_start = m.interval_start)), bucketed AS (SELECT p.*, row_number() OVER (PARTITION BY p.src, p.interval_start, p.root_block_sessid ORDER BY p.b_cnt DESC) AS rn FROM picked p) SELECT src || ' ' || to_char(interval_start, 'YYYY-MM-DD HH24:MI:SS') || '-' || to_char(interval_start + INTERVAL '5 minutes', 'HH24:MI:SS') AS date_time, root_block_sessid, b_cnt AS max_b_cnt, h_sql, w_sql FROM bucketed WHERE rn = 1 ORDER BY interval_start, max_b_cnt DESC LIMIT 1000) TO '$dbd/ash_waitchain.csv' WITH CSV HEADER
+PSQL2
+    fi
     local t
     for t in statement wait_events instance_time database pagewriter memory_node_detail shared_memory session_memory session_by_sess pg_settings; do
         [ -s "$dbd/$t.csv" ] || echo "  [WARN] db/$t.csv missing/empty (view unavailable or DB error)" >&2
@@ -21540,8 +21564,9 @@ def load_ash_flushes(repl_dir, begin_ts, end_ts):
                               io, wal_sync, trans_sync]}
       event: {(src, bucket, event): [event_type, max_cnt, avg_cnt]}
       sql:   {(src, bucket, qid): [unique_query, max_cnt, avg_cnt]}
+      waitchain: {(date_time, root): [max_b_cnt, h_sql, w_sql]}
     Absent ash_*.csv (PG instance / enable_asp off / idle flush) -> empty."""
-    rows = {"cnt": [], "event": [], "sql": []}
+    rows = {"cnt": [], "event": [], "sql": [], "waitchain": []}
     if repl_dir and os.path.isdir(repl_dir):
         b, e = str(begin_ts or ""), str(end_ts or "")
         for d in sorted(glob.glob(os.path.join(repl_dir, "snap_*"))):
@@ -21554,7 +21579,7 @@ def load_ash_flushes(repl_dir, begin_ts, end_ts):
                 continue
             if not ts or (b and ts <= b) or (e and ts > e):
                 continue
-            for name in ("cnt", "event", "sql"):
+            for name in ("cnt", "event", "sql", "waitchain"):
                 rows[name].extend(read_csv_rows(os.path.join(d, "db", "ash_%s.csv" % name)))
     def _bk(r):
         return (r.get("bucket") or "")[:16]          # strip any tz suffix
@@ -21565,7 +21590,17 @@ def load_ash_flushes(repl_dir, begin_ts, end_ts):
         return _src(r) == "g" or _bk(r) not in gset
     def _mx(cur, val):
         return max(cur, val) if cur is not None else val
-    out = {"cnt": {}, "event": {}, "sql": {}}
+    out = {"cnt": {}, "event": {}, "sql": {}, "waitchain": {}}
+    for r in rows["waitchain"]:
+        dt = r.get("date_time") or ""
+        rt = r.get("root_block_sessid") or ""
+        if not dt or not rt:
+            continue
+        k = (dt, rt)
+        c = to_num(r.get("max_b_cnt", 0) or 0)
+        v = out["waitchain"].get(k)
+        if v is None or c > v[0]:
+            out["waitchain"][k] = [c, r.get("h_sql") or "", r.get("w_sql") or ""]
     for r in rows["cnt"]:
         if not _bk(r) or not _take(r):
             continue
@@ -24343,8 +24378,8 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     # buckets of per-second counts (max/avg), source tag per bucket, top-5
     # SQL per bucket. Hidden when no ash csv (PG / enable_asp off / idle).
     _ash = (load_ash_flushes(repl_dir, m.get("begin_ts", ""), m.get("end_ts", ""))
-            if repl_dir is not None else {"cnt": {}, "event": {}, "sql": {}})
-    if _ash["cnt"] or _ash["event"] or _ash["sql"]:
+            if repl_dir is not None else {"cnt": {}, "event": {}, "sql": {}, "waitchain": {}})
+    if _ash["cnt"] or _ash["event"] or _ash["sql"] or _ash["waitchain"]:
         sec("Active Session History")
         def _ash_dt(src, bk):
             from datetime import datetime, timedelta
@@ -24380,17 +24415,27 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                                 fmt_int(v[1]), fmt_int(v[2])))
             parts.append('</table>')
         if _ash["sql"]:
-            sub("Active Session History Top SQL")
-            parts.append('<table class="t"><tr><th>date_time</th><th class="n">unique_query_id</th>'
-                         '<th>unique_query</th><th class="n">max_cnt</th>'
-                         '<th class="n">avg_cnt</th></tr>')
+            _h = ['<table class="t"><tr><th>date_time</th><th class="n">unique_query_id</th>'
+                  '<th>unique_query</th><th class="n">max_cnt</th>'
+                  '<th class="n">avg_cnt</th></tr>']
             for (src, bk, qid), v in sorted(_ash["sql"].items(),
                                             key=lambda kv: (kv[0][1], -kv[1][1])):
-                parts.append('<tr><td>%s</td><td class="n">%s</td><td>%s</td>'
-                             '<td class="n">%s</td><td class="n">%s</td></tr>'
-                             % (_ash_dt(src, bk), esc(qid), esc(v[0]),
-                                fmt_int(v[1]), fmt_int(v[2])))
-            parts.append('</table>')
+                _h.append('<tr><td>%s</td><td class="n">%s</td><td>%s</td>'
+                          '<td class="n">%s</td><td class="n">%s</td></tr>'
+                          % (_ash_dt(src, bk), esc(qid), esc(v[0]),
+                             fmt_int(v[1]), fmt_int(v[2])))
+            _h.append('</table>')
+            parts.append(_fold("Active Session History Top SQL", "".join(_h)))
+        if _ash["waitchain"]:
+            _h = ['<table class="t"><tr><th>date_time</th><th>root_block_sessid</th>'
+                  '<th class="n">max_b_cnt</th><th>h_sql</th><th>w_sql</th></tr>']
+            for (dt, rt), v in sorted(_ash["waitchain"].items(),
+                                      key=lambda kv: (-kv[1][0], kv[0][0])):
+                _h.append('<tr><td>%s</td><td>%s</td><td class="n">%s</td>'
+                          '<td>%s</td><td>%s</td></tr>'
+                          % (esc(dt), esc(rt), fmt_int(v[0]), esc(v[1]), esc(v[2])))
+            _h.append('</table>')
+            parts.append(_fold("Active Session History Waitchain", "".join(_h)))
 
     # ================= Top 10 Foreground Events =================
     sec("Top 10 Wait Events by Total Wait Time")
