@@ -24726,6 +24726,104 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                          % (esc(_n), esc(_n), esc(_s), esc(_s), esc(_c), esc(_d)))
     parts.append('</table>')
 
+    # ================= ADDM =================
+    # Oracle-ADDM-style findings: heuristic rules over the window data already
+    # collected above (wait events, SQL concentration, OS, ASH waitchain),
+    # ordered by estimated share of DB time. Rules are pointers, not oracles.
+    sec("ADDM")
+    _F = []          # (impact_pct, finding, recommendation)
+
+    def _addm_add(impact, finding, rec):
+        if impact > 0:
+            _F.append((min(impact, 100.0), finding, rec))
+
+    # -- lock contention straight from the ASH waitchain
+    if _ash["waitchain"]:
+        (dt_r, rt_r), vw = max(_ash["waitchain"].items(), key=lambda kv: kv[1][0])
+        _avg_act = (sum(v[1] for v in _ash["cnt"].values()) / len(_ash["cnt"])
+                    if _ash["cnt"] else 0.0)
+        _imp = min(100.0, vw[0] * 100.0 / _avg_act) if _avg_act > 0 else 50.0
+        _addm_add(_imp,
+                  "Lock contention: root blocker session %s blocked %d session(s) with %s"
+                  % (esc(rt_r), vw[0], esc((vw[2] or "")[:60] or "a lock wait")),
+                  "Inspect the root blocker's transaction (commit or terminate it if "
+                  "idle in transaction); shorten its lock hold time")
+    # -- top wait events by share of DB time
+    if dbt > 0:
+        for _ev in we_sorted[:3]:
+            _sh = WE[_ev].get("total_wait_time", 0.0) * 100.0 / dbt
+            if _sh >= 20.0:
+                _addm_add(_sh,
+                          "Wait event %s accounted for %.1f%% of DB time (%s waits)"
+                          % (esc(_ev), _sh, fmt_int(WE[_ev].get("wait", 0))),
+                          "Drill into the event's class: I/O-bound events -> tune the "
+                          "top SQL above and their access paths; lock/lwlock -> "
+                          "concurrency or locking scheme")
+    # -- SQL concentration
+    if ST:
+        _st_sum = sum(d.get("db_time", 0.0) for d in ST.values())
+        if _st_sum > 0:
+            _k0 = max(ST, key=lambda k: ST[k].get("db_time", 0.0))
+            _sh0 = ST[_k0].get("db_time", 0.0) * 100.0 / _st_sum
+            if _sh0 >= 30.0:
+                _addm_add(_sh0,
+                          "SQL concentration: unique_sql_id %s took %.1f%% of total "
+                          "SQL time across %s calls"
+                          % (esc(str(_k0)), _sh0, fmt_int(ST[_k0].get("n_calls", 0))),
+                          "Tuning this one statement yields the largest single gain; "
+                          "check its plan in the SQL Statistics section")
+    # -- OS CPU saturation
+    _cb = osd.get("cpu", {}).get("busy", 0.0)
+    _ci = osd.get("cpu", {}).get("iowait", 0.0)
+    if _cb > 80.0:
+        _addm_add(_cb, "OS CPU busy %.1f%% (iowait %.1f%%)" % (_cb, _ci),
+                  "The host is CPU-saturated: profile the top CPU consumers, check "
+                  "for parse-heavy or worker-thread sprawl before adding cores")
+    elif _ci > 20.0:
+        _addm_add(_ci, "OS iowait %.1f%% of CPU time" % _ci,
+                  "Storage is the bottleneck from the OS view: check the disk "
+                  "awaits above and the I/O-heaviest SQL")
+    # -- slow disks
+    for d in osd.get("disks", []):
+        _iops = (d.get("read_iops", 0) + d.get("write_iops", 0))
+        _aw = d.get("await_ms", 0.0)
+        if _iops > 10 and _aw > 20:
+            _addm_add(max(_ci, 25.0),
+                      "Device %s averages %.1f ms await under %.0f IOPS"
+                      % (esc(d.get("name", "?")), _aw, _iops),
+                      "Move hot objects off this device, raise effectiveness of the "
+                      "buffer cache, or upgrade the storage path")
+    # -- paging / memory pressure
+    _vm = osd.get("vm", {})
+    if _vm.get("pswpin", 0) > 10 or _vm.get("pswpout", 0) > 10:
+        _addm_add(70.0, "Swapping detected (pswpin %.1f/s, pswpout %.1f/s)"
+                  % (_vm.get("pswpin", 0), _vm.get("pswpout", 0)),
+                  "The instance is memory-starved: reduce shared memory footprint "
+                  "or add RAM before anything else")
+    elif _vm.get("pgmajfault", 0) > 5:
+        _addm_add(40.0, "Major page faults %.1f/s" % _vm.get("pgmajfault", 0),
+                  "Check for huge pages / memory overcommit settings")
+    # -- network
+    _rp = (osd.get("tcp") or {}).get("retrans_pct")
+    if _rp is not None and _rp > 3.0:
+        _addm_add(min(_rp * 10, 80.0), "TCP retransmission %.2f%% of outbound segments" % _rp,
+                  "Packet loss caps per-connection throughput (see the Mathis line); "
+                  "involve the network team if it persists")
+
+    _F.sort(key=lambda x: -x[0])
+    parts.append('<table class="t"><tr><th class="n">#</th><th class="n">Impact</th>'
+                 '<th>Findings</th><th>Recommendations</th></tr>')
+    if not _F:
+        parts.append('<tr><td colspan="4" class="note">'
+                     'No significant database performance findings were detected '
+                     'for this period</td></tr>')
+    for _i, (_imp, _fd, _rc) in enumerate(_F, 1):
+        parts.append('<tr><td class="n">%d</td><td class="n%s">%.1f%%</td>'
+                     '<td class="wrap">%s</td><td class="wrap">%s</td></tr>'
+                     % (_i, " b bad" if _imp >= 50 else " b" if _imp >= 20 else "",
+                        _imp, _fd, _rc))
+    parts.append('</table>')
+
     _toc_html = '<div class="toc" id="toc"><b>Contents</b><ul>' + "".join(
         '<li><a href="#%s">%s</a></li>' % (_id, esc(t)) for t, _id in _toc) + '</ul></div>'
     parts.insert(_toc_pos, _toc_html)
