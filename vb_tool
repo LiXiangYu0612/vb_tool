@@ -23189,7 +23189,7 @@ def render(awr_dir, current_dir, metric, top_n, out_html):
     parts.append("<h2>System / OS (window Δ)</h2>")
 
     # --- CPU utilization breakdown ---
-    parts.append("<h3 class='sub'>CPU utilization (%)</h3>")
+    parts.append("<h3 class='sub'>CPU utilization</h3>")
     parts.append("<table><tr><th>Component</th><th class='num'>awr</th>"
                  "<th class='num'>current</th><th class='num'>Δ (pp)</th></tr>")
     def cpurow(label, field, warn_up=False):
@@ -23450,7 +23450,7 @@ def render_single(window_dir, metric, top_n, out_html):
     # ---- OS ----
     parts.append("<h2>System / OS (window)</h2>")
 
-    parts.append("<h3 class='sub'>CPU utilization (%)</h3>")
+    parts.append("<h3 class='sub'>CPU utilization</h3>")
     parts.append("<table><tr><th>Component</th><th class='num'>window avg</th></tr>")
     def cpurow(label, field):
         parts.append("<tr><td>%s</td><td class='num'>%.1f%%</td></tr>"
@@ -23755,7 +23755,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         if osd.get("platform"):
             parts.append('<tr><td>Platform</td><td class="n">%s</td></tr>' % esc(osd["platform"]))
         parts.append('</table>')
-    sub("CPU utilization (%)")
+    sub("CPU utilization")
     # horizontal layout: components as columns, one value row (busy bold >50%, red+bold >80%)
     _cf = ("busy", "user", "nice", "system", "iowait", "irq", "softirq", "steal", "idle")
     parts.append('<table class="t"><tr>' +
@@ -23981,13 +23981,13 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             _bysq = [(k, d) for k, d in sorted(_peaks.items(), key=lambda kv: -kv[1]["max_sq"])
                      if d["max_sq"] > 0][:10]
             if _bysq:
-                parts.append('<div class="sub">Top 10 by Send-Q (window peaks)</div>')
+                parts.append('<div class="sub">Top 10 by Send-Q</div>')
                 parts.append(_phdr + _peak_rows(_bysq, "sq") + '</table>')
             _phdr2 = ('<table class="t"><tr><th>Peer</th><th>Local Port</th><th>Peak RTT (ms)</th>'
                       '<th>Peak Time</th><th>Send-Q at peak</th><th>cwnd</th><th>retr</th></tr>')
             _byrtt = sorted(_peaks.items(), key=lambda kv: -kv[1]["max_rtt"])[:10]
             if _byrtt:
-                parts.append('<div class="sub">Top 10 by RTT (window peaks)</div>')
+                parts.append('<div class="sub">Top 10 by RTT</div>')
                 parts.append(_phdr2 + _peak_rows(_byrtt, "rtt") + '</table>')
         elif _rttconns:
             def _peer_rows(sel):
@@ -24005,9 +24005,9 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                 return "".join(r)
             _phdr = ('<table class="t"><tr><th>Peer</th><th>Local Port</th><th>RTT (ms)</th>'
                      '<th>RTTVar</th><th>cwnd</th><th>retr</th><th>Send-Q</th></tr>')
-            parts.append('<div class="sub">Top 10 by Send-Q (END snap, instantaneous)</div>')
+            parts.append('<div class="sub">Top 10 by Send-Q</div>')
             parts.append(_phdr + _peer_rows(sorted(_rttconns, key=lambda c: -c["sendq"])[:10]) + '</table>')
-            parts.append('<div class="sub">Top 10 by RTT (END snap, instantaneous)</div>')
+            parts.append('<div class="sub">Top 10 by RTT</div>')
             parts.append(_phdr + _peer_rows(sorted(_rttconns, key=lambda c: -c["rtt_ms"])[:10]) + '</table>')
 
     _sn = osd.get("softnet")
@@ -24661,7 +24661,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                          or win2["os"].get(("begin", "cpuinfo"), ""))
     if _ci1 or _ci2:
         _ci = _ci2 or _ci1   # hardware info is static; prefer P2 (newer), fall back P1
-        sub("CPU Info (period-end snapshot)")
+        sub("CPU Info - period-end snapshot")
         parts.append('<table class="t"><tr><th>Item</th><th class="n">Value</th></tr>')
         parts.append('<tr><td>Model</td><td class="n">%s</td></tr>' % esc(_ci["model"]))
         parts.append('<tr><td>Sockets</td><td class="n">%d</td></tr>' % _ci["sockets"])
@@ -24676,7 +24676,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         if _plat:
             parts.append('<tr><td>Platform</td><td class="n">%s</td></tr>' % esc(_plat))
         parts.append('</table>')
-    sub("CPU utilization (%)")
+    sub("CPU utilization")
     # horizontal layout: components as columns, P1 / P2 / delta as rows
     _cf = ("busy", "user", "nice", "system", "iowait", "irq", "softirq", "steal", "idle")
     parts.append('<table class="t"><tr><th></th>' +
@@ -24738,7 +24738,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         if not _any:
             parts.append('<tr><td colspan="10" class="note">no data</td></tr>')
         parts.append('</table>')
-    sub("System Activity (per second)")
+    sub("System Activity")
     _t1, _t2 = osd1.get("tcp") or {}, osd2.get("tcp") or {}
     _has_f = osd1.get("forks_per_sec") is not None or osd2.get("forks_per_sec") is not None
     _has_t = _t1.get("opens_per_sec") is not None and _t2.get("opens_per_sec") is not None
@@ -24765,7 +24765,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     parts.append(_row("P2", _c2, False))
     parts.append(_row("&Delta;", [b - a for a, b in zip(_c1, _c2)], True))
     parts.append('</table>')
-    sub("OS Memory (period-end snapshot, MB)")
+    sub("OS Memory - period-end snapshot, MB")
     _m1 = parse_meminfo(win1["os"].get(("end", "meminfo"), ""))
     _m2 = parse_meminfo(win2["os"].get(("end", "meminfo"), ""))
     parts.append('<table class="t"><tr><th>Metric</th><th class="n">P1 MB</th>'
@@ -24776,7 +24776,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         parts.append('<tr><td>%s</td><td class="n">%d</td><td class="n">%d</td>'
                      '<td class="n">%+d</td></tr>' % (esc(lbl), v1, v2, v2 - v1))
     parts.append('</table>')
-    sub("Memory / Paging (per second)")
+    sub("Memory / Paging")
     vm1 = osd1.get("vm", {}); vm2 = osd2.get("vm", {})
     parts.append('<table class="t"><tr><th>Metric</th><th class="n">P1 /s</th>'
                  '<th class="n">P2 /s</th><th class="n">&Delta; /s</th></tr>')
@@ -24790,7 +24790,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                         thr_cell_cls(v1, *_hi) if _hi else "", fmt_num(v1),
                         thr_cell_cls(v2, *_hi) if _hi else "", fmt_num(v2), fmt_num(v2 - v1)))
     parts.append('</table>')
-    sub("Disk I/O per device (per second)")
+    sub("Disk I/O per device")
     _d1 = {d["name"]: d for d in osd1.get("disks", [])}
     _d2 = {d["name"]: d for d in osd2.get("disks", [])}
     _dmeta = osd2.get("disk_meta") or osd1.get("disk_meta") or {}
@@ -24831,7 +24831,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         row += '</tr>'
         parts.append(row)
     parts.append('</table>')
-    sub("Network per interface (per second)")
+    sub("Network per interface")
     _i1 = {it["name"]: it for it in osd1.get("ifaces", [])}
     _i2 = {it["name"]: it for it in osd2.get("ifaces", [])}
     _nmeta = osd2.get("net_meta") or osd1.get("net_meta") or {}
@@ -24858,7 +24858,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
 
     _s1, _s2 = osd1.get("softnet"), osd2.get("softnet")
     if _s1 is not None or _s2 is not None:
-        sub("Softnet (per second)")
+        sub("Softnet")
         parts.append('<table class="t"><tr><th>Metric</th><th class="n">P1</th>'
                      '<th class="n">P2</th><th class="n">&Delta;</th></tr>')
         for _lbl, _key, _b, _r in (("packets processed", "packets", None, None),
@@ -24989,7 +24989,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
 
     # ================= Database Memory =================
     sec("Database Memory")
-    sub("Memory GUCs (live)")
+    sub("Memory GUCs - live")
     _rows = psql_query("SELECT name, decode(unit,'8kB',setting*8||'kB',setting||COALESCE(unit,' ')) AS setting "
                        "FROM pg_settings WHERE name IN ('maintenance_work_mem','work_mem','shared_buffers',"
                        "'max_process_memory','wal_buffers','effective_cache_size','cstore_buffers',"
@@ -25195,7 +25195,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     # pg_settings is a STATE snapshot (not a cumulative counter), so each period is
     # represented by its END snap's value. Only params whose decoded setting differs
     # between period1.end and period2.end are shown.
-    sec("Database Parameters (changed only)", fold=True)
+    sec("Database Parameters - changed only", fold=True)
     _pgs1 = win1["db"].get(("end", "pg_settings"), [])
     _pgs2 = win2["db"].get(("end", "pg_settings"), [])
     def _pgmap(rows):
