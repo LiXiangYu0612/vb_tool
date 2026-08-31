@@ -21150,15 +21150,15 @@ _awr_collect() {
         echo "  [ERROR] cannot reach the database (connect probe failed, skipped DB collection)" >&2
         return 1
     fi
-    # ---- ASH flush window: [previous snap ts, now]. Both ASP tables are
-    # read (gs_asp AND dbe_perf.local_active_session, tagged src g/l): 204
-    # evidence shows the live stream can switch between them (gs_asp froze
-    # at a 2-day retention boundary, las carried on from that second) -- the
-    # renderer's per-5-min-bucket source pick dedupes the seam, mirroring
-    # the `vb_tool asp` command's logic. Flushing rollups at every create
-    # keeps each snap self-contained and bounds query cost to one interval.
-    # Neither table available (PG instance / enable_asp off) -> \copy errors
-    # swallowed (no ON_ERROR_STOP) -> no ash_*.csv -> renderer hides section.
+    # ---- ASH flush window: [previous snap ts, now]. Output replicates the
+    # `vb_tool asp` command (per-second counts rolled to 5-minute buckets,
+    # max/avg columns; top-5 SQL per bucket; both sources gs_asp AND
+    # dbe_perf.local_active_session tagged g/l -- the live stream hands off
+    # between them, observed on 204; the renderer's per-bucket source pick
+    # dedupes the seam, same as asp). Flushing at every create keeps each
+    # snap self-contained and bounds query cost to one interval. Neither
+    # table available (PG / enable_asp off) -> \copy errors swallowed ->
+    # no ash_*.csv -> renderer hides section.
     local ash_b ash_e _ash_prev="" _id _best=-1 _d
     ash_e=$(date '+%F %T')
     for _d in "${target%/*}"/snap_*; do
@@ -21188,10 +21188,9 @@ _awr_collect() {
 \copy (SELECT name,setting,unit,context,short_desc FROM pg_settings ORDER BY name) TO '$dbd/pg_settings.csv' WITH CSV HEADER
 \copy (SELECT application_name, client_addr, state, sync_state, sender_sent_location, receiver_write_location, receiver_flush_location, receiver_replay_location FROM pg_stat_replication ORDER BY application_name) TO '$dbd/replication.csv' WITH CSV HEADER
 \copy (SELECT slot_name, plugin, slot_type, database, active, xmin, catalog_xmin, restart_lsn, dummy_standby, confirmed_flush FROM pg_replication_slots ORDER BY slot_name) TO '$dbd/replication_slots.csv' WITH CSV HEADER
-\copy (SELECT * FROM (SELECT 'g' AS src, DATE_TRUNC('hour', sample_time) + FLOOR(EXTRACT(MINUTE FROM sample_time) / 5) * INTERVAL '5 min' AS bucket, count(*) AS samples, sum(CASE WHEN a.event IS NULL OR a.event = 'none' THEN 1 ELSE 0 END) AS oncpu, sum(CASE WHEN b.type = 'LOCK_EVENT' THEN 1 ELSE 0 END) AS lock_cnt, sum(CASE WHEN b.type = 'LWLOCK_EVENT' THEN 1 ELSE 0 END) AS lwlock_cnt, sum(CASE WHEN b.type = 'IO_EVENT' THEN 1 ELSE 0 END) AS io_cnt FROM gs_asp a LEFT JOIN dbe_perf.wait_events b ON a.event = b.event WHERE sample_time > '$ash_b' AND sample_time <= '$ash_e' AND a.state = 'active' GROUP BY DATE_TRUNC('hour', sample_time) + FLOOR(EXTRACT(MINUTE FROM sample_time) / 5) * INTERVAL '5 min' UNION ALL SELECT 'l' AS src, DATE_TRUNC('hour', sample_time) + FLOOR(EXTRACT(MINUTE FROM sample_time) / 5) * INTERVAL '5 min' AS bucket, count(*) AS samples, sum(CASE WHEN a.cur_event IS NULL OR a.cur_event = 'none' THEN 1 ELSE 0 END) AS oncpu, sum(CASE WHEN b.type = 'LOCK_EVENT' THEN 1 ELSE 0 END) AS lock_cnt, sum(CASE WHEN b.type = 'LWLOCK_EVENT' THEN 1 ELSE 0 END) AS lwlock_cnt, sum(CASE WHEN b.type = 'IO_EVENT' THEN 1 ELSE 0 END) AS io_cnt FROM dbe_perf.local_active_session a LEFT JOIN dbe_perf.wait_events b ON a.cur_event = b.event WHERE sample_time > '$ash_b' AND sample_time <= '$ash_e' AND a.state = 'active' GROUP BY DATE_TRUNC('hour', sample_time) + FLOOR(EXTRACT(MINUTE FROM sample_time) / 5) * INTERVAL '5 min') u ORDER BY bucket, src) TO '$dbd/ash_bucket.csv' WITH CSV HEADER
-\copy (SELECT * FROM (SELECT 'g' AS src, DATE_TRUNC('hour', sample_time) + FLOOR(EXTRACT(MINUTE FROM sample_time) / 5) * INTERVAL '5 min' AS bucket, a.event AS event, count(*) AS samples FROM gs_asp a WHERE sample_time > '$ash_b' AND sample_time <= '$ash_e' AND a.state = 'active' AND a.event IS NOT NULL AND a.event <> 'none' GROUP BY DATE_TRUNC('hour', sample_time) + FLOOR(EXTRACT(MINUTE FROM sample_time) / 5) * INTERVAL '5 min', a.event UNION ALL SELECT 'l' AS src, DATE_TRUNC('hour', sample_time) + FLOOR(EXTRACT(MINUTE FROM sample_time) / 5) * INTERVAL '5 min' AS bucket, a.cur_event AS event, count(*) AS samples FROM dbe_perf.local_active_session a WHERE sample_time > '$ash_b' AND sample_time <= '$ash_e' AND a.state = 'active' AND a.cur_event IS NOT NULL AND a.cur_event <> 'none' GROUP BY DATE_TRUNC('hour', sample_time) + FLOOR(EXTRACT(MINUTE FROM sample_time) / 5) * INTERVAL '5 min', a.cur_event) u ORDER BY bucket, samples DESC LIMIT 800) TO '$dbd/ash_event.csv' WITH CSV HEADER
-\copy (SELECT * FROM (SELECT 'g' AS src, DATE_TRUNC('hour', sample_time) + FLOOR(EXTRACT(MINUTE FROM sample_time) / 5) * INTERVAL '5 min' AS bucket, unique_query_id, count(*) AS samples, left(min(unique_query), 2000) AS query FROM gs_asp WHERE sample_time > '$ash_b' AND sample_time <= '$ash_e' AND state = 'active' AND unique_query_id <> 0 GROUP BY DATE_TRUNC('hour', sample_time) + FLOOR(EXTRACT(MINUTE FROM sample_time) / 5) * INTERVAL '5 min', unique_query_id UNION ALL SELECT 'l' AS src, DATE_TRUNC('hour', sample_time) + FLOOR(EXTRACT(MINUTE FROM sample_time) / 5) * INTERVAL '5 min' AS bucket, unique_query_id, count(*) AS samples, left(min(unique_query), 2000) AS query FROM dbe_perf.local_active_session WHERE sample_time > '$ash_b' AND sample_time <= '$ash_e' AND state = 'active' AND unique_query_id <> 0 GROUP BY DATE_TRUNC('hour', sample_time) + FLOOR(EXTRACT(MINUTE FROM sample_time) / 5) * INTERVAL '5 min', unique_query_id) u ORDER BY bucket, samples DESC LIMIT 600) TO '$dbd/ash_sql.csv' WITH CSV HEADER
-\copy (SELECT * FROM (SELECT 'g' AS src, DATE_TRUNC('hour', sample_time) + FLOOR(EXTRACT(MINUTE FROM sample_time) / 5) * INTERVAL '5 min' AS bucket, sessionid, min(start_time)::timestamp(0) AS started, count(*) AS samples, coalesce(min(application_name), '') AS app, coalesce(min(client_addr::text), '') AS client FROM gs_asp WHERE sample_time > '$ash_b' AND sample_time <= '$ash_e' AND state = 'active' GROUP BY DATE_TRUNC('hour', sample_time) + FLOOR(EXTRACT(MINUTE FROM sample_time) / 5) * INTERVAL '5 min', sessionid, start_time UNION ALL SELECT 'l' AS src, DATE_TRUNC('hour', sample_time) + FLOOR(EXTRACT(MINUTE FROM sample_time) / 5) * INTERVAL '5 min' AS bucket, sessionid, min(start_time)::timestamp(0) AS started, count(*) AS samples, coalesce(min(application_name), '') AS app, coalesce(min(client_addr::text), '') AS client FROM dbe_perf.local_active_session WHERE sample_time > '$ash_b' AND sample_time <= '$ash_e' AND state = 'active' GROUP BY DATE_TRUNC('hour', sample_time) + FLOOR(EXTRACT(MINUTE FROM sample_time) / 5) * INTERVAL '5 min', sessionid, start_time) u ORDER BY bucket, samples DESC LIMIT 600) TO '$dbd/ash_session.csv' WITH CSV HEADER
+\copy (SELECT * FROM (WITH per_sec AS (SELECT sample_time::timestamp(0) AS sec, count(*) AS cnt, sum(CASE WHEN a.state = 'active' THEN 1 ELSE 0 END) AS active_cnt, sum(CASE WHEN b.type = 'LOCK_EVENT' THEN 1 ELSE 0 END) AS wlock, sum(CASE WHEN b.type = 'LWLOCK_EVENT' THEN 1 ELSE 0 END) AS wlw, sum(CASE WHEN b.type = 'IO_EVENT' THEN 1 ELSE 0 END) AS wio, sum(CASE WHEN a.event = 'wait wal sync' THEN 1 ELSE 0 END) AS wwal, sum(CASE WHEN a.event = 'wait transaction sync' THEN 1 ELSE 0 END) AS wtrans FROM gs_asp a LEFT JOIN dbe_perf.wait_events b ON a.event = b.event WHERE sample_time > '$ash_b' AND sample_time <= '$ash_e' GROUP BY sample_time::timestamp(0)) SELECT 'g' AS src, DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min' AS bucket, max(cnt) AS max_sess, round(avg(cnt)) AS avg_sess, max(active_cnt) AS max_active_sess, max(wlock) AS wait_lock, max(wlw) AS wait_lwlock, max(wio) AS wait_io, max(wwal) AS wait_wal_sync, max(wtrans) AS wait_trans_sync FROM per_sec GROUP BY DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min' UNION ALL SELECT * FROM (WITH per_sec AS (SELECT sample_time::timestamp(0) AS sec, count(*) AS cnt, sum(CASE WHEN a.state = 'active' THEN 1 ELSE 0 END) AS active_cnt, sum(CASE WHEN b.type = 'LOCK_EVENT' THEN 1 ELSE 0 END) AS wlock, sum(CASE WHEN b.type = 'LWLOCK_EVENT' THEN 1 ELSE 0 END) AS wlw, sum(CASE WHEN b.type = 'IO_EVENT' THEN 1 ELSE 0 END) AS wio, sum(CASE WHEN a.cur_event = 'wait wal sync' THEN 1 ELSE 0 END) AS wwal, sum(CASE WHEN a.cur_event = 'wait transaction sync' THEN 1 ELSE 0 END) AS wtrans FROM dbe_perf.local_active_session a LEFT JOIN dbe_perf.wait_events b ON a.cur_event = b.event WHERE sample_time > '$ash_b' AND sample_time <= '$ash_e' GROUP BY sample_time::timestamp(0)) SELECT 'l' AS src, DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min' AS bucket, max(cnt) AS max_sess, round(avg(cnt)) AS avg_sess, max(active_cnt) AS max_active_sess, max(wlock) AS wait_lock, max(wlw) AS wait_lwlock, max(wio) AS wait_io, max(wwal) AS wait_wal_sync, max(wtrans) AS wait_trans_sync FROM per_sec GROUP BY DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min') x) u ORDER BY bucket, src) TO '$dbd/ash_cnt.csv' WITH CSV HEADER
+\copy (SELECT * FROM (WITH per_sec AS (SELECT sample_time::timestamp(0) AS sec, a.event AS event, b.type AS event_type, count(*) AS cnt FROM gs_asp a LEFT JOIN dbe_perf.wait_events b ON a.event = b.event WHERE sample_time > '$ash_b' AND sample_time <= '$ash_e' AND a.state = 'active' AND a.event IS NOT NULL AND a.event <> 'none' GROUP BY sample_time::timestamp(0), a.event, b.type) SELECT 'g' AS src, DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min' AS bucket, event_type, event, max(cnt) AS max_cnt, round(avg(cnt)) AS avg_cnt FROM per_sec GROUP BY DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min', event_type, event UNION ALL SELECT * FROM (WITH per_sec AS (SELECT sample_time::timestamp(0) AS sec, a.cur_event AS event, b.type AS event_type, count(*) AS cnt FROM dbe_perf.local_active_session a LEFT JOIN dbe_perf.wait_events b ON a.cur_event = b.event WHERE sample_time > '$ash_b' AND sample_time <= '$ash_e' AND a.state = 'active' AND a.cur_event IS NOT NULL AND a.cur_event <> 'none' GROUP BY sample_time::timestamp(0), a.cur_event, b.type) SELECT 'l' AS src, DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min' AS bucket, event_type, event, max(cnt) AS max_cnt, round(avg(cnt)) AS avg_cnt FROM per_sec GROUP BY DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min', event_type, event) x) u ORDER BY bucket, max_cnt DESC LIMIT 800) TO '$dbd/ash_event.csv' WITH CSV HEADER
+\copy (SELECT * FROM (WITH per_sec AS (SELECT sample_time::timestamp(0) AS sec, unique_query_id, substr(REGEXP_REPLACE(REGEXP_REPLACE(unique_query, '(\r|\n)+', ' '), ' {2,}', ' '), 1, 50) AS uq, count(*) AS cnt FROM gs_asp WHERE sample_time > '$ash_b' AND sample_time <= '$ash_e' AND state = 'active' AND unique_query_id > 0 GROUP BY sample_time::timestamp(0), unique_query_id, substr(REGEXP_REPLACE(REGEXP_REPLACE(unique_query, '(\r|\n)+', ' '), ' {2,}', ' '), 1, 50)) SELECT * FROM (SELECT 'g' AS src, DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min' AS bucket, unique_query_id, uq AS unique_query, max(cnt) AS max_cnt, round(avg(cnt)) AS avg_cnt, ROW_NUMBER() OVER (PARTITION BY DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min' ORDER BY max(cnt) DESC) AS rn FROM per_sec GROUP BY DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min', unique_query_id, uq) t WHERE rn <= 5 UNION ALL SELECT * FROM (WITH per_sec AS (SELECT sample_time::timestamp(0) AS sec, unique_query_id, substr(REGEXP_REPLACE(REGEXP_REPLACE(unique_query, '(\r|\n)+', ' '), ' {2,}', ' '), 1, 50) AS uq, count(*) AS cnt FROM dbe_perf.local_active_session WHERE sample_time > '$ash_b' AND sample_time <= '$ash_e' AND state = 'active' AND unique_query_id > 0 GROUP BY sample_time::timestamp(0), unique_query_id, substr(REGEXP_REPLACE(REGEXP_REPLACE(unique_query, '(\r|\n)+', ' '), ' {2,}', ' '), 1, 50)) SELECT * FROM (SELECT 'l' AS src, DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min' AS bucket, unique_query_id, uq AS unique_query, max(cnt) AS max_cnt, round(avg(cnt)) AS avg_cnt, ROW_NUMBER() OVER (PARTITION BY DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min' ORDER BY max(cnt) DESC) AS rn FROM per_sec GROUP BY DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min', unique_query_id, uq) t2 WHERE rn <= 5) x) u ORDER BY bucket, max_cnt DESC) TO '$dbd/ash_sql.csv' WITH CSV HEADER
 PSQL
     local t
     for t in statement wait_events instance_time database pagewriter memory_node_detail shared_memory session_memory session_by_sess pg_settings; do
@@ -21531,19 +21530,18 @@ def load_snap(d):
 def load_ash_flushes(repl_dir, begin_ts, end_ts):
     """Union the ASH rollups flushed by every snap whose ts falls in
     (begin_ts, end_ts] -- each flush covers [previous snap ts, snap ts], so
-    consecutive snaps tile the window without overlap. Both sources are
-    flushed per 5-minute bucket with a src tag (g = gs_asp, l =
-    local_active_session); the live stream can hand off between the two
-    (observed on 204), so per BUCKET the g rows win when present and the l
-    rows only fill buckets g does not have -- same bucket-pick the
-    `vb_tool asp` command uses, so the handoff seam never double-counts.
-    Returns dicts:
-      bucket:  {bucket: [samples, oncpu, lock, lwlock, io]}
-      event:   {event: samples}
-      sql:     {qid: [samples, query]}
-      session: {(sessionid, started): [samples, app, client]}
+    consecutive snaps tile the window. Output mirrors the `vb_tool asp`
+    command: per-5-minute buckets of per-SECOND counts (max/avg), both
+    sources tagged g = gs_asp / l = local_active_session; the live stream
+    hands off between them (observed on 204), so per BUCKET the g rows win
+    when present and l only fills g-less buckets -- the same bucket-pick asp
+    uses, so the seam never double-counts. Returns:
+      cnt:   {(src, bucket): [max_sess, avg_sess, max_active, lock, lwlock,
+                              io, wal_sync, trans_sync]}
+      event: {(src, bucket, event): [event_type, max_cnt, avg_cnt]}
+      sql:   {(src, bucket, qid): [unique_query, max_cnt, avg_cnt]}
     Absent ash_*.csv (PG instance / enable_asp off / idle flush) -> empty."""
-    raw = {"bucket": [], "event": [], "sql": [], "session": []}
+    rows = {"cnt": [], "event": [], "sql": []}
     if repl_dir and os.path.isdir(repl_dir):
         b, e = str(begin_ts or ""), str(end_ts or "")
         for d in sorted(glob.glob(os.path.join(repl_dir, "snap_*"))):
@@ -21556,46 +21554,42 @@ def load_ash_flushes(repl_dir, begin_ts, end_ts):
                 continue
             if not ts or (b and ts <= b) or (e and ts > e):
                 continue
-            for name in ("bucket", "event", "sql", "session"):
-                raw[name].extend(read_csv_rows(os.path.join(d, "db", "ash_%s.csv" % name)))
-    # buckets the gs_asp source covers (across ALL rollup kinds: a bucket can
-    # have event rows but zero active samples elsewhere)
-    gset = set((r.get("bucket") or "")[:16] for nm in raw
-               for r in raw[nm] if (r.get("src") or "g") == "g" and r.get("bucket"))
-    def _take(row):
-        src = (row.get("src") or "g")
-        bk = (row.get("bucket") or "")[:16]
-        return src == "g" or bk not in gset
-    out = {"bucket": {}, "event": {}, "sql": {}, "session": {}}
-    for row in raw["bucket"]:
-        if not _take(row):
+            for name in ("cnt", "event", "sql"):
+                rows[name].extend(read_csv_rows(os.path.join(d, "db", "ash_%s.csv" % name)))
+    def _bk(r):
+        return (r.get("bucket") or "")[:16]          # strip any tz suffix
+    def _src(r):
+        return (r.get("src") or "g")
+    gset = set(_bk(r) for nm in rows for r in rows[nm] if _src(r) == "g" and _bk(r))
+    def _take(r):
+        return _src(r) == "g" or _bk(r) not in gset
+    def _mx(cur, val):
+        return max(cur, val) if cur is not None else val
+    out = {"cnt": {}, "event": {}, "sql": {}}
+    for r in rows["cnt"]:
+        if not _bk(r) or not _take(r):
             continue
-        k = (row.get("bucket") or "")[:16]
-        if not k:
+        k = (_src(r), _bk(r))
+        v = out["cnt"].setdefault(k, [None] * 8)
+        for i, c in enumerate(("max_sess", "avg_sess", "max_active_sess", "wait_lock",
+                               "wait_lwlock", "wait_io", "wait_wal_sync", "wait_trans_sync")):
+            v[i] = _mx(v[i], to_num(r.get(c, 0) or 0))
+    for r in rows["event"]:
+        ev = r.get("event") or ""
+        if not ev or not _bk(r) or not _take(r):
             continue
-        v = out["bucket"].setdefault(k, [0, 0, 0, 0, 0])
-        for i, c in enumerate(("samples", "oncpu", "lock_cnt", "lwlock_cnt", "io_cnt")):
-            v[i] += to_num(row.get(c, 0) or 0)
-    for row in raw["event"]:
-        ev = row.get("event") or ""
-        if ev and _take(row):
-            out["event"][ev] = out["event"].get(ev, 0) + to_num(row.get("samples", 0) or 0)
-    for row in raw["sql"]:
-        qid = row.get("unique_query_id") or ""
-        if not qid or not _take(row):
+        k = (_src(r), _bk(r), ev)
+        v = out["event"].setdefault(k, [r.get("event_type") or "-", None, None])
+        v[1] = _mx(v[1], to_num(r.get("max_cnt", 0) or 0))
+        v[2] = _mx(v[2], to_num(r.get("avg_cnt", 0) or 0))
+    for r in rows["sql"]:
+        qid = r.get("unique_query_id") or ""
+        if not qid or not _bk(r) or not _take(r):
             continue
-        v = out["sql"].setdefault(qid, [0, ""])
-        v[0] += to_num(row.get("samples", 0) or 0)
-        if len(row.get("query") or "") > len(v[1]):
-            v[1] = row.get("query") or ""
-    for row in raw["session"]:
-        k = (row.get("sessionid") or "", row.get("started") or "")
-        if not k[0] or not _take(row):
-            continue
-        v = out["session"].setdefault(k, [0, "", ""])
-        v[0] += to_num(row.get("samples", 0) or 0)
-        v[1] = v[1] or (row.get("app") or "")
-        v[2] = v[2] or (row.get("client") or "")
+        k = (_src(r), _bk(r), qid)
+        v = out["sql"].setdefault(k, [r.get("unique_query") or "", None, None])
+        v[1] = _mx(v[1], to_num(r.get("max_cnt", 0) or 0))
+        v[2] = _mx(v[2], to_num(r.get("avg_cnt", 0) or 0))
     return out
 
 def build_window_from_snaps(begin_dir, end_dir):
@@ -24343,76 +24337,59 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             load_slot_samples(repl_dir, m.get("begin_ts", ""), m.get("end_ts", ""))))
 
     # ================= Active Session History =================
-    # gs_asp = persisted 1-second kernel samples of ACTIVE sessions; every
-    # create flushes [prev snap, now] as 5-minute rollups (asp-command style);
-    # the window unions every flush in (begin, end]. Hidden when no ash csv.
+    # gs_asp/local_active_session = persisted 1-second kernel ASP samples;
+    # every create flushes [prev snap, now]; the window unions every flush
+    # in (begin, end]. Output mirrors the `vb_tool asp` command: 5-minute
+    # buckets of per-second counts (max/avg), source tag per bucket, top-5
+    # SQL per bucket. Hidden when no ash csv (PG / enable_asp off / idle).
     _ash = (load_ash_flushes(repl_dir, m.get("begin_ts", ""), m.get("end_ts", ""))
-            if repl_dir is not None else {"bucket": {}, "event": {}, "sql": {}, "session": {}})
-    if _ash["bucket"] or _ash["event"] or _ash["sql"] or _ash["session"]:
+            if repl_dir is not None else {"cnt": {}, "event": {}, "sql": {}})
+    if _ash["cnt"] or _ash["event"] or _ash["sql"]:
         sec("Active Session History")
-        _ab = _ash["bucket"]
-        _ash_tot = sum(v[0] for v in _ab.values())
-        _ash_cpu = sum(v[1] for v in _ab.values())
-        _nb = len(_ab)
-        _avg_act = _ash_tot / (_nb * 300.0) if _nb else 0.0
-        _pk, _pkv = (None, 0)
-        for _k, _v in _ab.items():
-            if _v[0] > _pkv:
-                _pk, _pkv = _k, _v[0]
-        parts.append('<table class="t"><tr><th>Metric</th><th class="n">Value</th></tr>'
-                     '<tr><td>5-minute buckets covered</td><td class="n">%d</td></tr>'
-                     '<tr><td>Total samples ~ busy seconds</td><td class="n">%s</td></tr>'
-                     '<tr><td>ON CPU samples</td><td class="n">%s</td></tr>'
-                     '<tr><td>Avg active sessions</td><td class="n">%.2f</td></tr>'
-                     '<tr><td>Peak bucket</td><td class="n">%s @ %s samples</td></tr>'
-                     '</table>'
-                     % (_nb, fmt_int(_ash_tot), fmt_int(_ash_cpu), _avg_act,
-                        esc(_pk) if _pk else "-", fmt_int(_pkv)))
-        if _ab:
-            parts.append('<div class="sub">Active Sessions per 5 Minutes</div>')
-            parts.append('<table class="t"><tr><th>Bucket</th><th class="n">Samples</th>'
-                         '<th class="n">Avg Active</th><th class="n">ON CPU</th>'
-                         '<th class="n">Lock</th><th class="n">LWLock</th><th class="n">IO</th></tr>')
-            for _k in sorted(_ab):
-                _v = _ab[_k]
-                parts.append('<tr><td>%s</td><td class="n">%s</td><td class="n">%.2f</td>'
-                             '<td class="n">%s</td><td class="n">%s</td><td class="n">%s</td>'
-                             '<td class="n">%s</td></tr>'
-                             % (esc(_k), fmt_int(_v[0]), _v[0] / 300.0,
-                                fmt_int(_v[1]), fmt_int(_v[2]), fmt_int(_v[3]), fmt_int(_v[4])))
+        def _ash_dt(src, bk):
+            from datetime import datetime, timedelta
+            tag = "[gs_asp]" if src == "g" else "[local_active_session]"
+            try:
+                t0 = datetime.strptime(bk, "%Y-%m-%d %H:%M")
+                return "%s %s-%s" % (tag, t0.strftime("%Y-%m-%d %H:%M:%S"),
+                                     (t0 + timedelta(minutes=5)).strftime("%H:%M:%S"))
+            except ValueError:
+                return "%s %s" % (tag, bk)
+        if _ash["cnt"]:
+            sub("Active Session History Count")
+            parts.append('<table class="t"><tr><th>date_time</th><th class="n">max_sess</th>'
+                         '<th class="n">avg_sess</th><th class="n">max_active_sess</th>'
+                         '<th class="n">wait_lock</th><th class="n">wait_lwlock</th>'
+                         '<th class="n">wait_io</th><th class="n">wait_wal_sync</th>'
+                         '<th class="n">wait_trans_sync</th></tr>')
+            for (src, bk) in sorted(_ash["cnt"], key=lambda k: k[1]):
+                v = _ash["cnt"][(src, bk)]
+                parts.append('<tr><td>%s</td>%s</tr>'
+                             % (_ash_dt(src, bk),
+                                "".join('<td class="n">%s</td>' % fmt_int(x) for x in v)))
             parts.append('</table>')
-        _evs = sorted(_ash["event"].items(), key=lambda kv: -kv[1])[:15]
-        if _evs:
-            parts.append('<div class="sub">Top Wait Events</div>')
-            parts.append('<table class="t"><tr><th>Event</th><th class="n">Samples</th>'
-                         '<th class="n">Percent</th><th class="n">~Seconds</th></tr>')
-            for _ev, _c in _evs:
-                parts.append('<tr><td>%s</td><td class="n">%s</td><td class="n">%.2f%%</td>'
-                             '<td class="n">%s</td></tr>'
-                             % (esc(_ev), fmt_int(_c),
-                                (_c * 100.0 / _ash_tot) if _ash_tot else 0.0, fmt_int(_c)))
+        if _ash["event"]:
+            sub("Active Session History Event")
+            parts.append('<table class="t"><tr><th>date_time</th><th>event_type</th>'
+                         '<th>event</th><th class="n">max_cnt</th><th class="n">avg_cnt</th></tr>')
+            for (src, bk, ev), v in sorted(_ash["event"].items(),
+                                           key=lambda kv: (kv[0][1], -kv[1][1])):
+                parts.append('<tr><td>%s</td><td>%s</td><td>%s</td>'
+                             '<td class="n">%s</td><td class="n">%s</td></tr>'
+                             % (_ash_dt(src, bk), esc(v[0]), esc(ev),
+                                fmt_int(v[1]), fmt_int(v[2])))
             parts.append('</table>')
-        _sqls = sorted(_ash["sql"].items(), key=lambda kv: -kv[1][0])[:15]
-        if _sqls:
-            parts.append('<div class="sub">Top SQL</div>')
-            parts.append('<table class="t"><tr><th>Query ID</th><th class="n">Samples</th>'
-                         '<th class="n">Percent</th><th>SQL Text</th></tr>')
-            for _qid, (_c, _q) in _sqls:
-                _qt = _q if len(_q) <= 120 else _q[:120] + "..."
-                parts.append('<tr><td class="n">%s</td><td class="n">%s</td>'
-                             '<td class="n">%.2f%%</td><td>%s</td></tr>'
-                             % (esc(_qid), fmt_int(_c),
-                                (_c * 100.0 / _ash_tot) if _ash_tot else 0.0, esc(_qt)))
-            parts.append('</table>')
-        _sess = sorted(_ash["session"].items(), key=lambda kv: -kv[1][0])[:15]
-        if _sess:
-            parts.append('<div class="sub">Top Sessions</div>')
-            parts.append('<table class="t"><tr><th>Session ID</th><th>Started</th>'
-                         '<th class="n">Samples</th><th>Application</th><th>Client</th></tr>')
-            for (_sid, _st), (_c, _app, _cli) in _sess:
-                parts.append('<tr><td class="n">%s</td><td>%s</td><td class="n">%s</td>'
-                             '<td>%s</td><td>%s</td></tr>'
-                             % (esc(_sid), esc(_st), fmt_int(_c), esc(_app), esc(_cli)))
+        if _ash["sql"]:
+            sub("Active Session History Top SQL")
+            parts.append('<table class="t"><tr><th>date_time</th><th class="n">unique_query_id</th>'
+                         '<th>unique_query</th><th class="n">max_cnt</th>'
+                         '<th class="n">avg_cnt</th></tr>')
+            for (src, bk, qid), v in sorted(_ash["sql"].items(),
+                                            key=lambda kv: (kv[0][1], -kv[1][1])):
+                parts.append('<tr><td>%s</td><td class="n">%s</td><td>%s</td>'
+                             '<td class="n">%s</td><td class="n">%s</td></tr>'
+                             % (_ash_dt(src, bk), esc(qid), esc(v[0]),
+                                fmt_int(v[1]), fmt_int(v[2])))
             parts.append('</table>')
 
     # ================= Top 10 Foreground Events =================
