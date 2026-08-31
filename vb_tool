@@ -22238,6 +22238,20 @@ def osmin_net_table(samples, begin_ts):
         _rh = ('<th>RTT Conns</th><th>RTT avg (ms)</th><th>RTT p95 (ms)</th>'
                '<th>Worst Peer</th>') if rser else ''
         h.append('<div class="sub">TCP Statistics</div>')
+        _tn = ["Opens/s = active+passive opens; Retrans% = RetransSegs/OutSegs "
+               "(bold >3%, red >5%); CurrEstab = established connections at that minute.",
+               "Host-aggregate across all connections, not per-interface."]
+        if rser:
+            _tn.append("RTT Conns/avg/p95 = kernel smoothed RTT (ss) over established "
+                       "non-loopback connections sampled that minute; avg/p95 bold "
+                       ">5 ms, red >20 ms; '-' = no qualifying connections that minute.")
+            _tn.append("Worst Peer = slowest remote endpoint that minute.")
+        if xser:
+            _tn.append("ListenDrops/ListenOverflows = accept-queue overflow (application "
+                       "accepting too slowly or backlog too small).")
+            _tn.append("Timeouts = RTO expirations (heavy loss on a connection); "
+                       "SynRetrans = retried SYNs (connection setup degraded).")
+        h.append(''.join('<div class="note">%s</div>' % esc(x) for x in _tn))
         h.append('<table class="t"><tr><th>Time</th><th>Opens/s</th><th>Retrans/s</th>'
                  '<th>Retrans %</th><th>CurrEstab</th>' + _rh + _xh + '</tr>')
         for ts, d, ce in tser:
@@ -23919,6 +23933,12 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         if _t.get("currestab_begin") is not None:
             _th.append('<th class="n">TCP CurrEstab (Begin/End)</th>')
             _td.append('<td class="n">%d / %d</td>' % (_t["currestab_begin"], _t["currestab_end"]))
+    if _t.get("opens_per_sec") is not None:
+        note("TCP Opens/s = active+passive connections opened (host-aggregate "
+             "/proc/net/snmp window delta).\n"
+             "TCP Retrans/s = RetransSegs per second; TCP Retrans% = RetransSegs/OutSegs "
+             "(bold >3%, red >5%: loss caps single-stream throughput).\n"
+             "TCP CurrEstab = established connections at the begin/end snap.")
     parts.append('<table class="t"><tr>%s</tr><tr>%s</tr></table>'
                  % ("".join(_th), "".join(_td)))
     sub("OS Memory Usage")
@@ -24003,8 +24023,17 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     if _nmeta:
         _nh += '<th class="n">RX Util %</th><th class="n">TX Util %</th><th class="n">Speed</th><th class="n">Duplex</th><th class="n">Queues</th><th class="n">RX ring</th><th class="n">TX ring</th>'
     _nh += '</tr>'
-    parts.append('<table class="t"><tr>' + _nh)
     ifaces = osd.get("ifaces", [])
+    if ifaces:
+        _nl = ["errs/drop (Δ) = whole-window cumulative deltas, not rates; errs usually "
+               "mean driver or negotiation faults, drops mean ring-buffer or backlog "
+               "exhaustion (consider larger ethtool ring buffers or more queues)."]
+        if _nmeta:
+            _nl.append("RX/TX Util% = traffic vs the negotiated link speed ('-' when "
+                       "unknown, e.g. virtio); Speed/Duplex/Queues/Ring from ethtool "
+                       "at the END snap.")
+        note("\n".join(_nl))
+    parts.append('<table class="t"><tr>' + _nh)
     if not ifaces:
         parts.append('<tr><td colspan="%d" class="note">no network interfaces</td></tr>' % (7 + (7 if _nmeta else 0)))
     for it in ifaces:
@@ -24035,6 +24064,18 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     _rttconns = parse_net_rtt(win["os"].get(("end", "net_rtt"), ""))
     if _rttser or _rttconns:   # peaks imply ssrtt rows, hence _rttser, too
         sub("TCP RTT / Connections")
+        note("RTT = kernel smoothed round-trip time (ss) per established non-loopback "
+             "connection; bold >5 ms, red >20 ms.\n"
+             "Top-10 tables show WINDOW PEAKS from per-minute sampling: a connection "
+             "that stalled mid-window still appears even if it closed before the END "
+             "snap.\n"
+             "Send-Q = bytes queued unsent (limited by the receiver window or cwnd); "
+             "cwnd = congestion window (in-flight limit the kernel allows).\n"
+             "retr = retransmitted segments on that connection; RTTVar = RTT variance.")
+        if _rttser:
+            note("Per-stream throughput ceiling (Mathis) ~ 1.22*MSS*8 / (RTT * "
+                 "sqrt(loss)) from this window's RTT and Retrans% -- how far ONE TCP "
+                 "stream could go under that loss, not a measured rate.")
         _peaks = (window_peer_peaks(os_smp, m.get("begin_ts", ""))
                   if os_smp is not None else {})
         if _rttser:
@@ -24138,6 +24179,10 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     _sn = osd.get("softnet")
     if _sn is not None:
         sub("Softnet")
+        note("dropped = RX packets discarded because the backlog was full (raise "
+             "net.core.netdev_max_backlog / add queues).\n"
+             "time_squeeze = softirq exhausted its budget and deferred the rest "
+             "(consider RPS / IRQ affinity).")
         parts.append('<table class="t"><tr><th>Metric</th><th class="n">Total</th>'
                      '<th class="n">Per Second</th></tr>'
                      '<tr><td>packets processed</td><td class="n">%s</td><td class="n">%s</td></tr>'
@@ -24152,6 +24197,18 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
 
     if osd.get("netstat_ok"):
         sub("Network Protocol Errors")
+        note("Rows = window deltas per counter; Per Second = delta / window; "
+             "zero-delta rows grayed, core counters first.\n"
+             "InErrs = bad segments received; RetransSegs = segments retransmitted "
+             "out.\n"
+             "ListenOverflows/ListenDrops = accept-queue overflow; Timeouts = RTO "
+             "expirations (heavy loss).\n"
+             "AbortOnData/Timeout/Close/Memory = who reset the connection and why.\n"
+             "OFOQueue/OFODrop = out-of-order segments (path reordering).\n"
+             "WantZeroWindowAdv/ToZeroWindowAdv = receiver application too slow to "
+             "drain its socket.\n"
+             "SACKReneging = receiver dropped data it had already SACKed (serious); "
+             "MemoryPressures = TCP memory limits hit.")
         parts.append('<table class="t"><tr><th>Protocol</th><th>Counter</th>'
                      '<th class="n">Total</th><th class="n">Per Second</th></tr>')
         # Core rows
