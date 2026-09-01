@@ -10568,6 +10568,8 @@ run_collect_log_param() {
 
 
 run_sqltext() {
+    # SQL text may hold non-ASCII: keep python3 stdout UTF-8 even under LANG=C
+    export PYTHONIOENCODING=utf-8
     local unique_id="$1"
 
     local gauss_log
@@ -10851,15 +10853,31 @@ duration_only_re = re.compile(
 statement_re = re.compile(r'(?:LOG|INFO):\s+statement:\s+(.+)$', re.IGNORECASE)
 detail_re    = re.compile(r'DETAIL:\s+parameters:\s+(.+)$',       re.IGNORECASE)
 
+def read_log_lines(path):
+    # Log files may be UTF-8 (default), GB18030/GBK (Chinese sites) or anything
+    # else; detect per file so Chinese text survives, latin-1 stays as the
+    # never-fail fallback (it used to be hardwired -> mojibake on UTF-8 logs).
+    import gzip
+    opener = gzip.open if path.endswith('.gz') else open
+    with opener(path, 'rb') as fh:
+        raw = fh.read()
+    text = None
+    for enc in ('utf-8', 'gb18030'):
+        try:
+            text = raw.decode(enc)
+            break
+        except (UnicodeDecodeError, ValueError):
+            continue
+    if text is None:
+        text = raw.decode('latin-1')
+    lines = text.split('\n')
+    if lines and lines[-1] == '':
+        lines.pop()
+    return [l.rstrip('\r\n') for l in lines]
+
 for logfile in logfiles:
     try:
-        if logfile.endswith('.gz'):
-            import gzip
-            with gzip.open(logfile, 'rt', encoding='latin-1') as fh:
-                lines = [l.rstrip('\r\n') for l in fh]
-        else:
-            with open(logfile, 'rb') as fh:
-                lines = [l.decode('latin-1').rstrip('\r\n') for l in fh]
+        lines = read_log_lines(logfile)
     except Exception:
         continue
 
@@ -19720,15 +19738,31 @@ duration_only_re = re.compile(
 statement_re = re.compile(r'(?:LOG|INFO):\s+statement:\s+(.+)$', re.IGNORECASE)
 detail_re    = re.compile(r'DETAIL:\s+parameters:\s+(.+)$',       re.IGNORECASE)
 
+def read_log_lines(path):
+    # Log files may be UTF-8 (default), GB18030/GBK (Chinese sites) or anything
+    # else; detect per file so Chinese text survives, latin-1 stays as the
+    # never-fail fallback (it used to be hardwired -> mojibake on UTF-8 logs).
+    import gzip
+    opener = gzip.open if path.endswith('.gz') else open
+    with opener(path, 'rb') as fh:
+        raw = fh.read()
+    text = None
+    for enc in ('utf-8', 'gb18030'):
+        try:
+            text = raw.decode(enc)
+            break
+        except (UnicodeDecodeError, ValueError):
+            continue
+    if text is None:
+        text = raw.decode('latin-1')
+    lines = text.split('\n')
+    if lines and lines[-1] == '':
+        lines.pop()
+    return [l.rstrip('\r\n') for l in lines]
+
 for logfile in logfiles:
     try:
-        if logfile.endswith('.gz'):
-            import gzip
-            with gzip.open(logfile, 'rt', encoding='latin-1') as fh:
-                lines = [l.rstrip('\r\n') for l in fh]
-        else:
-            with open(logfile, 'rb') as fh:
-                lines = [l.decode('latin-1').rstrip('\r\n') for l in fh]
+        lines = read_log_lines(logfile)
     except Exception:
         continue
 
