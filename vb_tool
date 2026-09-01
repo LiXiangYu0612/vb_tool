@@ -10770,6 +10770,16 @@ def format_sql(sql):
     return '\n'.join(ln for ln in lines if ln).strip()
 
 def parse_params(text):
+    # VastBase new log format appends " type = <typename>" after each parameter
+    # value, e.g. "$1 = '100' type = bigint, $2 = 'x' type = varchar". Strip the
+    # annotations first so old and new formats parse identically. The strip is
+    # anchored on the quoted value ('' escapes included) and stops at the next
+    # ", $N = " or end of line, so type names like numeric(10,2) survive intact
+    # and values merely containing "type = " are never touched.
+    text = re.sub(
+        r"('(?:[^']|'')*'|NULL)\s*,?\s*type\s*=\s*.*?(?=\s*,\s*\$\d+\s*=|\s*$)",
+        r"\1",
+        text)
     result = {}
     token_re = re.compile(r'\$(\d+)\s*=\s*')
     matches = list(token_re.finditer(text))
@@ -19386,6 +19396,16 @@ def format_sql(sql):
     return '\n'.join(ln for ln in lines if ln).strip()
 
 def parse_params(text):
+    # VastBase new log format appends " type = <typename>" after each parameter
+    # value, e.g. "$1 = '100' type = bigint, $2 = 'x' type = varchar". Strip the
+    # annotations first so old and new formats parse identically. The strip is
+    # anchored on the quoted value ('' escapes included) and stops at the next
+    # ", $N = " or end of line, so type names like numeric(10,2) survive intact
+    # and values merely containing "type = " are never touched.
+    text = re.sub(
+        r"('(?:[^']|'')*'|NULL)\s*,?\s*type\s*=\s*.*?(?=\s*,\s*\$\d+\s*=|\s*$)",
+        r"\1",
+        text)
     result = {}
     token_re = re.compile(r'\$(\d+)\s*=\s*')
     matches = list(token_re.finditer(text))
