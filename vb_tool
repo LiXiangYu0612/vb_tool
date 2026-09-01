@@ -4883,7 +4883,7 @@ SELECT
         ELSE t.type 
     END AS type,
     decode(attstorage, 'p', 'plain', 'e', 'external', 'm', 'main', 'x', 'extended') attstorage,
-    decode(attnotnull, 'true', 'not null', round(null_frac, 5)) nullfreq,
+    decode(attnotnull, 'true', 'not null', round(null_frac, 5)::text) nullfreq,
     avg_width,
     round(n_distinct, 5) n_dist,
     round(correlation, 5) corr,
@@ -6368,7 +6368,7 @@ run_as() {
 \echo 'long transaction info(limit 10) '
 \echo '================================'
 SELECT  case when client_addr is null then a.datname else a.datname||':'||client_addr end client_info,
-        a.sessionid||':'||decode(w.block_sessionid,null,'not wait',w.block_sessionid) sid_bsid
+        a.sessionid||':'||decode(w.block_sessionid,null,'not wait',w.block_sessionid::text) sid_bsid
         ,a.unique_sql_id
         ,w.wait_event
         ,round(EXTRACT(EPOCH FROM (now() - xact_start))) etime
@@ -6382,7 +6382,7 @@ ORDER BY etime DESC nulls last limit 10;
 \echo 'active session info(limit 30)   '
 \echo '================================'
 SELECT case when client_addr is null then a.datname else a.datname||':'||client_addr end client_info,
-        a.sessionid||':'||decode(w.block_sessionid,null,'not wait',w.block_sessionid) sid_bsid
+        a.sessionid||':'||decode(w.block_sessionid,null,'not wait',w.block_sessionid::text) sid_bsid
         ,a.unique_sql_id
         ,w.wait_event
         ,round(EXTRACT(EPOCH FROM (now() - query_start))) etime
@@ -6442,7 +6442,7 @@ psql -d postgres -c "with tmp as (SELECT split_part(result, ',', 1) AS lwpid, sp
 \echo 'long transaction info(limit 10)   '
 \echo '================================'
 SELECT a.datname || ':' ||':'||client_addr client_info,
-        a.sessionid||':'||decode(w.block_sessionid,null,'not wait',w.block_sessionid) sid_bsid
+        a.sessionid||':'||decode(w.block_sessionid,null,'not wait',w.block_sessionid::text) sid_bsid
         ,a.query_id as unique_sql_id
         ,w.wait_event
 		,round(EXTRACT(EPOCH FROM (now() - xact_start))) etime
@@ -6455,7 +6455,7 @@ ORDER BY etime DESC nulls last limit 10;
 \echo 'active session info(limit 30)   '
 \echo '================================'
 SELECT a.datname || ':' ||':'||client_addr client_info,
-        a.sessionid||':'||decode(w.block_sessionid,null,'not wait',w.block_sessionid) sid_bsid
+        a.sessionid||':'||decode(w.block_sessionid,null,'not wait',w.block_sessionid::text) sid_bsid
         --,a.unique_sql_id
 		,a.query_id
         ,w.wait_event
@@ -20052,7 +20052,7 @@ SELECT
         ELSE t.type
     END AS type,
     decode(attstorage, 'p', 'plain', 'e', 'external', 'm', 'main', 'x', 'extended') AS attstorage,
-    decode(attnotnull, 'true', 'not null', round(null_frac, 5)) AS nullfreq,
+    decode(attnotnull, 'true', 'not null', round(null_frac, 5)::text) AS nullfreq,
     avg_width,
     round(n_distinct, 5) AS n_dist,
     round(correlation, 5) AS corr,
