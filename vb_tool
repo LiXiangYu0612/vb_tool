@@ -26187,8 +26187,8 @@ if not rows:
 total = len(rows)
 if not date_filter and total > 30:
     rows = rows[:30]
-print("%-8s %-20s %-12s %-8s %-14s %s %-17s" % ("SNAP_ID", "TS", "DB_START", "DB_TIME", "HOST", "DB", "DB_ROLE"))
-for r in rows: print("%-8s %-20s %-12s %-8s %-14s %s %-17s" % (r[0], r[1], r[4], delta.get(r[0], "-"), r[2], r[3], r[6]))
+print("%-8s %-20s %-12s %-8s %-14s %-12s %-17s" % ("SNAP_ID", "TS", "DB_START", "DB_TIME", "HOST", "DB", "DB_ROLE"))
+for r in rows: print("%-8s %-20s %-12s %-8s %-14s %-12s %-17s" % (r[0], r[1], r[4], delta.get(r[0], "-"), r[2], r[3], r[6]))
 if not date_filter and total > 30:
     print("(showing latest 30 of %d; 'vb_tool awr list YYYY-MM-DD' for a specific day)" % total)
 PY
