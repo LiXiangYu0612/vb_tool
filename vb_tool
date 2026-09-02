@@ -2904,9 +2904,9 @@ FLAMEGRAPH_PL_EOF
     # ---------- perf record ----------
     local RECORD_CMD
     if [ -z "$PID" ]; then
-        RECORD_CMD="perf record -F 1000 -a -g -o $OUTPUT_DIR/perf.data -- sleep $SLEEP"
+        RECORD_CMD="perf record -F 99 -a -g -o $OUTPUT_DIR/perf.data -- sleep $SLEEP"
     else
-        RECORD_CMD="perf record -F 1000 -a -g -p $PID -o $OUTPUT_DIR/perf.data -- sleep $SLEEP"
+        RECORD_CMD="perf record -F 99 -a -g -p $PID -o $OUTPUT_DIR/perf.data -- sleep $SLEEP"
     fi
 
     echo "====================================================================="
