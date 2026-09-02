@@ -14,6 +14,7 @@ show_help() {
     echo "Usage Summary:"
     echo "  vb_tool <command> [options]"
     echo "  Example: vb_tool -P 5433 sp work_mem"
+    echo "  Notation: <name> = required, [name] = optional; (default X) = default value"
     echo ""
     echo "Global Option:"
     echo "  -P <port>              database port for multi-instance; accepted by any"
@@ -152,6 +153,7 @@ analyze_log_help() {
     echo "    -e: end time (optional)"
     echo "    -t: analysis type (plan or slow, default: slow)"
     echo "    -o: output format (html, csv, txt, default: html)"
+    echo "    --encode: log file charset (default: utf8)"
     echo ""
 }
 
@@ -167,6 +169,8 @@ asp_help() {
     echo "  Options:"
     echo "    -b: start time (format: 'YYYY-MM-DD HH24:MI:SS')"
     echo "    -e: end time (format: 'YYYY-MM-DD HH24:MI:SS')"
+    echo ""
+    echo "  -P <port>: database port (default: current \$PGPORT)"
     echo ""
 }
 
@@ -193,6 +197,7 @@ collect_log_help() {
     echo "    -g    Cluster mode. Collect logs from all nodes in the cluster."
     echo "          If not specified, only the current node's logs are collected."
     echo "    -z    Backup catalog path; equivalent to pg_probackup -B <backup_path>."
+    echo "          Default: /backup/backup."
     echo ""
     echo "Examples:"
     echo "    # No time range: defaults to the last 2 hours:"
@@ -239,7 +244,7 @@ sqlhc_help() {
     echo "  Description: display sql health check (performance plan & sqlstat & tabstat)"
     echo "  -P <port>: database port (default: current \$PGPORT)"
     echo "  Options:"
-    echo "    -o: write output "
+    echo "    -o: write output to /tmp/vb_tool_sqlhc_<id>_<timestamp>.txt (default: stdout)"
     echo "    -s: duration threshold in seconds (default 300), use EXPLAIN if duration >= threshold"
     echo "    -h, --help: show this help message"
     echo ""
@@ -247,17 +252,19 @@ sqlhc_help() {
 
 ssh_setup_help() {
     echo "Usage: vb_tool ssh_setup (two modes)"
-    echo "  Setup mode:   $0 ssh_setup -setup -user <username> -hosts \"host1 host2\" [options]"
-    echo "  Verify mode:  $0 ssh_setup -verify -user <username> -hosts \"host1 host2\" [options]"
+    echo "  Setup mode:   $0 ssh_setup -setup [-user <username>] -hosts \"host1 host2\" [options]"
+    echo "  Verify mode:  $0 ssh_setup -verify [-user <username>] -hosts \"host1 host2\" [options]"
     echo "  Description: setup SSH connectivity between hosts"
     echo ""
     echo "Common options:"
     echo "  -hosts \"<space separated hostlist>\""
     echo "  -hostfile <absolute path of cluster configuration file>"
+    echo "  -user <username> : OS user to set up (default: current user)"
+    echo "  -logfile <path>  : log file (default: \$TEMP/sshUserSetup_<timestamp>.log)"
     echo "  -shared     : For NFS/shared home directories"
     echo "  -advanced   : Setup SSH between remote hosts as well (default in setup mode)"
     echo "  -simple     : Only setup SSH from local to remote hosts (override -advanced)"
-    echo "  -exverify   : Perform exhaustive verification (all hosts to all hosts)"
+    echo "  -exverify   : Exhaustive verification (always enabled in setup/verify modes)"
     echo "  -confirm    : Skip confirmation prompts (default in setup mode)"
     echo "  -usePassphrase : Use passphrase for SSH key"
     echo ""
@@ -267,11 +274,11 @@ ssh_setup_help() {
 
 dead_tups_help() {
     echo "Options for dead_tups:"
-    echo "  Usage: vb_tool dead_tups [-d <database>] [-s <schema>] [-t <table>]"
+    echo "  Usage: vb_tool dead_tups -d <database> [-s <schema>] [-t <table>]"
     echo "  Description: display dead tuples information"
     echo "  -P <port>: database port (default: current \$PGPORT)"
     echo "  Options:"
-    echo "    -d: database name"
+    echo "    -d: database name (required)"
     echo "    -s: schema name"
     echo "    -t: table name"
     echo ""
@@ -293,26 +300,28 @@ kill_help() {
     echo "    -t interval(s)  Filter transactions running longer than interval(seconds)"
     echo "    -u name         Filter by username"
     echo ""
+    echo "  Note: at least one filter is required (-b, or any of -a/-d/-i/-p/-q/-s/-t/-u)"
+    echo ""
 }
 
 index_check_help() {
     echo "Options for index_check:"
-    echo "  Usage: vb_tool index_check [-d database]"
+    echo "  Usage: vb_tool index_check -d <database>"
     echo "  Description: display redundant/unused/unusable/novalid index"
     echo "  -P <port>: database port (default: current \$PGPORT)"
     echo "  Options:"
-    echo "    -d: database name"
+    echo "    -d: database name (required)"
     echo ""
 }
 
 priv_help() {
     echo "Options for priv:"
-    echo "  Usage: vb_tool priv [-u <user>] [-d <database>] [-s <schema>] [-t <table>]"
+    echo "  Usage: vb_tool priv -d <database> [-u <user>] [-s <schema>] [-t <table>]"
     echo "  Description: display privileges for users/tables/databases/schemas"
     echo "  -P <port>: database port (default: current \$PGPORT)"
     echo "  Options:"
     echo "    -u: user name"
-    echo "    -d: database name"
+    echo "    -d: database name (required)"
     echo "    -s: schema name"
     echo "    -t: table name"
     echo ""
@@ -320,7 +329,7 @@ priv_help() {
 
 analyze_log_v2_help() {
     echo "Options for analyze_log_v2:"
-    echo "  Usage: vb_tool analyze_log_v2 -f <file> [-b <begin>] [-e <end>] [--diff <interval>]"
+    echo "  Usage: vb_tool analyze_log_v2 [-f <file>] [-b <begin>] [-e <end>] [--diff <interval>]"
     echo "         [-p <prefix>] [-d <days>] [-v] [-m <mode>] [-o <output>]"
     echo "  Description: analyze database logs (slow queries) output html report (enhanced version)"
     echo "  -P <port>: database port (default: current \$PGPORT)"
@@ -362,12 +371,12 @@ analyze_log_v2_help() {
 
 tabsize_help() {
     echo "Options for tabsize:"
-    echo "  Usage: vb_tool tabsize -a <all> -n <top number>  or -d <database> -s <schema> -t <table> -n <top number>"
+    echo "  Usage: vb_tool tabsize -n <top_number> [-a all] [-d <database>] [-s <schema>] [-t <table>]"
     echo "  Description: display top number size of tables (including all indexes)"
     echo "  -P <port>: database port (default: current \$PGPORT)"
     echo "  Options:"
-    echo "    -a: if need get tablesizes from all databases(optional, -a all)"
-    echo "    -d: database name (optinal)"
+    echo "    -a: get tablesizes from all databases (optional, -a all)"
+    echo "    -d: database name (optional, default: postgres)"
     echo "    -s: schema name (optional)"
     echo "    -t: table name (optional)"
     echo "    -n: top number (required)"
@@ -380,7 +389,7 @@ tabstat_help() {
     echo "  Description: display table statistics"
     echo "  -P <port>: database port (default: current \$PGPORT)"
     echo "  Options:"
-    echo "    -d: database name (default: postgres)"
+    echo "    -d: database name (required)"
     echo "    -s: schema name (required)"
     echo "    -t: table name (required)"
     echo ""
@@ -414,6 +423,7 @@ net_help() {
     echo "Options for net:"
     echo "  Usage: vb_tool net"
     echo "  Description: display network information"
+    echo "  -P <port>: database port (default: current \$PGPORT)"
     echo ""
 }
 
@@ -449,15 +459,17 @@ memhist_help() {
 
 relxlog_help() {
     echo "Options for relxlog:"
-    echo "  Usage: vb_tool relxlog <start_wal> <end_wal>"
+    echo "  Usage: vb_tool relxlog <start_wal> <end_wal> [wal_dir]"
     echo "  Description: analyze WAL records for relations"
+    echo "  wal_dir: WAL file directory (default: \$PGDATA/pg_xlog)"
     echo ""
 }
 
 xlogcom_help() {
     echo "Options for xlogcom:"
-    echo "  Usage: vb_tool xlogcom <start_wal> <end_wal>"
+    echo "  Usage: vb_tool xlogcom <start_wal> <end_wal> [wal_dir]"
     echo "  Description: analyze WAL commits per second"
+    echo "  wal_dir: WAL file directory (default: \$PGDATA/pg_xlog)"
     echo ""
 }
 
@@ -478,9 +490,9 @@ redo_help() {
     echo "    -s <file>    standby log file for replication analysis"
     echo ""
     echo "  Examples:"
-    echo "    run_redo -f primary.log                    # WAL generation"
-    echo "    run_redo -f standby.log -m standby        # Standby replay"
-    echo "    run_redo -f primary.log -s standby.log    # Replication lag"
+    echo "    vb_tool redo -f primary.log                    # WAL generation"
+    echo "    vb_tool redo -f standby.log -m standby        # Standby replay"
+    echo "    vb_tool redo -f primary.log -s standby.log    # Replication lag"
     echo ""
 }
 
@@ -489,12 +501,16 @@ slow_help() {
     echo "  Usage: vb_tool slow"
     echo "  Description: display top slow sql Information"
     echo "  -P <port>: database port (default: current \$PGPORT)"
+    echo "  Interactive Flow (empty input takes the default):"
+    echo "    1. begin date: (Default: now-5min, truncated to minute)"
+    echo "    2. end date:   (Default: now+1min, truncated to minute)"
+    echo "    3. top N:      (Default: 10)"
     echo ""
 }
 
 sp_help() {
     echo "Options for sp:"
-    echo "  Usage: vb_tool sp [guc]"
+    echo "  Usage: vb_tool sp <guc>"
     echo "  Description: display guc parameter"
     echo "  -P <port>: database port (default: current \$PGPORT)"
     echo ""
@@ -502,7 +518,7 @@ sp_help() {
 
 sqlstat_help() {
     echo "Options for sqlstat:"
-    echo "  Usage: vb_tool sqlstat [unique_query_id]"
+    echo "  Usage: vb_tool sqlstat <unique_query_id>"
     echo "  Description: display sqlstat information"
     echo "  -P <port>: database port (default: current \$PGPORT)"
     echo ""
@@ -510,7 +526,7 @@ sqlstat_help() {
 
 sqltext_help() {
     echo "Options for sqltext:"
-    echo "  Usage: vb_tool sqltext [unique_query_id]"
+    echo "  Usage: vb_tool sqltext <unique_query_id>"
     echo "  Description: display sqltext from postgresql slow log"
     echo "  -P <port>: database port (default: current \$PGPORT)"
     echo ""
@@ -544,6 +560,7 @@ wdr_summary_help() {
     echo "    - Time values with spaces must be quoted"
     echo "    - Begin time automatically subtracts 1 hour"
     echo "    - End time automatically adds 1 hour"
+    echo "    - Both -b and -e must be specified together (or both omitted for defaults)"
     echo ""
     echo "  Examples:"
     echo "    vb_tool wdr_summary                                    # Today 00:00 to tomorrow 00:00"
@@ -556,7 +573,7 @@ wdr_summary_help() {
 
 wdr_event_help() {
     echo "Options for wdr_event:"
-    echo "  Usage: vb_tool wdr_event [-b begin_time] [-e end_time]"
+    echo "  Usage: vb_tool wdr_event [-b begin_time] [-e end_time] [-E event_name]"
     echo "  Description: display wdr top event information"
     echo "  -P <port>: database port (default: current \$PGPORT)"
     echo ""
@@ -576,6 +593,7 @@ wdr_event_help() {
     echo "    - Time values with spaces must be quoted"
     echo "    - Begin time automatically subtracts 1 hour"
     echo "    - End time automatically adds 1 hour"
+    echo "    - Both -b and -e must be specified together (or both omitted for defaults)"
     echo "    - With -E and no -b/-e, window defaults to last 7 days"
     echo ""
     echo "  Examples:"
@@ -592,7 +610,7 @@ wdr_event_help() {
 
 wdr_tabstat_help() {
     echo "Options for wdr_tabstat:"
-    echo "  Usage: vb_tool wdr_tabstat -b begin_time -e end_time -d database_name -s schema_name -t table_name"
+    echo "  Usage: vb_tool wdr_tabstat [-b begin_time] [-e end_time] -d <database_name> -s <schema_name> -t <table_name>"
     echo "  Description: Display table DML/scan/live-dead-tuple statistics from WDR snapshots."
     echo "  -P <port>: database port (default: current \$PGPORT)"
     echo ""
@@ -655,6 +673,7 @@ wdr_topsql_help() {
     echo "    - Time values with spaces must be quoted"
     echo "    - Begin time automatically subtracts 1 hour"
     echo "    - End time automatically adds 1 hour"
+    echo "    - Both -b and -e must be specified together (or both omitted for defaults)"
     echo ""
     echo "  Examples:"
     echo "    vb_tool wdr_topsql                                         # Today 00:00 to tomorrow 00:00, top 10 by time"
@@ -680,7 +699,7 @@ tps_help() {
     echo "    tps             | Average Transactions Per Second"
     echo ""
     echo "  Examples:"
-    echo "    run_tps"
+    echo "    vb_tool tps"
     echo "    > please input begin date: 2026-03-24"
     echo "    > please input end date:   [Enter for default]"
     echo ""
@@ -3996,7 +4015,7 @@ run_xlogcom() {
 	
     if [ -z "$start_wal" ] || [ -z "$end_wal" ]; then
         echo "Error: Missing required parameters" >&2
-        echo "Usage: vb_tool xlogcom <start_wal> <end_wal>" >&2
+        echo "Usage: vb_tool xlogcom <start_wal> <end_wal> [wal_dir]" >&2
         echo "Example: vb_tool xlogcom 000000010000000800000042 00000001000000080000004C" >&2
         exit 1
     fi
@@ -6559,7 +6578,7 @@ while getopts "a:d:s:t:n:" opt; do
     s) schemaname="$OPTARG" ;;
     t) tablename="$OPTARG" ;;
     n) number="$OPTARG" ;;
-    *) echo "Usage: $0 -a all -d dbname -s schemaname -t tablename -n number" && exit 1 ;;
+    *) echo "Usage: vb_tool tabsize -n <top_number> [-a all] [-d <database>] [-s <schema>] [-t <table>]" && exit 1 ;;
   esac
 done
 
@@ -7010,7 +7029,7 @@ run_relxlog() {
 	
     if [ -z "$start_wal" ] || [ -z "$end_wal" ]; then
         echo "Error: Missing required parameters" >&2
-        echo "Usage: vb_tool relxlog <start_wal> <end_wal>" >&2
+        echo "Usage: vb_tool relxlog <start_wal> <end_wal> [wal_dir]" >&2
         echo "Example: vb_tool relxlog 000000010000000800000042 00000001000000080000004C" >&2
         exit 1
     fi
@@ -8703,16 +8722,18 @@ do
   if [ $j = "-help" ] 
   then
      echo "Usage:"
-     echo "  Setup mode:   $0 ssh -setup -user <username> -hosts \"host1 host2\" [options]"
-     echo "  Verify mode:  $0 ssh -verify -user <username> -hosts \"host1 host2\" [options]"
+     echo "  Setup mode:   $0 ssh_setup -setup [-user <username>] -hosts \"host1 host2\" [options]"
+     echo "  Verify mode:  $0 ssh_setup -verify [-user <username>] -hosts \"host1 host2\" [options]"
      echo ""
      echo "Common options:"
      echo "  -hosts \"<space separated hostlist>\""
      echo "  -hostfile <absolute path of cluster configuration file>"
+     echo "  -user <username> : OS user to set up (default: current user)"
+     echo "  -logfile <path>  : log file (default: \$TEMP/sshUserSetup_<timestamp>.log)"
      echo "  -shared     : For NFS/shared home directories"
      echo "  -advanced   : Setup SSH between remote hosts as well (default in setup mode)"
      echo "  -simple     : Only setup SSH from local to remote hosts (override -advanced)"
-     echo "  -exverify   : Perform exhaustive verification (all hosts to all hosts)"
+     echo "  -exverify   : Exhaustive verification (always enabled in setup/verify modes)"
      echo "  -confirm    : Skip confirmation prompts (default in setup mode)"
      echo "  -usePassphrase : Use passphrase for SSH key"
      echo ""
@@ -20570,7 +20591,7 @@ vtop_help() {
     echo "               + network / dbmem (proc & dynamic, peak) / top-3 memory
                contexts / top-5 mem sessions / block roots / top SQL
                (grouped by sqlid, ranked by real CPU%) / wait distribution"
-    echo "  -P <port>: database port (default: current \$PGPORT)"
+    echo "    -P <port>: database port (default: current \$PGPORT)"
     echo "    -i <sec>:   refresh interval, 1-60 (default 5)"
     echo "    -n <topn>:  top session rows, 1-50 (default 10)"
     echo "    --once:     print one frame and exit (non-interactive)"
@@ -20728,7 +20749,7 @@ run_vtop() {
                       topn="$2"; shift 2;;
             --once)   once=1; shift;;
             -h|--help) vtop_help; return 0;;
-            *)        echo "Error: unknown option '$1' (usage: vb_tool vtop [-i sec] [-n topn] [--once])" >&2; return 2;;
+            *)        echo "Error: unknown option '$1' (usage: vb_tool vtop [-i <sec>] [-n <topn>] [--once])" >&2; return 2;;
         esac
     done
     case "$interval" in ''|*[!0-9]*) echo "Error: -i expects seconds (1-60)" >&2; return 2;; esac
@@ -21128,8 +21149,10 @@ Single-point performance snapshots (Oracle AWR style). Each snapshot is an
 instantaneous OS+DB sample assigned a monotonic snap_id. An AWR report is the
 counter delta between two snapshots (end - begin).
 
-  create                    capture ONE single-point snapshot now (foreground,
+  create  [--root <dir>]    capture ONE single-point snapshot now (foreground,
                             ~5-10s), assigns the next snap_id. No html.
+                            --root overrides the storage root (default:
+                            $VB_TOOL_HOME/awrs/<port>)
   enable                    install crontab entries: snapshot every <interval>
                             MINUTES (see 'config interval', default 60) +
                             replication sampler every 1 minute; expired data
@@ -21153,6 +21176,7 @@ counter delta between two snapshots (end - begin).
   delete  until <time>      delete snapshots (by ts), html reports (by mtime) and
                             old repl_/walrcv_/os_*.log (by whole day) older than
                             <time>; e.g. '2026-08-11' or '2026-08-11 12:00:00'
+  config                    show current retention / interval values
   config  retention <days>  set retention in days (default 8; 0 = never purge).
                             Immediately purges already-expired snaps, repl/slot/walrcv/os
                             logs and html reports.
@@ -27001,11 +27025,6 @@ case "$1" in
             analyze_log_v2_help
             exit 0
         fi
-        if [ -z "$2" ]; then
-            echo "Error: analyze_log_v2 requires a log file parameter" >&2
-            analyze_log_v2_help
-            exit 1
-        fi
 		shift
         if ! run_analyze_log_v2 "$@"; then
             analyze_log_v2_help
@@ -27323,7 +27342,7 @@ case "$1" in
                 exit 1
             fi
             if ! run_sqlhc "${@:2}"; then
-                echo "not found unique_id: $2" >&2
+                echo "sqlhc failed for '$2' (see messages above)" >&2
                 exit 1
             fi
             ;;
@@ -27372,7 +27391,7 @@ case "$1" in
         if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
             echo "Usage: vb_tool lsds [--raw]"
             echo "Description: list block devices and metadata"
-            echo "Options: --raw  pipe-separated raw output (one line per device)"
+            echo "Options: --raw  pipe-separated raw output, one line per device (default: formatted table)"
             exit 0
         fi
         run_lsds "$@"
