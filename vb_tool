@@ -21850,6 +21850,12 @@ def build_window_from_snaps(begin_dir, end_dir):
         "begin_ts": bm.get("ts", ""),
         "end_ts": em.get("ts", ""),
         "duration": duration,
+        # extra header facts (Oracle-style report header): snap ids per side,
+        # postmaster start time and port from the END snap's meta
+        "snap_id_begin": bx,
+        "snap_id_end": ex,
+        "db_start_time": em.get("db_start_time", ""),
+        "port": em.get("port", ""),
     }
     return win
 
@@ -23997,11 +24003,14 @@ def render_single_awr(win, metric, top_n, out_html, repl_dir=None):
     per-minute repl_*.log samples."""
     CSS_AWR = """
 body { font-family: Arial, Helvetica, Geneva, sans-serif; font-size: 13px; color: #000; background: #fff; margin: 10px; }
-.rhead { border: 1px solid #cccc99; margin-bottom: 8px; }
+.rhead { margin-bottom: 8px; }
 .rhead .title { background: #fff; color: #336699; font-weight: bold; font-size: 26px; padding: 6px 2px; border-bottom: 1px solid #cccc99; }
-.rhead table { border-collapse: collapse; width: 100%; }
-.rhead td { border: 1px solid #cccc99; padding: 3px 8px; font-size: 12px; background: #fff; vertical-align: top; }
-.rhead td.k { background: #FFFFCC; font-weight: bold; width: 16%; }
+.rhead table { border-collapse: collapse; width: 800px; margin: 8px 0 4px 0; }
+.rhead th { background: #0066CC; color: #fff; font-weight: bold; padding: 3px 8px; font-size: 11px; text-align: left; }
+.rhead th.nobg { background: #fff; }
+.rhead table tr td { padding: 3px 8px; font-size: 12px; background: #fff; vertical-align: top; }
+.rhead tr.alt td { background: #FFFFCC; }
+.rhead td.c { text-align: center; }
 .sec { background: #fff; color: #336699; font-weight: bold; font-size: 24px; padding: 0; margin-top: 26px; border: none; }
 .sec h2 { display: inline; margin: 0; font-size: 24px; color: #336699; font-weight: bold; }
 .sec .totop { float: right; color: #663300; background: #fff; text-decoration: none; border: 1px solid #663300;
@@ -24097,7 +24106,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
 
     parts = []
     parts.append("<!DOCTYPE html><html lang='en'><head><meta charset='utf-8'>")
-    parts.append("<title>AWR Report</title><style>%s</style></head><body>" % CSS_AWR)
+    parts.append("<title>Vastbase Performance AWR Report</title><style>%s</style></head><body>" % CSS_AWR)
 
     _toc = []
     _used_slugs = set()
@@ -24138,18 +24147,25 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     _compat = {"A": "A (Oracle)", "B": "B (MySQL)", "C": "C (MySQL)",
                "PG": "PG (PostgreSQL)"}.get(_compat_raw, _compat_raw) or "?"
     parts.append(
-        '<div class="rhead"><div class="title">Performance AWR Report</div>'
-        '<table>'
-        '<tr><td class="k">Instance Name</td><td>%s</td><td class="k">Host</td><td>%s</td></tr>'
-        '<tr><td class="k">Release</td><td>%s</td><td class="k">vb_tool (snap / report)</td><td>%s / %s</td></tr>'
-        '<tr><td class="k">DB Role</td><td>%s</td><td class="k">DB Compatibility</td><td>%s</td></tr>'
-        '<tr><td class="k">Begin Snap</td><td>%s</td><td class="k">End Snap</td><td>%s</td></tr>'
-        '<tr><td class="k">Duration (s)</td><td>%s</td><td class="k">DB Time (s)</td><td>%s</td></tr>'
+        '<div class="rhead"><div class="title">Vastbase Performance AWR Report</div>'
+        '<table><tr><th>Instance Name</th><th>DB Role</th><th>DB Compatibility</th></tr>'
+        '<tr><td>%s</td><td>%s</td><td>%s</td></tr></table>'
+        '<table><tr><th>Release</th><th>vb_tool (snap / report)</th></tr>'
+        '<tr><td>%s</td><td>%s / %s</td></tr></table>'
+        '<table><tr><th>Host Name</th><th>Startup Time</th><th>Port</th></tr>'
+        '<tr><td>%s</td><td>%s</td><td class="n">%s</td></tr></table>'
+        '<table><tr><th class="nobg"></th><th>Snap Id</th><th>Snap Time</th></tr>'
+        '<tr><td>Begin Snap:</td><td class="n">%s</td><td class="c">%s</td></tr>'
+        '<tr class="alt"><td>End Snap:</td><td class="n">%s</td><td class="c">%s</td></tr>'
+        '<tr><td>Elapsed:</td><td></td><td class="c">%s (s)</td></tr>'
+        '<tr class="alt"><td>DB Time:</td><td></td><td class="c">%s (s)</td></tr>'
         '</table></div>' % (
-            esc(m.get("db_name") or m.get("name") or "?"), esc(m.get("hostname", "?")),
+            esc(m.get("db_name") or m.get("name") or "?"), esc(m.get("db_role", "?")), esc(_compat),
             esc(m.get("db_version", "?") or "?"), esc(m.get("vb_tool_version", "?")), esc(_GEN_VER),
-            esc(m.get("db_role", "?")), esc(_compat),
-            esc(m.get("begin_ts", "?")), esc(m.get("end_ts", "?")),
+            esc(m.get("hostname", "?")), esc(m.get("db_start_time") or "-"),
+            esc(str(m.get("port") or "-")),
+            esc(m.get("snap_id_begin", "?")), esc(m.get("begin_ts", "?")),
+            esc(m.get("snap_id_end", "?")), esc(m.get("end_ts", "?")),
             esc(m.get("duration", "?")), s_of(dbt),
         ))
     _toc_pos = len(parts)
@@ -25053,11 +25069,14 @@ def render_awrdiff(win1, win2, metric, top_n, out_html):
     sections. metric unused (all 6 SQL orderings shown)."""
     CSS_AWR = """
 body { font-family: Arial, Helvetica, Geneva, sans-serif; font-size: 13px; color: #000; background: #fff; margin: 10px; }
-.rhead { border: 1px solid #cccc99; margin-bottom: 8px; }
+.rhead { margin-bottom: 8px; }
 .rhead .title { background: #fff; color: #336699; font-weight: bold; font-size: 26px; padding: 6px 2px; border-bottom: 1px solid #cccc99; }
-.rhead table { border-collapse: collapse; width: 100%; }
-.rhead td { border: 1px solid #cccc99; padding: 3px 8px; font-size: 12px; background: #fff; vertical-align: top; }
-.rhead td.k { background: #FFFFCC; font-weight: bold; width: 16%; }
+.rhead table { border-collapse: collapse; width: 800px; margin: 8px 0 4px 0; }
+.rhead th { background: #0066CC; color: #fff; font-weight: bold; padding: 3px 8px; font-size: 11px; text-align: left; }
+.rhead th.nobg { background: #fff; }
+.rhead table tr td { padding: 3px 8px; font-size: 12px; background: #fff; vertical-align: top; }
+.rhead tr.alt td { background: #FFFFCC; }
+.rhead td.c { text-align: center; }
 .sec { background: #fff; color: #336699; font-weight: bold; font-size: 24px; padding: 0; margin-top: 26px; border: none; }
 .sec h2 { display: inline; margin: 0; font-size: 24px; color: #336699; font-weight: bold; }
 .sec .totop { float: right; color: #663300; background: #fff; text-decoration: none; border: 1px solid #663300;
@@ -25148,7 +25167,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
 
     parts = []
     parts.append("<!DOCTYPE html><html lang='en'><head><meta charset='utf-8'>")
-    parts.append("<title>AWR Diff Report</title><style>%s</style></head><body>" % CSS_AWR)
+    parts.append("<title>Vastbase Performance AWR Diff Report</title><style>%s</style></head><body>" % CSS_AWR)
 
     _toc = []
     _used = set()
@@ -25185,22 +25204,25 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     _compat = {"A": "A (Oracle)", "B": "B (MySQL)", "C": "C (MySQL)",
                "PG": "PG (PostgreSQL)"}.get(_compat_raw, _compat_raw) or "?"
     parts.append(
-        '<div class="rhead"><div class="title">Performance AWR Diff Report</div><table>'
-        '<tr><td class="k">Instance Name</td><td>%s</td><td class="k">Host</td><td>%s</td></tr>'
-        '<tr><td class="k">Release</td><td>%s</td><td class="k">vb_tool (snap / report)</td><td>%s / %s</td></tr>'
-        '<tr><td class="k">DB Compatibility</td><td>%s</td><td class="k">DB Role</td><td>%s</td></tr>'
-        '<tr><td class="k">Period 1</td><td>%s: %s &rarr; %s (%ss)</td>'
-        '<td class="k">Period 2</td><td>%s: %s &rarr; %s (%ss)</td></tr>'
-        '<tr><td class="k">DB Time (s)</td><td>%s / %s</td>'
-        '<td class="k">&Delta; DB Time (s)</td><td>%s</td></tr>'
+        '<div class="rhead"><div class="title">Vastbase Performance AWR Diff Report</div>'
+        '<table><tr><th>Instance Name</th><th>Host Name</th><th>DB Role</th><th>DB Compatibility</th></tr>'
+        '<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr></table>'
+        '<table><tr><th>Release</th><th>vb_tool (snap / report)</th></tr>'
+        '<tr><td>%s</td><td>%s / %s</td></tr></table>'
+        '<table><tr><th class="nobg"></th><th>Snaps</th><th>Window</th><th>Duration (s)</th></tr>'
+        '<tr><td>Period 1:</td><td class="n">%s &rarr; %s</td><td>%s &rarr; %s</td><td class="n">%s</td></tr>'
+        '<tr class="alt"><td>Period 2:</td><td class="n">%s &rarr; %s</td><td>%s &rarr; %s</td><td class="n">%s</td></tr>'
+        '<tr><td>DB Time (s):</td><td></td><td class="c">%s / %s</td><td class="n">&Delta; %s</td></tr>'
         '</table></div>' % (
             esc(m2.get("db_name") or m2.get("name") or "?"), esc(m2.get("hostname", "?")),
-            esc(m2.get("db_version", "?") or "?"), esc(m2.get("vb_tool_version", "?")), esc(_GEN_VER),
-            esc(_compat),
             (lambda r1, r2: r1 if r1 == r2 else "%s / %s" % (r1, r2))(
                 m1.get("db_role", "?"), m2.get("db_role", "?")),
-            esc(m1.get("name", "?")), esc(m1.get("begin_ts", "?")), esc(m1.get("end_ts", "?")), esc(m1.get("duration", "?")),
-            esc(m2.get("name", "?")), esc(m2.get("begin_ts", "?")), esc(m2.get("end_ts", "?")), esc(m2.get("duration", "?")),
+            esc(_compat),
+            esc(m2.get("db_version", "?") or "?"), esc(m2.get("vb_tool_version", "?")), esc(_GEN_VER),
+            esc(m1.get("snap_id_begin", "?")), esc(m1.get("snap_id_end", "?")),
+            esc(m1.get("begin_ts", "?")), esc(m1.get("end_ts", "?")), esc(m1.get("duration", "?")),
+            esc(m2.get("snap_id_begin", "?")), esc(m2.get("snap_id_end", "?")),
+            esc(m2.get("begin_ts", "?")), esc(m2.get("end_ts", "?")), esc(m2.get("duration", "?")),
             s_of(dbt1), s_of(dbt2), s_of(dbt2 - dbt1),
         ))
     _toc_pos = len(parts)
