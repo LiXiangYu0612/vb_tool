@@ -177,12 +177,14 @@ planbyline_help() {
 }
 
 collect_log_help() {
-    echo "Usage: vb_tool collect_log -b <begin_time> -e <end_time> [-n <max_xlog>] [-u <db_user>] [-g] [-z <backup_path>]"
+    echo "Usage: vb_tool collect_log [-b <begin_time>] [-e <end_time>] [-n <max_xlog>] [-u <db_user>] [-g] [-z <backup_path>]"
     echo "Description: collect logs for cluster or single node"
     echo ""
     echo "Options:"
-    echo "    -b    Begin time (format: 'YYYY-MM-DD HH:MM:SS'). Required."
-    echo "    -e    End time (format: 'YYYY-MM-DD HH:MM:SS'). Required."
+    echo "    -b    Begin time (format: 'YYYY-MM-DD HH:MM:SS'). Optional, see -e."
+    echo "    -e    End time (format: 'YYYY-MM-DD HH:MM:SS'). Optional."
+    echo "          When both -b and -e are omitted, the last 2 hours are collected"
+    echo "          (begin = now-2h, end = now). The two options must be given together."
     echo "    -n    Maximum number of xlog files to collect (0-1024)."
     echo "          Set to 0 to skip xlog collection. Default: 50."
     echo "    -u    Database OS user (e.g., vastbase). Required if running as root."
@@ -193,6 +195,9 @@ collect_log_help() {
     echo "    -z    Backup catalog path; equivalent to pg_probackup -B <backup_path>."
     echo ""
     echo "Examples:"
+    echo "    # No time range: defaults to the last 2 hours:"
+    echo "    vb_tool collect_log"
+    echo ""
     echo "    # Run as database user (Current node only):"
     echo "    vb_tool collect_log -b '2026-03-08 10:00:00' -e '2026-03-08 11:00:00'"
     echo ""
@@ -7716,7 +7721,33 @@ run_asp_cnt_query() {
         condition4="a.cur_event=b.event"
     fi
  
+    # standby mode (3rd arg): gs_asp rows on a standby are the PRIMARY's
+    # physically-replicated history -- source local_active_session only
+    # (same rationale as the awr standby flush, v2.0.10)
+    local _vb_asp_mode="${3:-}"
+    local _vb_gs_half="    UNION ALL 
+    SELECT 'b' AS table_type,
+        sample_time::timestamp(0) without time zone AS sample_time,
+        COUNT(*) AS cnt,
+        sum(case when $condition1 then 1 else 0 end) active_cnt,
+        sum(case when b.type='LOCK_EVENT'  then 1 else 0 end) wait_lock_cnt,
+        sum(case when b.type='LWLOCK_EVENT'  then 1 else 0 end) wait_lwlock_cnt,
+        sum(case when b.type='IO_EVENT'  then 1 else 0 end) wait_io_cnt,
+        sum(case when a.event='wait wal sync' then 1 else 0 end) wait_wal_sync_cnt,
+        sum(case when a.event='wait transaction sync' then 1 else 0 end) wait_trans_sync_cnt
+    FROM 
+        gs_asp a  left join dbe_perf.wait_events b on a.event=b.event 
+    WHERE 
+        sample_time BETWEEN '$begin_time' AND '$end_time'
+    GROUP BY 
+        sample_time::timestamp(0) without time zone"
+    [[ "$_vb_asp_mode" == "standby" ]] && _vb_gs_half=""
+
     if [[ "$las_flag" = 0 ]]; then
+        if [[ "$_vb_asp_mode" == "standby" ]]; then
+            echo "[SKIP] standby: local_active_session not present; ASP has no local source"
+            return 0
+        fi
 	    psql -d postgres -P footer=off <<EOF
 \echo '=================================='
 \echo '   active session history count '
@@ -7825,22 +7856,7 @@ WITH time_counts AS (
         sample_time BETWEEN '$begin_time' AND '$end_time' 
     GROUP BY 
         sample_time::timestamp(0) without time zone
-    UNION ALL 
-    SELECT 'b' AS table_type,
-        sample_time::timestamp(0) without time zone AS sample_time,
-        COUNT(*) AS cnt,
-        sum(case when $condition1 then 1 else 0 end) active_cnt,
-        sum(case when b.type='LOCK_EVENT'  then 1 else 0 end) wait_lock_cnt,
-        sum(case when b.type='LWLOCK_EVENT'  then 1 else 0 end) wait_lwlock_cnt,
-        sum(case when b.type='IO_EVENT'  then 1 else 0 end) wait_io_cnt,
-        sum(case when a.event='wait wal sync' then 1 else 0 end) wait_wal_sync_cnt,
-        sum(case when a.event='wait transaction sync' then 1 else 0 end) wait_trans_sync_cnt
-    FROM 
-        gs_asp a  left join dbe_perf.wait_events b on a.event=b.event 
-    WHERE 
-        sample_time BETWEEN '$begin_time' AND '$end_time'
-    GROUP BY 
-        sample_time::timestamp(0) without time zone
+${_vb_gs_half}
 ),
 has_a_data AS (
     SELECT EXISTS(SELECT 1 FROM time_counts WHERE table_type = 'a') AS has_a_records
@@ -7947,7 +7963,29 @@ run_asp_sql_query() {
         condition5="a.cur_event"
     fi
 	
+    # standby mode (3rd arg): gs_asp rows on a standby are the PRIMARY's
+    # physically-replicated history -- source local_active_session only
+    # (same rationale as the awr standby flush, v2.0.10)
+    local _vb_asp_mode="${3:-}"
+    local _vb_gs_half="    UNION ALL 
+    SELECT 'b' AS table_type,
+        sample_time::timestamp(0) without time zone AS sample_time,
+        a.unique_query_id as unique_query_id,
+        substr(REGEXP_REPLACE(REGEXP_REPLACE(unique_query, '(\r|\n)+', ' '),' {2,}', ' '),1,50) unique_query,
+        COUNT(*) AS cnt    
+    FROM 
+        gs_asp a left join dbe_perf.wait_events b on a.event=b.event
+    WHERE 
+        sample_time BETWEEN '$begin_time' AND '$end_time' and $condition1 and a.event not in ('none') and unique_query_id>0
+    GROUP BY 
+        sample_time::timestamp(0) without time zone, a.unique_query_id,substr(REGEXP_REPLACE(REGEXP_REPLACE(unique_query, '(\r|\n)+', ' '),' {2,}', ' '),1,50)"
+    [[ "$_vb_asp_mode" == "standby" ]] && _vb_gs_half=""
+
     if [[ "$las_flag" = 0 ]]; then
+        if [[ "$_vb_asp_mode" == "standby" ]]; then
+            echo "[SKIP] standby: local_active_session not present; ASP has no local source"
+            return 0
+        fi
     psql -d postgres -P footer=off <<EOF
 \echo '==================================' 
 \echo '   active session history topsql  '
@@ -8041,18 +8079,7 @@ WITH time_counts AS (
         sample_time BETWEEN '$begin_time' AND '$end_time' and $condition1 and $condition5 not in ('none') and unique_query_id>0
     GROUP BY 
         sample_time::timestamp(0) without time zone, a.unique_query_id,substr(REGEXP_REPLACE(REGEXP_REPLACE(unique_query, '(\r|\n)+', ' '),' {2,}', ' '),1,50)
-    UNION ALL 
-    SELECT 'b' AS table_type,
-        sample_time::timestamp(0) without time zone AS sample_time,
-        a.unique_query_id as unique_query_id,
-        substr(REGEXP_REPLACE(REGEXP_REPLACE(unique_query, '(\r|\n)+', ' '),' {2,}', ' '),1,50) unique_query,
-        COUNT(*) AS cnt    
-    FROM 
-        gs_asp a left join dbe_perf.wait_events b on a.event=b.event
-    WHERE 
-        sample_time BETWEEN '$begin_time' AND '$end_time' and $condition1 and a.event not in ('none') and unique_query_id>0
-    GROUP BY 
-        sample_time::timestamp(0) without time zone, a.unique_query_id,substr(REGEXP_REPLACE(REGEXP_REPLACE(unique_query, '(\r|\n)+', ' '),' {2,}', ' '),1,50)
+${_vb_gs_half}
 ),
 has_a_data AS (
     SELECT EXISTS(SELECT 1 FROM time_counts WHERE table_type = 'a') AS has_a_records
@@ -8153,7 +8180,29 @@ run_asp_event_query() {
         condition5="a.cur_event"
     fi
 	
+    # standby mode (3rd arg): gs_asp rows on a standby are the PRIMARY's
+    # physically-replicated history -- source local_active_session only
+    # (same rationale as the awr standby flush, v2.0.10)
+    local _vb_asp_mode="${3:-}"
+    local _vb_gs_half="    UNION ALL 
+    SELECT 'b' AS table_type,
+        sample_time::timestamp(0) without time zone AS sample_time,
+        type event_type,
+        a.event as event,
+        COUNT(*) AS cnt    
+    FROM 
+        gs_asp a left join dbe_perf.wait_events b on a.event=b.event
+    WHERE 
+        sample_time BETWEEN '$begin_time' AND '$end_time' and $condition1 and a.event not in ('none')
+    GROUP BY 
+        sample_time::timestamp(0) without time zone,type,a.event"
+    [[ "$_vb_asp_mode" == "standby" ]] && _vb_gs_half=""
+
     if [[ "$las_flag" = 0 ]]; then	
+        if [[ "$_vb_asp_mode" == "standby" ]]; then
+            echo "[SKIP] standby: local_active_session not present; ASP has no local source"
+            return 0
+        fi
    psql -d postgres -P footer=off <<EOF
 \echo '=================================='
 \echo '   active session history event   '
@@ -8234,18 +8283,7 @@ WITH time_counts AS (
         sample_time BETWEEN '$begin_time' AND '$end_time' and $condition1 and $condition5 not in ('none')
     GROUP BY 
         sample_time::timestamp(0) without time zone,type,$condition5
-    UNION ALL 
-    SELECT 'b' AS table_type,
-        sample_time::timestamp(0) without time zone AS sample_time,
-        type event_type,
-        a.event as event,
-        COUNT(*) AS cnt    
-    FROM 
-        gs_asp a left join dbe_perf.wait_events b on a.event=b.event
-    WHERE 
-        sample_time BETWEEN '$begin_time' AND '$end_time' and $condition1 and a.event not in ('none')
-    GROUP BY 
-        sample_time::timestamp(0) without time zone,type,a.event
+${_vb_gs_half}
 ),
 has_a_data AS (
     SELECT EXISTS(SELECT 1 FROM time_counts WHERE table_type = 'a') AS has_a_records
@@ -8345,7 +8383,103 @@ run_asp_waitchain_query() {
 		condition9="las.xact_start_time::timestamp(0)"
     fi   
 
+    # standby mode (3rd arg): gs_asp rows on a standby are the PRIMARY's
+    # physically-replicated history -- source local_active_session only
+    # (same rationale as the awr standby flush, v2.0.10)
+    local _vb_asp_mode="${3:-}"
+    local _vb_gs_ctes="/* per-sample-time merge: gs_asp only fills the sample times local does not
+   cover (local is a short ring buffer; avoids double-counting on overlap) */
+gs_asp_1 AS (
+    SELECT gs.* FROM gs_asp gs
+    WHERE gs.sample_time::timestamp(0) without time zone BETWEEN '$begin_time' AND '$end_time'
+      AND NOT EXISTS (SELECT 1 FROM dbe_perf.local_active_session l
+                      WHERE l.sample_time::timestamp(0) without time zone
+                            = gs.sample_time::timestamp(0) without time zone)
+),
+blocking_chain AS (
+    SELECT 
+        sampleid,
+        sessionid AS blocked_sessionid,
+        block_sessionid AS blocker_sessionid,
+        1 AS level,
+        ARRAY[sessionid] AS path
+    FROM gs_asp_1
+    WHERE block_sessionid IS NOT NULL   
+    UNION ALL
+     SELECT 
+        bc.sampleid,
+        bc.blocked_sessionid,
+        a.block_sessionid AS blocker_sessionid,
+        bc.level + 1,
+        bc.path || a.sessionid
+    FROM blocking_chain bc
+    JOIN gs_asp_1 a ON bc.sampleid = a.sampleid 
+                  AND bc.blocker_sessionid = a.sessionid
+    WHERE a.block_sessionid IS NOT NULL
+      AND NOT a.sessionid = ANY(bc.path)
+),
+root_blockers AS (
+    SELECT 
+        sampleid,
+        blocked_sessionid,
+        blocker_sessionid AS root_blocker,
+        level
+    FROM blocking_chain
+    WHERE NOT EXISTS (
+        SELECT 1 FROM gs_asp_1 a 
+        WHERE a.sampleid = blocking_chain.sampleid 
+          AND a.sessionid = blocking_chain.blocker_sessionid
+          AND a.block_sessionid IS NOT NULL
+    )
+),
+blocker_stats AS (
+    SELECT 
+        sampleid,
+        root_blocker,
+        COUNT(blocked_sessionid) AS blocked_count,
+        MIN(blocked_sessionid) AS example_blocked_sessionid
+    FROM root_blockers
+    GROUP BY sampleid, root_blocker
+),"
+    local _vb_gs_tail="gs_part AS (
+    SELECT 'b' src,
+           las.sample_time::timestamp(0) without time zone AS sample_time,
+           DATE_TRUNC('hour', las.sample_time::timestamp(0) without time zone)
+             + FLOOR(EXTRACT(MINUTE FROM las.sample_time::timestamp(0) without time zone) / 5) * INTERVAL '5 min' AS interval_start,
+           CONCAT(las.sessionid::text, '(', case when $condition7 then 'a' else 'iit' end, '(', $condition9::text, ')') root_block_sessid,
+           bs.blocked_count as b_cnt,
+           substr(las.unique_query,1,50) h_sql,
+           substr(blocked_las.unique_query,1,50) w_sql
+    FROM blocker_stats bs
+    JOIN gs_asp_1 las ON bs.sampleid = las.sampleid 
+                                      AND bs.root_blocker = las.sessionid
+    JOIN gs_asp_1 blocked_las ON bs.sampleid = blocked_las.sampleid 
+                                              AND bs.example_blocked_sessionid = blocked_las.sessionid
+),
+merged AS (
+    SELECT * FROM local_part
+    UNION ALL
+    SELECT * FROM gs_part
+),
+/* 5-minute buckets, same alignment as cnt/sql/event; buckets with ANY
+   gs_asp sample are served by gs_asp alone (usually full coverage), local
+   only fills buckets gs_asp has not flushed -> one row per bucket+root */
+picked AS (
+    SELECT m.* FROM merged m
+    WHERE m.src = 'b'
+       OR NOT EXISTS (SELECT 1 FROM merged m2
+                      WHERE m2.src = 'b' AND m2.interval_start = m.interval_start)
+),"
+    local _vb_chain_src="picked"
+    if [[ "$_vb_asp_mode" == "standby" ]]; then
+        _vb_gs_ctes=""; _vb_gs_tail=""; _vb_chain_src="local_part"
+    fi
+
     if [[ "$las_flag" = 0 ]]; then	
+        if [[ "$_vb_asp_mode" == "standby" ]]; then
+            echo "[SKIP] standby: local_active_session not present; ASP has no local source"
+            return 0
+        fi
 	psql -d postgres <<EOF
 
 \echo '==================================='
@@ -8433,60 +8567,7 @@ blocked_sessions AS (
         AND final_block_sessionid IS NOT NULL 
     group by sampleid,sample_time::timestamp(0) without time zone,final_block_sessionid,wait_status
 ),
-/* per-sample-time merge: gs_asp only fills the sample times local does not
-   cover (local is a short ring buffer; avoids double-counting on overlap) */
-gs_asp_1 AS (
-    SELECT gs.* FROM gs_asp gs
-    WHERE gs.sample_time::timestamp(0) without time zone BETWEEN '$begin_time' AND '$end_time'
-      AND NOT EXISTS (SELECT 1 FROM dbe_perf.local_active_session l
-                      WHERE l.sample_time::timestamp(0) without time zone
-                            = gs.sample_time::timestamp(0) without time zone)
-),
-blocking_chain AS (
-    SELECT 
-        sampleid,
-        sessionid AS blocked_sessionid,
-        block_sessionid AS blocker_sessionid,
-        1 AS level,
-        ARRAY[sessionid] AS path
-    FROM gs_asp_1
-    WHERE block_sessionid IS NOT NULL   
-    UNION ALL
-     SELECT 
-        bc.sampleid,
-        bc.blocked_sessionid,
-        a.block_sessionid AS blocker_sessionid,
-        bc.level + 1,
-        bc.path || a.sessionid
-    FROM blocking_chain bc
-    JOIN gs_asp_1 a ON bc.sampleid = a.sampleid 
-                  AND bc.blocker_sessionid = a.sessionid
-    WHERE a.block_sessionid IS NOT NULL
-      AND NOT a.sessionid = ANY(bc.path)
-),
-root_blockers AS (
-    SELECT 
-        sampleid,
-        blocked_sessionid,
-        blocker_sessionid AS root_blocker,
-        level
-    FROM blocking_chain
-    WHERE NOT EXISTS (
-        SELECT 1 FROM gs_asp_1 a 
-        WHERE a.sampleid = blocking_chain.sampleid 
-          AND a.sessionid = blocking_chain.blocker_sessionid
-          AND a.block_sessionid IS NOT NULL
-    )
-),
-blocker_stats AS (
-    SELECT 
-        sampleid,
-        root_blocker,
-        COUNT(blocked_sessionid) AS blocked_count,
-        MIN(blocked_sessionid) AS example_blocked_sessionid
-    FROM root_blockers
-    GROUP BY sampleid, root_blocker
-),
+${_vb_gs_ctes}
 local_part AS (
     SELECT 'a' src,
            a.sample_time::timestamp(0) without time zone AS sample_time,
@@ -8500,40 +8581,12 @@ local_part AS (
         dbe_perf.local_active_session a,blocked_sessions b,dbe_perf.local_active_session c
     WHERE a.sampleid=b.sampleid and b.final_block_sessionid=a.sessionid and b.sampleid=c.sampleid and b.w_sessionid=c.sessionid
 ),
-gs_part AS (
-    SELECT 'b' src,
-           las.sample_time::timestamp(0) without time zone AS sample_time,
-           DATE_TRUNC('hour', las.sample_time::timestamp(0) without time zone)
-             + FLOOR(EXTRACT(MINUTE FROM las.sample_time::timestamp(0) without time zone) / 5) * INTERVAL '5 min' AS interval_start,
-           CONCAT(las.sessionid::text, '(', case when $condition7 then 'a' else 'iit' end, '(', $condition9::text, ')') root_block_sessid,
-           bs.blocked_count as b_cnt,
-           substr(las.unique_query,1,50) h_sql,
-           substr(blocked_las.unique_query,1,50) w_sql
-    FROM blocker_stats bs
-    JOIN gs_asp_1 las ON bs.sampleid = las.sampleid 
-                                      AND bs.root_blocker = las.sessionid
-    JOIN gs_asp_1 blocked_las ON bs.sampleid = blocked_las.sampleid 
-                                              AND bs.example_blocked_sessionid = blocked_las.sessionid
-),
-merged AS (
-    SELECT * FROM local_part
-    UNION ALL
-    SELECT * FROM gs_part
-),
-/* 5-minute buckets, same alignment as cnt/sql/event; buckets with ANY
-   gs_asp sample are served by gs_asp alone (usually full coverage), local
-   only fills buckets gs_asp has not flushed -> one row per bucket+root */
-picked AS (
-    SELECT m.* FROM merged m
-    WHERE m.src = 'b'
-       OR NOT EXISTS (SELECT 1 FROM merged m2
-                      WHERE m2.src = 'b' AND m2.interval_start = m.interval_start)
-),
+${_vb_gs_tail}
 bucketed AS (
     SELECT p.*,
            row_number() OVER (PARTITION BY p.src, p.interval_start, p.root_block_sessid
                               ORDER BY p.b_cnt DESC, p.sample_time) AS rn
-    FROM picked p
+    FROM ${_vb_chain_src} p
 )
 SELECT /*+set(enable_mergejoin off) set(enable_nestloop off) set(enable_index_nestloop off)*/
     CASE WHEN src = 'a' THEN '[local_active_session] ' ELSE '[gs_asp] ' END
@@ -9997,11 +10050,20 @@ run_collect_log(){
         esac
     done
     # --- Input Validation ---
+    # No window given: default to the last 2 hours (begin = now-2h, end = now).
+    if [[ -z "$begin_time" && -z "$end_time" ]]; then
+        # epoch arithmetic: "date -d '<ts> -2 hours'" misparses the sign as a
+        # timezone offset (UTC-2 -> +11h on CST hosts), never a past time
+        local _vb_now_ep=$(date +%s)
+        end_time=$(date -d "@$_vb_now_ep" +'%Y-%m-%d %H:%M:%S')
+        begin_time=$(date -d "@$((_vb_now_ep - 7200))" +'%Y-%m-%d %H:%M:%S')
+        echo "[INFO ] No time range given (-b/-e); defaulting to the last 2 hours ($begin_time ~ $end_time)"
+    fi
     if [[ -z "$begin_time" || -z "$end_time" ]]; then
-        echo "Error: begin time and end time are required"
+        echo "Error: -b and -e must be given together (or both omitted for the last 2 hours)"
         collect_log_help
         exit 1
-    fi 
+    fi
 	
 	if [[ ! "$max_xlog" =~ ^[0-9]+$ ]] || [ "$max_xlog" -lt 0 ] || [ "$max_xlog" -gt 1024 ]; then
         echo "Error: -n (max xlog count) must be an integer between 0 and 1024"
@@ -10066,6 +10128,10 @@ run_collect_log(){
 			[[ -n "$arg" ]] && pass_args+=("$arg")
         done
 
+        # Propagate the (possibly defaulted) time window explicitly: when -b/-e
+        # were omitted the su-child would otherwise re-default at its own "now",
+        # drifting a few seconds from the window already used for the os logs.
+        pass_args+=(-b "$begin_time" -e "$end_time")
         echo "[INFO ] System logs collected. Switching to $db_user..."
         # Use printf %q to escape arguments safely, preserving spaces and special characters
         local quoted_args=$(printf " %q" "${pass_args[@]}")
@@ -10177,7 +10243,7 @@ run_collect_log_pglog() {
     if [ -d "$LOG_DIR" ]; then
         echo "[INFO ] DB Log Directory: $LOG_DIR"
         # Find the first file modified after end_time to ensure log continuity
-        local db_limit_time=$(date -d "$end_time +1 day" +'%Y-%m-%d 00:30:00')
+        local db_limit_time=$(date -d "@$(( $(date -d "$end_time" +%s) + 86400 ))" +'%Y-%m-%d 00:30:00')
         local real_end_time=$(find "$LOG_DIR" -maxdepth 1 -type f -newermt "$end_time" ! -newermt "$db_limit_time" -printf "%TY-%Tm-%Td %TT\n" | sort | head -n 1)
         if [ -z "$real_end_time" ]; then
             real_end_time="$end_time"
@@ -10210,7 +10276,7 @@ run_collect_log_nodes_info() {
         if pgrep -f "OSWatcherFM.sh" > /dev/null; then
             osw_path=\$(ps ux | grep OSWatcherFM.sh | grep -v grep | awk '{print \$NF}')
             if [ -n "\$osw_path" ] && [ -d "\$osw_path" ]; then
-                osw_limit=\$(date -d "$end_time +1 hour" +'%Y%m%d %H:%M')
+                osw_limit=\$(date -d "@$(( $(date -d "$end_time" +%s) + 3600 ))" +'%Y%m%d %H:%M')
 				mkdir -p $output_dir/osw
 				cd "\$osw_path" && find . -type f -newermt "$begin_time" ! -newermt "\$osw_limit" -print0 | xargs -0 cp --parents -t "$output_dir/osw/" 2>/dev/null
             fi
@@ -10220,7 +10286,7 @@ run_collect_log_nodes_info() {
         if pgrep -f "nmon" > /dev/null; then
             nmon_path=\$(ps ux | grep nmon | grep -F -- '-F' | grep -v grep | awk '{print \$NF}' | xargs dirname)
 			if [ -n "\$nmon_path" ] && [ -d "\$nmon_path" ]; then
-                nmon_limit=\$(date -d "$end_time +1 day" +'%Y-%m-%d 00:00:00')
+                nmon_limit=\$(date -d "@$(( $(date -d "$end_time" +%s) + 86400 ))" +'%Y-%m-%d 00:00:00')
 				mkdir -p $output_dir/nmon
 				#cd "\$nmon_path" && find . -maxdepth 1 -type f -newermt "$begin_time" ! -newermt "\$nmon_limit" -exec sh -c 'gzip -c "$1" > "$2/$(basename "$1").gz"' _ {} "$output_dir/nmon" \;
 				cd "\$nmon_path" && find . -maxdepth 1 -type f -newermt "$begin_time" ! -newermt "\$nmon_limit" -exec sh -c '[ -n "$2" ] && [ -d "$2" ] && gzip -c "$1" > "$2/$(basename "$1").gz"' -- {} "$output_dir/nmon" \;
@@ -10244,13 +10310,17 @@ run_collect_log_nodes_info() {
             run_collect_log_deadtups  >  "$output_dir/dbinfo/deadtups_${node}.txt"
             run_collect_log_extension >  "$output_dir/dbinfo/extensions_${node}.txt"
         
-            # c. Primary-only Collection 
+            # c. Role-based Collection: primary = ASP/MEM/WDR/backup; standby = MEM only
             if [[ "\$primary_status" == "f" ]]; then
                 echo "[INFO ] Primary node detected. Collecting WDR/ASP/MEM."
                 run_collect_log_asp      > "$output_dir/dbinfo/asp_${node}.txt"
                 run_collect_log_mem      > "$output_dir/dbinfo/mem_${node}.txt"
                 run_collect_log_wdr      > "$output_dir/dbinfo/wdr_${node}.txt"
 				safe_exec "Show Backup" "vb_probackup show -B '$backup_path' >> $output_dir/dbinfo/dbinfo_${node}.txt "
+            elif [[ "\$primary_status" == "t" ]]; then
+                echo "[INFO ] Standby node detected. Collecting MEM/ASP (standby view: current memory + local_active_session only)."
+                run_collect_log_mem standby > "$output_dir/dbinfo/mem_${node}.txt"
+                run_collect_log_asp standby > "$output_dir/dbinfo/asp_${node}.txt"
             fi
         else
             echo "[WARN ] Database offline or connection timeout - skipping SQL-based metrics."
@@ -10384,6 +10454,9 @@ run_collect_log_osinfo() {
 }
 
 run_collect_log_asp() {
+    # arg "standby": gs_asp rows on a standby are the primary's replicated
+    # history -- all four analyses read local_active_session only
+    local _vb_asp_mode="${1:-}"
     echo "========== Active Session Profile (ASP) =========="
     local v_pid=$(pgrep -n vastbase)
     [ -z "$v_pid" ] && { echo "[SKIP] Vastbase process not found"; return; }
@@ -10391,13 +10464,22 @@ run_collect_log_asp() {
     safe_exec "Current Active Sessions" "run_as $v_pid"
     # Batch execute ASP analytics
     for metric in cnt event waitchain sql; do
-        safe_exec "ASP ${metric^^} Analysis" "run_asp_${metric}_query '$begin_time' '$end_time'" "30s"
+        safe_exec "ASP ${metric^^} Analysis" "run_asp_${metric}_query '$begin_time' '$end_time'${_vb_asp_mode:+ standby}" "30s"
     done
 }
 
 run_collect_log_mem() {
+    # arg "standby": current values only. memhist is skipped on a standby --
+    # the WDR snapshot tables are ordinary heap rows written by the primary and
+    # physically replicated, so querying them there returns the PRIMARY's
+    # memory history (same pattern as gs_asp in the awr standby support).
+    local _vb_mem_mode="${1:-primary}"
     echo "========== Database System Memory Info =========="
     safe_exec "Memory Stats" "run_mem"
+    if [[ "$_vb_mem_mode" == "standby" ]]; then
+        echo "[SKIP] standby node: memhist skipped (WDR snapshot tables hold the primary's replicated history)"
+        return 0
+    fi
     
     local wdr_status=$(timeout 2s psql -tAc "select current_setting('enable_wdr_snapshot')" 2>/dev/null)
     if [[ "$wdr_status" == "on" ]]; then
@@ -10436,6 +10518,8 @@ run_collect_log_dbinfo() {
 	safe_exec "Replication Infos" "psql -d postgres -c 'select * from pg_replication_slots'"
     safe_exec "Database Catalog List" "psql -d postgres -c '\l+'"
     safe_exec "XLOG/WAL Health Check" "run_xloghc"
+    safe_exec "Pagewriter Stat (dirty pages)" "psql -d postgres -c 'select * from local_pagewriter_stat()'"
+    safe_exec "Buffer Candidate Stat" "psql -d postgres -c 'select * from local_candidate_stat()'"
     safe_exec "Table Bloat & Dead Tuples" "run_dead_tups -d postgres"
 }
 
@@ -11050,7 +11134,7 @@ run_collect_log_xlog() {
     # 3. Timestamp Normalization (End Time Calibration)
     # Buffers the search window to ensure files modified shortly after the end_time are considered.
     local search_limit
-    search_limit=$(date -d "$end_time + 1 hour" +"%Y-%m-%d %H:%M:%S")
+    search_limit=$(date -d "@$(( $(date -d "$end_time" +%s) + 3600 ))" +"%Y-%m-%d %H:%M:%S")
     local adj_end_ts_raw
     adj_end_ts_raw=$(find "$wal_dir" -maxdepth 1 -type f -newermt "$end_time" ! -newermt "$search_limit" -printf "%T@\n" | sort -n | head -1)
     
