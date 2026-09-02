@@ -10098,7 +10098,7 @@ run_collect_log(){
 
         local logname="vblog_$(date +%Y%m%d_%H%M%S)"
         local output_dir="/tmp/$logname"
-        mkdir -p "$output_dir"/osinfo
+        mkdir -p "$output_dir/$local_hostname/osinfo"
 
         # Messages and Cron log
         echo "[INFO ] Collecting local system messages and cron logs."
@@ -10109,9 +10109,12 @@ run_collect_log(){
             
             #echo "[INFO ] Collecting $log_type (End time adjusted to: $adj_end)"
             
-            # Archive logs within the calculated range; use -C to strip absolute path prefixes
-            find /var/log -maxdepth 1 -type f -name "${log_type}*" -newermt "$begin_time" ! -newermt "$adj_end" -printf "%P\0" | \
-            tar -czpf "$output_dir/osinfo/${log_type}.tar.gz" --null -C /var/log -T - 2>/dev/null
+            # raw copies -- the only packaging/compression is the outermost bundle tar
+            # (%p keeps the absolute path: %P would strip /var/log/ and cp would
+            # look for bare names in the caller's cwd, the old tar used -C for this)
+            mkdir -p "$output_dir/$local_hostname/osinfo/${log_type}"
+            find /var/log -maxdepth 1 -type f -name "${log_type}*" -newermt "$begin_time" ! -newermt "$adj_end" -printf "%p\0" | \
+            xargs -0 -r cp -t "$output_dir/$local_hostname/osinfo/${log_type}/" -- 2>/dev/null
         done
 
         # Hand over directory ownership to the database user
@@ -10202,7 +10205,7 @@ run_collect_log_all() {
 
         if [ "$host_count" -gt 1 ]; then
             echo "[INFO ] Multi-node cluster detected ($host_count nodes: $host_list)."
-			mkdir -p $output_dir/{osinfo,dbinfo,pglog,cmlog,dbconf,ffic_log}
+			mkdir -p "$output_dir"
             cm_ctl list --param --agent > "$output_dir/dbconf/cm_agent.conf" 2>/dev/null
             cm_ctl list --param --server > "$output_dir/dbconf/cm_server.conf" 2>/dev/null
         else
@@ -10251,7 +10254,7 @@ run_collect_log_pglog() {
             real_end_time=$(date -d "${real_end_time:0:19} 30 sec" +"%Y-%m-%d %H:%M:%S")
             echo "[INFO ] Adjusted end time for log overlap: $real_end_time"
         fi      
-        cd "$LOG_DIR" && find . -maxdepth 1 -type f -newermt "$begin_time" ! -newermt "$real_end_time" -print0 | tar -czf "$output_dir/pglog/pglog.tar.gz" --null -T -
+        cd "$LOG_DIR" && find . -maxdepth 1 -type f -newermt "$begin_time" ! -newermt "$real_end_time" -print0 | xargs -0 -r cp -t "$output_dir/pglog/" 2>/dev/null
         echo "[INFO ] pg_log collection completed."
     else
         echo "[WARN ] Could not locate pg_log directory."
@@ -10275,6 +10278,9 @@ run_collect_log_vtop() {
 run_collect_log_nodes_info() {
     local node=$1
     [ -z "$node" ] && node=$local_hostname
+    # per-node namespace: everything this node collects lands under <node>/ --
+    # no per-node tar anymore; the outermost bundle tar is the single packaging
+    local nd="$output_dir/$node"
     
     echo "--------------------------------------------------------------"
     echo "[INFO ] Processing Node: [$node]"
@@ -10284,15 +10290,15 @@ run_collect_log_nodes_info() {
         [ -f ~/.profile ] && . ~/.profile;
         [ -f ~/.bashrc ] && . ~/.bashrc;
         [ -f ~/.Vastbase ] && . ~/.Vastbase;
-	    mkdir -p $output_dir/{osinfo,dbinfo,pglog,cmlog,dbconf,ffic_log}
+	    mkdir -p $nd/{osinfo,dbinfo,pglog,cmlog,dbconf,ffic_log}
 
         # 1. OSWatcher Collection
         if pgrep -f "OSWatcherFM.sh" > /dev/null; then
             osw_path=\$(ps ux | grep OSWatcherFM.sh | grep -v grep | awk '{print \$NF}')
             if [ -n "\$osw_path" ] && [ -d "\$osw_path" ]; then
                 osw_limit=\$(date -d "@$(( $(date -d "$end_time" +%s) + 3600 ))" +'%Y%m%d %H:%M')
-				mkdir -p $output_dir/osw
-				cd "\$osw_path" && find . -type f -newermt "$begin_time" ! -newermt "\$osw_limit" -print0 | xargs -0 cp --parents -t "$output_dir/osw/" 2>/dev/null
+				mkdir -p $nd/osw
+				cd "\$osw_path" && find . -type f -newermt "$begin_time" ! -newermt "\$osw_limit" -print0 | xargs -0 cp --parents -t "$nd/osw/" 2>/dev/null
             fi
         fi
 
@@ -10301,15 +10307,15 @@ run_collect_log_nodes_info() {
             nmon_path=\$(ps ux | grep nmon | grep -F -- '-F' | grep -v grep | awk '{print \$NF}' | xargs dirname)
 			if [ -n "\$nmon_path" ] && [ -d "\$nmon_path" ]; then
                 nmon_limit=\$(date -d "@$(( $(date -d "$end_time" +%s) + 86400 ))" +'%Y-%m-%d 00:00:00')
-				mkdir -p $output_dir/nmon
-				#cd "\$nmon_path" && find . -maxdepth 1 -type f -newermt "$begin_time" ! -newermt "\$nmon_limit" -exec sh -c 'gzip -c "$1" > "$2/$(basename "$1").gz"' _ {} "$output_dir/nmon" \;
-				cd "\$nmon_path" && find . -maxdepth 1 -type f -newermt "$begin_time" ! -newermt "\$nmon_limit" -exec sh -c '[ -n "$2" ] && [ -d "$2" ] && gzip -c "$1" > "$2/$(basename "$1").gz"' -- {} "$output_dir/nmon" \;
+				mkdir -p $nd/nmon
+				# raw copies -- the only packaging/compression is the outermost bundle tar
+				cd "\$nmon_path" && find . -maxdepth 1 -type f -newermt "$begin_time" ! -newermt "\$nmon_limit" -exec cp -t "$nd/nmon" {} +
             fi
         fi
         
         # 3. OS Info & Dmesg
-        run_collect_log_osinfo > "$output_dir/osinfo/osinfo_${node}.txt"
-        dmesg -T | gzip > "$output_dir/osinfo/dmesg_${node}.log.gz" 2>/dev/null
+        run_collect_log_osinfo > "$nd/osinfo/osinfo_${node}.txt"
+        dmesg -T > "$nd/osinfo/dmesg_${node}.log" 2>/dev/null
         
         # 4. Role-based DB Info Collection
         # a. Determine status: f (Primary), t (Standby), or empty (Offline)
@@ -10320,66 +10326,61 @@ run_collect_log_nodes_info() {
             echo "[INFO ] Database online (Mode: \${primary_status}). Collecting online metrics."
             
             # Collect dbinfo 
-            run_collect_log_version   >  "$output_dir/dbinfo/dbinfo_${node}.txt"
-            run_collect_log_deadtups  >  "$output_dir/dbinfo/deadtups_${node}.txt"
-            run_collect_log_extension >  "$output_dir/dbinfo/extensions_${node}.txt"
+            run_collect_log_version   >  "$nd/dbinfo/dbinfo_${node}.txt"
+            run_collect_log_deadtups  >  "$nd/dbinfo/deadtups_${node}.txt"
+            run_collect_log_extension >  "$nd/dbinfo/extensions_${node}.txt"
         
             # c. Role-based Collection: primary = ASP/MEM/WDR/backup; standby = MEM only
             if [[ "\$primary_status" == "f" ]]; then
                 echo "[INFO ] Primary node detected. Collecting WDR/ASP/MEM."
-                run_collect_log_asp      > "$output_dir/dbinfo/asp_${node}.txt"
-                run_collect_log_mem      > "$output_dir/dbinfo/mem_${node}.txt"
-                run_collect_log_wdr      > "$output_dir/dbinfo/wdr_${node}.txt"
-				safe_exec "Show Backup" "vb_probackup show -B '$backup_path' >> $output_dir/dbinfo/dbinfo_${node}.txt "
+                run_collect_log_asp      > "$nd/dbinfo/asp_${node}.txt"
+                run_collect_log_mem      > "$nd/dbinfo/mem_${node}.txt"
+                run_collect_log_wdr      > "$nd/dbinfo/wdr_${node}.txt"
+				safe_exec "Show Backup" "vb_probackup show -B '$backup_path' >> $nd/dbinfo/dbinfo_${node}.txt "
             elif [[ "\$primary_status" == "t" ]]; then
                 echo "[INFO ] Standby node detected. Collecting MEM/ASP (standby view: current memory + local_active_session only)."
-                run_collect_log_mem standby > "$output_dir/dbinfo/mem_${node}.txt"
-                run_collect_log_asp standby > "$output_dir/dbinfo/asp_${node}.txt"
+                run_collect_log_mem standby > "$nd/dbinfo/mem_${node}.txt"
+                run_collect_log_asp standby > "$nd/dbinfo/asp_${node}.txt"
             fi
 
             # e. vtop frames: 3 samples 5s apart -> dbinfo/vtop.txt (live-state
             # snapshot; captured regardless of the -b/-e window, so history
             # collections include it; primary and standby both)
-            safe_exec "Collect vtop (3 samples)" "run_collect_log_vtop '$output_dir/dbinfo/vtop.txt'" "120s"
+            safe_exec "Collect vtop (3 samples)" "run_collect_log_vtop '$nd/dbinfo/vtop.txt'" "120s"
         else
             echo "[WARN ] Database offline or connection timeout - skipping SQL-based metrics."
         fi
 		# d. Universal Collection (Runs even if DB is offline, as these functions handle errors internally)
         echo "[INFO ] Collecting base metrics..."
-        run_collect_log_dbinfo  >> "$output_dir/dbinfo/dbinfo_${node}.txt"
-        run_collect_log_dbfiles >  "$output_dir/dbinfo/dbfiles_${node}.txt"
+        run_collect_log_dbinfo  >> "$nd/dbinfo/dbinfo_${node}.txt"
+        run_collect_log_dbfiles >  "$nd/dbinfo/dbfiles_${node}.txt"
 		
 		# 5. Backup Configuration Files
-		safe_exec "Backup Configuration Files" "find $PGDATA -maxdepth 1 \( -name 'postgresql*.conf' -o -name 'pg_hba.conf' -o -name 'gaussdb.state' \) -type f -exec cp {} $output_dir/dbconf/ \;"
-		
-		# 6. crontab config
-		safe_exec "Get Crontab Config" "crontab -l > $output_dir/dbconf/crontab_${node}.txt"
-		
-		# 7. Capture Process Stack
-		safe_exec "Capture Process Stack (3 samples)" "run_collect_log_stack $output_dir" "30s"
+		safe_exec "Backup Configuration Files" "find $PGDATA -maxdepth 1 \( -name 'postgresql*.conf' -o -name 'pg_hba.conf' -o -name 'gaussdb.state' \) -type f -exec cp {} $nd/dbconf/ \;"
 
-		# 8. Cluster or Single-node Log Backup	
-        if command -v has_ctl &> /dev/null; then		
-            safe_exec "Cluster Log Backup" "run_collect_log_cmdn '$begin_time' '$end_time' '$output_dir'" "1200s"	
-		else 
-            safe_exec "Database Log Backup" "run_collect_log_pglog '$begin_time' '$end_time' '$output_dir'" "1200s"		
+		# 6. crontab config
+		safe_exec "Get Crontab Config" "crontab -l > $nd/dbconf/crontab_${node}.txt"
+
+		# 7. Capture Process Stack
+		safe_exec "Capture Process Stack (3 samples)" "run_collect_log_stack $nd" "30s"
+
+		# 8. Cluster or Single-node Log Backup
+        if command -v has_ctl &> /dev/null; then
+            safe_exec "Cluster Log Backup" "run_collect_log_cmdn '$begin_time' '$end_time' '$nd'" "1200s"
+		else
+            safe_exec "Database Log Backup" "run_collect_log_pglog '$begin_time' '$end_time' '$nd'" "1200s"
 	    fi
-		
+
 		# 9.Wal Segments Backup from current node and primary node
         if [[ "$max_xlog" -gt 0 ]] && { [[ "$node" == "$local_hostname" ]] || [[ "\$primary_status" == "f" ]]; }; then
-            safe_exec "Wal Segments Backup" "run_collect_log_xlog '$begin_time' '$end_time' '$max_xlog' '$output_dir'" "1800s"    
+            safe_exec "Wal Segments Backup" "run_collect_log_xlog '$begin_time' '$end_time' '$max_xlog' '$nd'" "1800s"
         fi
-		
-        # 10. Archive & Cleanup
-        if [ -d "$output_dir" ]; then
-            cd "$output_dir"
-            tar -czf "${node}.tar.gz" * --exclude="${node}.tar.gz" 2>/dev/null
-            if [ \$? -ne 0 ]; then
-                echo "[ERROR] tar failed for ${node}; raw files kept for inspection"
-            else
-                find . -maxdepth 1 ! -name "${node}.tar.gz" ! -name "." -exec rm -rf {} +
-                echo "BUNDLE_READY"
-            fi
+
+        # 10. Done -- NO per-node tar: raw files stay under <node>/ and the
+        # outermost bundle tar is the single packaging step (remote nodes are
+        # pulled as an uncompressed tar stream by the caller)
+        if [ -d "$nd" ]; then
+            echo "BUNDLE_READY"
         fi
 		# Ending Message
         printf "\n[INFO ] Node ${node} collection completed.\n" 
@@ -10405,11 +10406,17 @@ $(declare -f run_collect_log_vtop run_vtop $(compgen -A function | grep '^_vtop_
     if echo "$status" | grep -q "BUNDLE_READY"; then
 	    echo -e "\n[INFO ] Node [$node] collection finished."
         if [[ "$node" != "$local_hostname" && "$node" != "localhost" ]]; then
-            scp "$node:$output_dir/${node}.tar.gz" "$output_dir/" >/dev/null 2>&1
-            ssh "$node" "rm -rf $output_dir /tmp/vb_funcs_*" >/dev/null 2>&1
-			echo "[INFO ] Transfer and clean up node [$node] info finished..."	
-            echo "--------------------------------------------------------------"			
-		else 
+            # pull the node subtree as an UNCOMPRESSED tar stream (ssh -C compresses
+            # only in transit); the outermost bundle tar stays the only packaging
+            ssh -C "$node" "cd '$output_dir' && tar -cf - '$node'" | tar -xf - -C "$output_dir" 2>/dev/null
+            if [ -n "$(ls -A "$output_dir/$node" 2>/dev/null)" ]; then
+                ssh "$node" "rm -rf $output_dir /tmp/vb_funcs_*" >/dev/null 2>&1
+                echo "[INFO ] Transfer and clean up node [$node] info finished..."
+            else
+                echo -e "\n[ERROR] Node [$node] transfer failed; raw files kept on remote at $output_dir"
+            fi
+            echo "--------------------------------------------------------------"
+		else
 		   rm -f /tmp/vb_funcs_*
         fi
     else
@@ -11219,15 +11226,16 @@ run_collect_log_xlog() {
 
     sort -u "$temp_list" | head -n "$max_xlog" | xargs -I {} cp -p {} "$final_dir/"
 
+    # WAL segments stay as raw files under xlog/ (outermost bundle tar is the
+    # single packaging step; the old inner tar.gz was created and immediately
+    # deleted -- dead work, removed)
     if [[ -n "$(ls -A "$final_dir" 2>/dev/null)" ]]; then
-        tar -czf "$output_dir/wal_segments_backup.tar.gz" -C "$output_dir" xlog
         echo "[INFO ] Successfully collected $(ls "$final_dir" | wc -l) WAL segment(s)."
     else
         echo "[WARN ] No WAL segments found within the specified time range."
     fi
 
     rm -f "$temp_list"
-	rm -f "$output_dir/wal_segments_backup.tar.gz"
 }
 # --- Collection Functions for collect_log ---End---
 
