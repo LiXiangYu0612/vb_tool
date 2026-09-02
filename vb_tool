@@ -21032,7 +21032,7 @@ limit ${topn};"
                         section=MEMSES; continue;;
                     ===TOP)
                         printf 'TOPSQL  %-11s %6s %7s %7s %s\n' "SQLID" "CPU%" "RUN/TOT" "ET(s)" "SQLTEXT"
-                        _vtop_rule_cols '        ' 11 6 7 7 150
+                        _vtop_rule_cols '        ' 11 6 7 7 100
                         section=TOP; continue;;
                 esac
                 case "$section" in
@@ -21069,7 +21069,7 @@ limit ${topn};"
                           local sql_col=""
                           awk -v c="$r_cpu" 'BEGIN{exit !(c>=90)}' && sql_col=$c_red
                           printf '%s' "$sql_col"
-                          printf '        %-11.11s %6s %7s %7s %.150s\n' "$r_sqlid" "${r_cpu}%" "${r_rn}/${r_ns}" "$r_et" "$r_sql"
+                          printf '        %-11.11s %6s %7s %7s %.100s\n' "$r_sqlid" "${r_cpu}%" "${r_rn}/${r_ns}" "$r_et" "$r_sql"
                           printf '%s' "$c_off";;
                 esac
             done <<< "$db"
