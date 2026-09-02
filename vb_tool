@@ -21774,7 +21774,7 @@ def load_snap(d):
     for t in ("statement", "wait_events", "instance_time", "database", "pagewriter",
               "memory_node_detail", "shared_memory", "session_memory", "session_by_sess",
               "pg_settings",
-              "object_tables", "object_indexes", "object_dead"):
+              "object_tables", "object_indexes", "object_dead", "walreceiver"):
         s["db"][t] = read_csv_rows(os.path.join(d, "db", t + ".csv"))
     return s
 
@@ -21867,7 +21867,7 @@ def build_window_from_snaps(begin_dir, end_dir):
     for t in ("statement", "wait_events", "instance_time", "database", "pagewriter",
               "memory_node_detail", "shared_memory", "session_memory", "session_by_sess",
               "pg_settings",
-              "object_tables", "object_indexes", "object_dead"):
+              "object_tables", "object_indexes", "object_dead", "walreceiver"):
         win["db"][("begin", t)] = b["db"].get(t, [])
         win["db"][("end", t)] = e["db"].get(t, [])
     bm, em = b["meta"], e["meta"]
@@ -24622,11 +24622,30 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     lp("deadlocks", "deadlocks")
     lp("conflicts", "conflicts")
     lp("temp bytes", "temp_bytes")
-    _wal_bs = _pwlsn_str("begin", "current_xlog_insert_lsn"); _wal_es = _pwlsn_str("end", "current_xlog_insert_lsn")
-    _wal_d = _pwlsn("end", "current_xlog_insert_lsn") - _pwlsn("begin", "current_xlog_insert_lsn")
-    parts.append('<tr><td>WAL written (xlog insert lsn)</td><td class="n">%s</td><td class="n">%s</td>'
-                 '<td class="n">%s</td><td class="n">%s</td></tr>'
-                 % (esc(_wal_bs), esc(_wal_es), fmt_bytes(_wal_d), fmt_bytes(_wal_d / duration)))
+    if "standby" in str(m.get("db_role", "")):
+        # standby writes no local WAL (its xlog insert lsn sits at a static
+        # near-zero) -- show replay progress from the standby's own
+        # walreceiver instead; "-" when a side has no walreceiver row (old
+        # snaps, or a window that spans a promote)
+        _wrr = lambda ph: win["db"].get((ph, "walreceiver"), [])
+        _wrb, _wre = _wrr("begin"), _wrr("end")
+        if _wrb and _wre:
+            _wr_bs = _wrb[0].get("receiver_replay_location", "") or "-"
+            _wr_es = _wre[0].get("receiver_replay_location", "") or "-"
+            _wr_d = (sum(_lsn_to_int(r.get("receiver_replay_location", "")) for r in _wre)
+                     - sum(_lsn_to_int(r.get("receiver_replay_location", "")) for r in _wrb))
+            parts.append('<tr><td>WAL replayed (receiver replay lsn)</td><td class="n">%s</td><td class="n">%s</td>'
+                         '<td class="n">%s</td><td class="n">%s</td></tr>'
+                         % (esc(_wr_bs), esc(_wr_es), fmt_bytes(_wr_d), fmt_bytes(_wr_d / duration)))
+        else:
+            parts.append('<tr><td>WAL replayed (receiver replay lsn)</td><td class="n">-</td><td class="n">-</td>'
+                         '<td class="n">-</td><td class="n">-</td></tr>')
+    else:
+        _wal_bs = _pwlsn_str("begin", "current_xlog_insert_lsn"); _wal_es = _pwlsn_str("end", "current_xlog_insert_lsn")
+        _wal_d = _pwlsn("end", "current_xlog_insert_lsn") - _pwlsn("begin", "current_xlog_insert_lsn")
+        parts.append('<tr><td>WAL written (xlog insert lsn)</td><td class="n">%s</td><td class="n">%s</td>'
+                     '<td class="n">%s</td><td class="n">%s</td></tr>'
+                     % (esc(_wal_bs), esc(_wal_es), fmt_bytes(_wal_d), fmt_bytes(_wal_d / duration)))
     _pf_bs = _pwlsn_str("begin", "ckpt_redo_point"); _pf_es = _pwlsn_str("end", "ckpt_redo_point")
     _pf_d = _pwlsn("end", "ckpt_redo_point") - _pwlsn("begin", "ckpt_redo_point")
     parts.append('<tr><td>pagewriter written (ckpt_redo_point)</td><td class="n">%s</td><td class="n">%s</td>'
@@ -25570,11 +25589,30 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         parts.append('<tr><td>%s</td><td class="n">%s</td><td class="n">%s</td><td class="n">%s</td>'
                      '<td class="n">%s</td><td class="n">%s</td></tr>' % (
                          esc(lbl), fb(v1), fb(v2), fb(v2 - v1), fmt_num(v1 / dur1), fmt_num(v2 / dur2)))
-    _wal1 = _pwlsn_delta(win1, "current_xlog_insert_lsn"); _wal2 = _pwlsn_delta(win2, "current_xlog_insert_lsn")
-    parts.append('<tr><td>WAL written</td><td class="n">%s</td><td class="n">%s</td><td class="n">%s</td>'
+    # role-aware WAL movement: a standby writes no local WAL (xlog insert lsn
+    # sits at a static near-zero there) -- on standby windows use the standby's
+    # own walreceiver replay lsn delta; "-" when that window has no
+    # walreceiver row on both sides (old snaps / window spans a promote)
+    def _walval(win, standby):
+        if not standby:
+            return _pwlsn_delta(win, "current_xlog_insert_lsn")
+        rb = win["db"].get(("begin", "walreceiver"), [])
+        re_ = win["db"].get(("end", "walreceiver"), [])
+        if not rb or not re_:
+            return None
+        return (sum(_lsn_to_int(r.get("receiver_replay_location", "")) for r in re_)
+                - sum(_lsn_to_int(r.get("receiver_replay_location", "")) for r in rb))
+    _sb1 = "standby" in str(m1.get("db_role", "")); _sb2 = "standby" in str(m2.get("db_role", ""))
+    _w1 = _walval(win1, _sb1); _w2 = _walval(win2, _sb2)
+    _wl = ("WAL replayed (receiver replay lsn)" if _sb1 and _sb2 else
+           ("WAL written / WAL replayed (P1 / P2)" if _sb1 or _sb2 else "WAL written"))
+    _fmtw = lambda v: "-" if v is None else fmt_bytes(v)
+    parts.append('<tr><td>%s</td><td class="n">%s</td><td class="n">%s</td><td class="n">%s</td>'
                  '<td class="n">%s</td><td class="n">%s</td></tr>' % (
-                     fmt_bytes(_wal1), fmt_bytes(_wal2), fmt_bytes(_wal2 - _wal1),
-                     fmt_bytes(_wal1 / dur1), fmt_bytes(_wal2 / dur2)))
+                     esc(_wl), _fmtw(_w1), _fmtw(_w2),
+                     "-" if (_w1 is None or _w2 is None) else fmt_bytes(_w2 - _w1),
+                     "-" if _w1 is None else fmt_bytes(_w1 / dur1),
+                     "-" if _w2 is None else fmt_bytes(_w2 / dur2)))
     _pf1 = _pwlsn_delta(win1, "ckpt_redo_point"); _pf2 = _pwlsn_delta(win2, "ckpt_redo_point")
     parts.append('<tr><td>pagewriter written</td><td class="n">%s</td><td class="n">%s</td><td class="n">%s</td>'
                  '<td class="n">%s</td><td class="n">%s</td></tr>' % (
