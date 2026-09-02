@@ -1,13 +1,13 @@
 #!/bin/bash
 #--------------------------------------------------------------------------------
 #-- File name:   vb_tool
-#-- Version  ：  v2.0.9
-#-- Commit at：  2026-08-29 15:05:00
+#-- Version  ：  v2.0.10
+#-- Commit at：  2026-09-02 12:15:00
 #-- Purpose:     Vastbase Script Tool
 #-- Author:      MVS & Second-line Team 
 #--------------------------------------------------------------------------------
 set -o pipefail
-export VB_TOOL_VERSION="v2.0.9"
+export VB_TOOL_VERSION="v2.0.10"
 show_help() {
     echo "Vastbase Script Tool (vb_tool)"
     echo ""
@@ -21028,10 +21028,10 @@ counter delta between two snapshots (end - begin).
                             count; while ENABLED also last-snap age
                             (ok / STALE liveness hint)
   delete  until <time>      delete snapshots (by ts), html reports (by mtime) and
-                            old repl_*.log / os_*.log (by whole day) older than
+                            old repl_/walrcv_/os_*.log (by whole day) older than
                             <time>; e.g. '2026-08-11' or '2026-08-11 12:00:00'
   config  retention <days>  set retention in days (default 8; 0 = never purge).
-                            Immediately purges already-expired snaps, repl/slot/os
+                            Immediately purges already-expired snaps, repl/slot/walrcv/os
                             logs and html reports.
   config  interval <min>    set sampling interval in minutes (default 60,
                             1-60, cron minute-field limit). If periodic capture
@@ -21204,6 +21204,15 @@ _awr_collect() {
         echo "  [ERROR] cannot reach the database (connect probe failed, skipped DB collection)" >&2
         return 1
     fi
+    # ---- db role: primary vs physical standby, detected ONCE here (before any
+    # sampler) and threaded through. On a standby the ASH flush must read
+    # local_active_session ONLY: gs_asp is a normal heap table whose inserts
+    # WAL-replicate from the primary, so on a standby it holds the PRIMARY's
+    # session history. And the replication-side single-point sample switches
+    # to the walreceiver function. meta.json reuses the same value.
+    local m_role is_standby=0
+    m_role=$(PGCONNECT_TIMEOUT=$_ct PGOPTIONS="$_st" psql -d postgres -tAq -c "select case when pg_is_in_recovery() then 'physical standby' else 'primary' end;" 2>/dev/null | head -1 | tr -d '"\r\n')
+    [ "$m_role" = "physical standby" ] && is_standby=1
     # ---- ASH flush window: [previous snap ts, now]. Output replicates the
     # `vb_tool asp` command (per-second counts rolled to 5-minute buckets,
     # max/avg columns; top-5 SQL per bucket; both sources gs_asp AND
@@ -21252,16 +21261,40 @@ _awr_collect() {
 \copy (SELECT name,setting,unit,context,short_desc FROM pg_settings ORDER BY name) TO '$dbd/pg_settings.csv' WITH CSV HEADER
 \copy (SELECT application_name, client_addr, state, sync_state, sender_sent_location, receiver_write_location, receiver_flush_location, receiver_replay_location FROM pg_stat_replication ORDER BY application_name) TO '$dbd/replication.csv' WITH CSV HEADER
 \copy (SELECT slot_name, plugin, slot_type, database, active, xmin, catalog_xmin, restart_lsn, dummy_standby, confirmed_flush FROM pg_replication_slots ORDER BY slot_name) TO '$dbd/replication_slots.csv' WITH CSV HEADER
+PSQL
+    # ---- ASH flush sources. primary: gs_asp('g') + local_active_session('l')
+    # dual source (the live stream hands off between them, observed on 204).
+    # standby: las ONLY -- gs_asp rows on a standby are the primary's history
+    # (physically replicated), including them would put the primary's workload
+    # into the standby's report.
+    if [ "$is_standby" = "1" ]; then
+        PGCONNECT_TIMEOUT=$_ct PGOPTIONS="$_st" psql -d postgres 2>&1 <<PSQL3 | grep -v '^$' >&2 || true
+\copy (WITH per_sec AS (SELECT sample_time::timestamp(0) AS sec, count(*) AS cnt, sum(CASE WHEN a.state = 'active' THEN 1 ELSE 0 END) AS active_cnt, sum(CASE WHEN b.type = 'LOCK_EVENT' THEN 1 ELSE 0 END) AS wlock, sum(CASE WHEN b.type = 'LWLOCK_EVENT' THEN 1 ELSE 0 END) AS wlw, sum(CASE WHEN b.type = 'IO_EVENT' THEN 1 ELSE 0 END) AS wio, sum(CASE WHEN a.cur_event = 'wait wal sync' THEN 1 ELSE 0 END) AS wwal, sum(CASE WHEN a.cur_event = 'wait transaction sync' THEN 1 ELSE 0 END) AS wtrans FROM dbe_perf.local_active_session a LEFT JOIN dbe_perf.wait_events b ON a.cur_event = b.event WHERE sample_time > '$ash_b' AND sample_time <= '$ash_e' GROUP BY sample_time::timestamp(0)) SELECT 'l' AS src, DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min' AS bucket, max(cnt) AS max_sess, round(avg(cnt)) AS avg_sess, max(active_cnt) AS max_active_sess, max(wlock) AS wait_lock, max(wlw) AS wait_lwlock, max(wio) AS wait_io, max(wwal) AS wait_wal_sync, max(wtrans) AS wait_trans_sync FROM per_sec GROUP BY DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min' ORDER BY bucket, src) TO '$dbd/ash_cnt.csv') TO '$dbd/ash_cnt.csv' WITH CSV HEADER
+\copy (WITH per_sec AS (SELECT sample_time::timestamp(0) AS sec, a.cur_event AS event, b.type AS event_type, count(*) AS cnt FROM dbe_perf.local_active_session a LEFT JOIN dbe_perf.wait_events b ON a.cur_event = b.event WHERE sample_time > '$ash_b' AND sample_time <= '$ash_e' AND a.state = 'active' AND a.cur_event IS NOT NULL AND a.cur_event NOT IN ('none', 'wait cmd') GROUP BY sample_time::timestamp(0), a.cur_event, b.type) SELECT 'l' AS src, DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min' AS bucket, event_type, event, max(cnt) AS max_cnt, round(avg(cnt)) AS avg_cnt FROM per_sec GROUP BY DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min', event_type, event ORDER BY bucket, max_cnt DESC LIMIT 800) TO '$dbd/ash_event.csv') TO '$dbd/ash_event.csv' WITH CSV HEADER
+\copy (WITH per_sec AS (SELECT sample_time::timestamp(0) AS sec, unique_query_id, substr(REGEXP_REPLACE(REGEXP_REPLACE(unique_query, '(\r|\n)+', ' '), ' {2,}', ' '), 1, 50) AS uq, count(*) AS cnt FROM dbe_perf.local_active_session WHERE sample_time > '$ash_b' AND sample_time <= '$ash_e' AND state = 'active' AND unique_query_id > 0 GROUP BY sample_time::timestamp(0), unique_query_id, substr(REGEXP_REPLACE(REGEXP_REPLACE(unique_query, '(\r|\n)+', ' '), ' {2,}', ' '), 1, 50)) SELECT * FROM (SELECT 'l' AS src, DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min' AS bucket, unique_query_id, uq AS unique_query, max(cnt) AS max_cnt, round(avg(cnt)) AS avg_cnt, ROW_NUMBER() OVER (PARTITION BY DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min' ORDER BY max(cnt) DESC) AS rn FROM per_sec GROUP BY DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min', unique_query_id, uq) t2 WHERE rn <= 5 ORDER BY bucket, max_cnt DESC) TO '$dbd/ash_sql.csv') TO '$dbd/ash_sql.csv' WITH CSV HEADER
+PSQL3
+    else
+        PGCONNECT_TIMEOUT=$_ct PGOPTIONS="$_st" psql -d postgres 2>&1 <<PSQL | grep -v '^$' >&2 || true
 \copy (SELECT * FROM (WITH per_sec AS (SELECT sample_time::timestamp(0) AS sec, count(*) AS cnt, sum(CASE WHEN a.state = 'active' THEN 1 ELSE 0 END) AS active_cnt, sum(CASE WHEN b.type = 'LOCK_EVENT' THEN 1 ELSE 0 END) AS wlock, sum(CASE WHEN b.type = 'LWLOCK_EVENT' THEN 1 ELSE 0 END) AS wlw, sum(CASE WHEN b.type = 'IO_EVENT' THEN 1 ELSE 0 END) AS wio, sum(CASE WHEN a.event = 'wait wal sync' THEN 1 ELSE 0 END) AS wwal, sum(CASE WHEN a.event = 'wait transaction sync' THEN 1 ELSE 0 END) AS wtrans FROM gs_asp a LEFT JOIN dbe_perf.wait_events b ON a.event = b.event WHERE sample_time > '$ash_b' AND sample_time <= '$ash_e' GROUP BY sample_time::timestamp(0)) SELECT 'g' AS src, DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min' AS bucket, max(cnt) AS max_sess, round(avg(cnt)) AS avg_sess, max(active_cnt) AS max_active_sess, max(wlock) AS wait_lock, max(wlw) AS wait_lwlock, max(wio) AS wait_io, max(wwal) AS wait_wal_sync, max(wtrans) AS wait_trans_sync FROM per_sec GROUP BY DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min' UNION ALL SELECT * FROM (WITH per_sec AS (SELECT sample_time::timestamp(0) AS sec, count(*) AS cnt, sum(CASE WHEN a.state = 'active' THEN 1 ELSE 0 END) AS active_cnt, sum(CASE WHEN b.type = 'LOCK_EVENT' THEN 1 ELSE 0 END) AS wlock, sum(CASE WHEN b.type = 'LWLOCK_EVENT' THEN 1 ELSE 0 END) AS wlw, sum(CASE WHEN b.type = 'IO_EVENT' THEN 1 ELSE 0 END) AS wio, sum(CASE WHEN a.cur_event = 'wait wal sync' THEN 1 ELSE 0 END) AS wwal, sum(CASE WHEN a.cur_event = 'wait transaction sync' THEN 1 ELSE 0 END) AS wtrans FROM dbe_perf.local_active_session a LEFT JOIN dbe_perf.wait_events b ON a.cur_event = b.event WHERE sample_time > '$ash_b' AND sample_time <= '$ash_e' GROUP BY sample_time::timestamp(0)) SELECT 'l' AS src, DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min' AS bucket, max(cnt) AS max_sess, round(avg(cnt)) AS avg_sess, max(active_cnt) AS max_active_sess, max(wlock) AS wait_lock, max(wlw) AS wait_lwlock, max(wio) AS wait_io, max(wwal) AS wait_wal_sync, max(wtrans) AS wait_trans_sync FROM per_sec GROUP BY DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min') x) u ORDER BY bucket, src) TO '$dbd/ash_cnt.csv' WITH CSV HEADER
 \copy (SELECT * FROM (WITH per_sec AS (SELECT sample_time::timestamp(0) AS sec, a.event AS event, b.type AS event_type, count(*) AS cnt FROM gs_asp a LEFT JOIN dbe_perf.wait_events b ON a.event = b.event WHERE sample_time > '$ash_b' AND sample_time <= '$ash_e' AND a.state = 'active' AND a.event IS NOT NULL AND a.event NOT IN ('none', 'wait cmd') GROUP BY sample_time::timestamp(0), a.event, b.type) SELECT 'g' AS src, DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min' AS bucket, event_type, event, max(cnt) AS max_cnt, round(avg(cnt)) AS avg_cnt FROM per_sec GROUP BY DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min', event_type, event UNION ALL SELECT * FROM (WITH per_sec AS (SELECT sample_time::timestamp(0) AS sec, a.cur_event AS event, b.type AS event_type, count(*) AS cnt FROM dbe_perf.local_active_session a LEFT JOIN dbe_perf.wait_events b ON a.cur_event = b.event WHERE sample_time > '$ash_b' AND sample_time <= '$ash_e' AND a.state = 'active' AND a.cur_event IS NOT NULL AND a.cur_event NOT IN ('none', 'wait cmd') GROUP BY sample_time::timestamp(0), a.cur_event, b.type) SELECT 'l' AS src, DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min' AS bucket, event_type, event, max(cnt) AS max_cnt, round(avg(cnt)) AS avg_cnt FROM per_sec GROUP BY DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min', event_type, event) x) u ORDER BY bucket, max_cnt DESC LIMIT 800) TO '$dbd/ash_event.csv' WITH CSV HEADER
 \copy (SELECT * FROM (WITH per_sec AS (SELECT sample_time::timestamp(0) AS sec, unique_query_id, substr(REGEXP_REPLACE(REGEXP_REPLACE(unique_query, '(\r|\n)+', ' '), ' {2,}', ' '), 1, 50) AS uq, count(*) AS cnt FROM gs_asp WHERE sample_time > '$ash_b' AND sample_time <= '$ash_e' AND state = 'active' AND unique_query_id > 0 GROUP BY sample_time::timestamp(0), unique_query_id, substr(REGEXP_REPLACE(REGEXP_REPLACE(unique_query, '(\r|\n)+', ' '), ' {2,}', ' '), 1, 50)) SELECT * FROM (SELECT 'g' AS src, DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min' AS bucket, unique_query_id, uq AS unique_query, max(cnt) AS max_cnt, round(avg(cnt)) AS avg_cnt, ROW_NUMBER() OVER (PARTITION BY DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min' ORDER BY max(cnt) DESC) AS rn FROM per_sec GROUP BY DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min', unique_query_id, uq) t WHERE rn <= 5 UNION ALL SELECT * FROM (WITH per_sec AS (SELECT sample_time::timestamp(0) AS sec, unique_query_id, substr(REGEXP_REPLACE(REGEXP_REPLACE(unique_query, '(\r|\n)+', ' '), ' {2,}', ' '), 1, 50) AS uq, count(*) AS cnt FROM dbe_perf.local_active_session WHERE sample_time > '$ash_b' AND sample_time <= '$ash_e' AND state = 'active' AND unique_query_id > 0 GROUP BY sample_time::timestamp(0), unique_query_id, substr(REGEXP_REPLACE(REGEXP_REPLACE(unique_query, '(\r|\n)+', ' '), ' {2,}', ' '), 1, 50)) SELECT * FROM (SELECT 'l' AS src, DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min' AS bucket, unique_query_id, uq AS unique_query, max(cnt) AS max_cnt, round(avg(cnt)) AS avg_cnt, ROW_NUMBER() OVER (PARTITION BY DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min' ORDER BY max(cnt) DESC) AS rn FROM per_sec GROUP BY DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min', unique_query_id, uq) t2 WHERE rn <= 5) x) u ORDER BY bucket, max_cnt DESC) TO '$dbd/ash_sql.csv' WITH CSV HEADER
 PSQL
+    fi
     # ---- ASH waitchain (recursive blocker-chain analysis, `vb_tool asp
     # waitchain` port; 5-minute buckets, rn=1 per bucket+root). Two variants:
     # las present (dual source, gs fills sample-times las lacks) vs absent
     # (gs_asp only, bucketing added so both emit the same columns). Empty
     # result on an unblocked window is normal -- no file rows, header only.
-    if [ "$ash_las_flag" = "0" ]; then
+    if [ "$is_standby" = "1" ]; then
+        # standby: las only (gs_asp = primary's replicated history). las itself
+        # missing (ash_las_flag=0) -> no ASH source on a standby at all -> skip;
+        # the missing csv hides the section in the report.
+        if [ "$ash_las_flag" != "0" ]; then
+            PGCONNECT_TIMEOUT=$_ct PGOPTIONS="$_st" psql -d postgres 2>&1 <<PSQL2 | grep -v '^$' >&2 || true
+\copy (WITH RECURSIVE blocked_sessions AS (SELECT sampleid, sample_time::timestamp(0) AS sample_time, final_block_sessionid, wait_status, max(sessionid) AS w_sessionid, count(*) AS cnt FROM dbe_perf.local_active_session WHERE sample_time > '$ash_b' AND sample_time <= '$ash_e' AND $ash_c1 AND final_block_sessionid IS NOT NULL GROUP BY sampleid, sample_time::timestamp(0), final_block_sessionid, wait_status), local_part AS (SELECT DATE_TRUNC('hour', a.sample_time) + FLOOR(EXTRACT(MINUTE FROM a.sample_time) / 5) * INTERVAL '5 min' AS interval_start, CONCAT(b.final_block_sessionid::text, '(', case when $ash_c6 then 'a' else 'iit' end, '(', $ash_c8::text, ')') AS root_block_sessid, b.cnt AS b_cnt, substr(a.unique_query, 1, 50) AS h_sql, substr(c.unique_query, 1, 50) AS w_sql FROM dbe_perf.local_active_session a, blocked_sessions b, dbe_perf.local_active_session c WHERE a.sampleid = b.sampleid AND b.final_block_sessionid = a.sessionid AND b.sampleid = c.sampleid AND b.w_sessionid = c.sessionid), bucketed AS (SELECT p.*, row_number() OVER (PARTITION BY p.interval_start, p.root_block_sessid ORDER BY p.b_cnt DESC) AS rn FROM local_part p) SELECT '[local_active_session] ' || to_char(interval_start, 'YYYY-MM-DD HH24:MI:SS') || '-' || to_char(interval_start + INTERVAL '5 minutes', 'HH24:MI:SS') AS date_time, root_block_sessid, b_cnt AS max_b_cnt, h_sql, w_sql FROM bucketed WHERE rn = 1 ORDER BY interval_start, max_b_cnt DESC LIMIT 1000) TO '$dbd/ash_waitchain.csv' WITH CSV HEADER
+PSQL2
+        fi
+    elif [ "$ash_las_flag" = "0" ]; then
         PGCONNECT_TIMEOUT=$_ct PGOPTIONS="$_st" psql -d postgres 2>&1 <<PSQL2 | grep -v '^$' >&2 || true
 \copy (WITH RECURSIVE g AS (SELECT * FROM gs_asp WHERE sample_time > '$ash_b' AND sample_time <= '$ash_e'), blocking_chain AS (SELECT sampleid, sessionid AS blocked_sessionid, block_sessionid AS blocker_sessionid, 1 AS level, ARRAY[sessionid] AS path FROM g WHERE block_sessionid IS NOT NULL UNION ALL SELECT bc.sampleid, bc.blocked_sessionid, a.block_sessionid, bc.level + 1, bc.path || a.sessionid FROM blocking_chain bc JOIN g a ON bc.sampleid = a.sampleid AND bc.blocker_sessionid = a.sessionid WHERE a.block_sessionid IS NOT NULL AND NOT a.sessionid = ANY(bc.path)), root_blockers AS (SELECT sampleid, blocked_sessionid, blocker_sessionid AS root_blocker FROM blocking_chain WHERE NOT EXISTS (SELECT 1 FROM g a WHERE a.sampleid = blocking_chain.sampleid AND a.sessionid = blocking_chain.blocker_sessionid AND a.block_sessionid IS NOT NULL)), blocker_stats AS (SELECT sampleid, root_blocker, count(blocked_sessionid) AS blocked_count, min(blocked_sessionid) AS example_blocked_sessionid FROM root_blockers GROUP BY sampleid, root_blocker), raw AS (SELECT DATE_TRUNC('hour', las.sample_time) + FLOOR(EXTRACT(MINUTE FROM las.sample_time) / 5) * INTERVAL '5 min' AS interval_start, CONCAT(las.sessionid::text, '(', case when $ash_c7 then 'a' else 'iit' end, '(', $ash_c9::text, ')') AS root_block_sessid, bs.blocked_count AS b_cnt, substr(las.unique_query, 1, 50) AS h_sql, substr(blocked_las.unique_query, 1, 50) AS w_sql FROM blocker_stats bs JOIN g las ON bs.sampleid = las.sampleid AND bs.root_blocker = las.sessionid JOIN g blocked_las ON bs.sampleid = blocked_las.sampleid AND bs.example_blocked_sessionid = blocked_las.sessionid), bucketed AS (SELECT r.*, row_number() OVER (PARTITION BY interval_start, root_block_sessid ORDER BY b_cnt DESC) AS rn FROM raw r) SELECT '[gs_asp] ' || to_char(interval_start, 'YYYY-MM-DD HH24:MI:SS') || '-' || to_char(interval_start + INTERVAL '5 minutes', 'HH24:MI:SS') AS date_time, root_block_sessid, b_cnt AS max_b_cnt, h_sql, w_sql FROM bucketed WHERE rn = 1 ORDER BY interval_start, max_b_cnt DESC LIMIT 1000) TO '$dbd/ash_waitchain.csv' WITH CSV HEADER
 PSQL2
@@ -21291,6 +21324,22 @@ PSQL2
         echo "error" >> "$dbd/replication_slots.csv"
     elif [ "$(wc -l < "$dbd/replication_slots.csv")" -le 1 ]; then
         echo "null" >> "$dbd/replication_slots.csv"
+    fi
+    # ---- walreceiver single-point (standby only): pg_stat_get_wal_receiver()
+    # is the standby-side counterpart of pg_stat_replication (openGauss has no
+    # pg_stat_wal_receiver view; this is the underlying C function, 15 cols).
+    # Normalized the same way as replication.csv (0 rows -> null, error -> error).
+    if [ "$is_standby" = "1" ]; then
+        PGCONNECT_TIMEOUT=$_ct PGOPTIONS="$_st" psql -d postgres 2>&1 <<PSQL4 | grep -v '^$' >&2 || true
+\copy (SELECT * FROM pg_stat_get_wal_receiver()) TO '$dbd/walreceiver.csv' WITH CSV HEADER
+PSQL4
+        if [ ! -s "$dbd/walreceiver.csv" ]; then
+            echo "  [WARN] db/walreceiver.csv missing/empty (function unavailable or DB error)" >&2
+            echo "receiver_pid,local_role,peer_role,peer_state,state,sender_sent_location,sender_write_location,sender_flush_location,sender_replay_location,receiver_received_location,receiver_write_location,receiver_flush_location,receiver_replay_location,sync_percent,channel" > "$dbd/walreceiver.csv"
+            echo "error" >> "$dbd/walreceiver.csv"
+        elif [ "$(wc -l < "$dbd/walreceiver.csv")" -le 1 ]; then
+            echo "null" >> "$dbd/walreceiver.csv"
+        fi
     fi
     # ---- object stats across all databases (cumulative counters; renderer computes end-begin).
     # Per-db psql carries the SAME connect/statement timeouts as the rest: a hung
@@ -21328,8 +21377,9 @@ _awr_write_meta() {
     # postmaster start time: stable per DB uptime, changes on restart. Used by
     # awrrpt to refuse a diff that spans a restart (cumulative counters reset).
     m_start=$(PGCONNECT_TIMEOUT=$_ct PGOPTIONS="$_st" psql -d postgres -tAq -c "select pg_postmaster_start_time();" 2>/dev/null | tr -d '"\r\n')
-    # db role: primary vs physical standby (awr supports snapshotting a standby;
-    # recovery-mode flag is the only reliable local discriminator)
+    # db role: the sampler function detects this earlier for its own gating
+    # (local vars do not cross the function boundary), so this is a second,
+    # equally cheap query -- keeps _awr_write_meta self-contained.
     m_role=$(PGCONNECT_TIMEOUT=$_ct PGOPTIONS="$_st" psql -d postgres -tAq -c "select case when pg_is_in_recovery() then 'physical standby' else 'primary' end;" 2>/dev/null | head -1 | tr -d '"\r\n')
     [ -z "$m_host" ]  && m_host="?"
     [ -z "$m_dbver" ] && m_dbver="unavailable"
@@ -21881,6 +21931,102 @@ def slots_subtable_html(slots):
                      % (esc(ts), esc(f[0]), esc(f[2]), esc(f[1]), esc(f[3]), esc(f[4]),
                         esc(f[7]), esc(f[5]), esc(f[6]), esc(f[8]), esc(f[9])))
     parts.append('</table>')
+    return "".join(parts)
+
+# ---- Walreceiver sampler (awrrpt only, standby role; written by
+# _awr_repl_sample in bash when pg_is_in_recovery()) ----
+# walrcv_<YYYYMMDD>.log row grammar:
+#   data : ts,receiver_pid,local_role,peer_role,peer_state,state,
+#          sender_sent_location,sender_write_location,sender_flush_location,
+#          sender_replay_location,receiver_received_location,
+#          receiver_write_location,receiver_flush_location,
+#          receiver_replay_location,sync_percent,channel     (15 fields)
+#   null : ts,null     (no walreceiver: primary role this minute)
+#   error: ts,error    (psql failed; sampler keeps running, cron stays quiet)
+
+def load_walrcv_samples(repl_dir, begin_ts, end_ts):
+    """Read walrcv_<YYYYMMDD>.log samples with ts in [begin_ts, end_ts] (inclusive).
+    Same pre-filter + row-filter discipline as load_repl_samples(), but a data
+    row carries 15 walreceiver fields (ts + 15 fields = 15 commas)."""
+    out = {"rows": [], "n_data": 0, "n_null": 0, "n_error": 0, "files": []}
+    if not repl_dir or not os.path.isdir(repl_dir):
+        return out
+    bd = str(begin_ts or "")[:10].replace("-", "")
+    ed = str(end_ts or "")[:10].replace("-", "")
+    for f in sorted(glob.glob(os.path.join(repl_dir, "walrcv_*.log"))):
+        m = re.search(r"walrcv_(\d{8})\.log$", f)
+        if m:
+            fd = m.group(1)
+            if bd and fd < bd: continue
+            if ed and fd > ed: continue
+        try:
+            lines = open(f).read().splitlines()
+        except Exception:
+            continue
+        out["files"].append(os.path.basename(f))
+        for ln in lines:
+            ln = ln.strip()
+            if not ln: continue
+            ts, rest = (ln.split(",", 1) + [""])[:2]
+            if begin_ts and ts < str(begin_ts): continue
+            if end_ts and ts > str(end_ts): continue
+            if rest == "null":
+                out["rows"].append((ts, "null", [])); out["n_null"] += 1
+            elif rest == "error":
+                out["rows"].append((ts, "error", [])); out["n_error"] += 1
+            elif ln.count(",") == 15:
+                # strict 16-field data row; a row with any other comma count
+                # (e.g. a field containing a comma) is silently dropped.
+                out["rows"].append((ts, "data", ln.split(",")[1:])); out["n_data"] += 1
+    return out
+
+def walreceiver_subtable_html(wr):
+    """Wal Receiver sub-table body html (standby role only). Mirrors the primary
+    table's pipeline-lag view from the receiving end: the pipeline runs
+    sender_sent -> received -> write -> flush -> replay, so
+    Net = sender_sent-received, Fsync = received-flush, Apply = flush-replay,
+    Total = sender_sent-replay. sync_percent/channel come from the view."""
+    parts = []
+    if not wr["files"]:
+        return '<div class="note">no walreceiver samples in this period</div>'
+    rows = sorted(wr["rows"], key=lambda r: r[0])
+    if wr["n_data"] == 0:
+        return ('<div class="note">no walreceiver at any sample in this period '
+                '(%d samples: %d null, %d error)</div>'
+                % (len(rows), wr["n_null"], wr["n_error"]))
+    parts.append('<table class="t"><tr><th>Sample Time</th><th>State</th><th>Peer</th>'
+                 '<th>Sent LSN</th><th>Received LSN</th><th>Flush LSN</th><th>Replay LSN</th>'
+                 '<th>Net lag</th><th>Fsync lag</th><th>Apply lag</th>'
+                 '<th>Total lag</th><th>Sync%</th><th>Channel</th></tr>')
+    for ts, kind, f in rows:
+        if kind != "data":
+            msg = "no walreceiver (primary role or disconnected)" if kind == "null" else "sample error (query failed)"
+            parts.append('<tr><td>%s</td><td colspan="12" class="muted">%s</td></tr>'
+                         % (esc(ts), msg))
+            continue
+        # f: 0 pid, 1 local_role, 2 peer_role, 3 peer_state, 4 state, 5 sent,
+        #    6 sender_write, 7 sender_flush, 8 sender_replay, 9 received,
+        #    10 receiver_write, 11 receiver_flush, 12 receiver_replay,
+        #    13 sync_percent, 14 channel
+        sent, received, flush, replay = f[5], f[9], f[11], f[12]
+        L = [_lsn64(x) for x in (sent, received, flush, replay)]
+        def _seg(i, j):   # bytes between pipeline stages; n/a if either LSN unparseable
+            a, b = L[i], L[j]
+            return fmt_bytes(a - b) if (a is not None and b is not None and a >= b) else "n/a"
+        parts.append('<tr><td>%s</td><td>%s</td><td>%s</td>'
+                     '<td>%s</td><td>%s</td><td>%s</td><td>%s</td>'
+                     '<td class="n">%s</td><td class="n">%s</td>'
+                     '<td class="n">%s</td><td class="n">%s</td>'
+                     '<td class="n">%s</td><td>%s</td></tr>'
+                     % (esc(ts), esc(f[4]), esc("%s/%s" % (f[2], f[3])),
+                        esc(sent), esc(received), esc(flush), esc(replay),
+                        _seg(0, 1), _seg(1, 2), _seg(2, 3), _seg(0, 3),
+                        esc(f[13]), esc(f[14])))
+    parts.append('</table>')
+    parts.append('<div class="note">standby-side view (pg_stat_get_wal_receiver); '
+                 'lag = LSN byte distance: Net = sender_sent&minus;received, '
+                 'Fsync = received&minus;flush, Apply = flush&minus;replay, '
+                 'Total = sender_sent&minus;replay.</div>')
     return "".join(parts)
 
 # ---- OS per-minute sampler (awrrpt only; written by _awr_repl_sample in bash) ----
@@ -24473,14 +24619,26 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     parts.append('</table>')
 
     # ================= Replication (awrrpt: per-minute sampler logs) =================
+    # role-aware: a standby snap shows the walreceiver side (the walsender views
+    # are empty on a standby); a window spanning a role change shows both sides.
     if repl_dir is not None:
+        _role = m.get("db_role") or "?"
+        _stby = "physical standby" in _role
+        _mixed = "->" in _role
         sec("Replication")
-        sub("Replication Stat")
-        parts.append(replication_section_html(
-            load_repl_samples(repl_dir, m.get("begin_ts", ""), m.get("end_ts", ""))))
-        sub("Replication Slots")
-        parts.append(slots_subtable_html(
-            load_slot_samples(repl_dir, m.get("begin_ts", ""), m.get("end_ts", ""))))
+        if _stby:
+            sub("Wal Receiver")
+            parts.append(walreceiver_subtable_html(
+                load_walrcv_samples(repl_dir, m.get("begin_ts", ""), m.get("end_ts", ""))))
+            if _mixed:
+                note("window spans a role change (db_role: %s); primary-side samples below" % esc(_role))
+        if (not _stby) or _mixed:
+            sub("Replication Stat")
+            parts.append(replication_section_html(
+                load_repl_samples(repl_dir, m.get("begin_ts", ""), m.get("end_ts", ""))))
+            sub("Replication Slots")
+            parts.append(slots_subtable_html(
+                load_slot_samples(repl_dir, m.get("begin_ts", ""), m.get("end_ts", ""))))
 
     # ================= Top 10 Foreground Events =================
     sec("Top 10 Wait Events by Total Wait Time")
@@ -24664,6 +24822,9 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             if repl_dir is not None else {"cnt": {}, "event": {}, "sql": {}, "waitchain": {}})
     if _ash["cnt"] or _ash["event"] or _ash["sql"] or _ash["waitchain"]:
         sec("Active Session History")
+        if "physical standby" in (m.get("db_role") or ""):
+            note("standby snap: sourced from local_active_session only "
+                 "(gs_asp holds the primary's physically-replicated history)")
         def _ash_dt(src, bk):
             from datetime import datetime, timedelta
             tag = "[gs_asp]" if src == "g" else "[local_active_session]"
@@ -25671,14 +25832,24 @@ VB_BL_COMPARE_PY
     return $rc
 }
 
-# _awr_repl_sample  -- ONE pg_stat_replication sample appended to
-# <root>/repl_<YYYYMMDD>.log, plus ONE pg_replication_slots sample appended
-# to <root>/slot_<YYYYMMDD>.log, plus ONE OS counters sample appended to
-# <root>/os_<YYYYMMDD>.log (per-minute OS detail for awrrpt; the name keeps
+# _awr_repl_sample  -- role-aware per-minute DB replication sample + ONE OS
+# counters sample appended to <root>/os_<YYYYMMDD>.log. primary: ONE
+# pg_stat_replication sample -> repl_<YYYYMMDD>.log plus ONE pg_replication_slots
+# sample -> slot_<YYYYMMDD>.log. standby: the walsender views are always empty
+# there, so instead ONE pg_stat_get_wal_receiver() sample ->
+# walrcv_<YYYYMMDD>.log (15 cols). OS part is role-independent (the name keeps
 # "_repl" because deployed crontabs call `awr _repl-sample` -- do not rename).
 # Row grammar (repl/slot logs):
 #   data : ts,<view columns as selected below>
 #   null : ts,null     (view = 0 rows: no standby / no slot)
+#   error: ts,error    (psql failed; sampler keeps running, cron stays quiet)
+# walrcv_<YYYYMMDD>.log row grammar (standby role only):
+#   data : ts,receiver_pid,local_role,peer_role,peer_state,state,
+#          sender_sent_location,sender_write_location,sender_flush_location,
+#          sender_replay_location,receiver_received_location,
+#          receiver_write_location,receiver_flush_location,
+#          receiver_replay_location,sync_percent,channel   (15 fields)
+#   null : ts,null     (no walreceiver: standalone primary or post-promote)
 #   error: ts,error    (psql failed; sampler keeps running, cron stays quiet)
 # The slot query is independent: its failure never disturbs the stat rows
 # (and vice versa -- each log gets its own data/error/null row per minute).
@@ -25708,7 +25879,7 @@ _awr_repl_sample() {
     local root; root=$(_awr_root)
     umask 077   # per-minute logs carry standby addrs/LSNs: 0600 like snapshots
     mkdir -p "$root" 2>/dev/null || return 0
-    local f ts out sf of og od8 today
+    local f ts out sf of og od8 today wrf
     f="$root/repl_$(date +%Y%m%d).log"
     sf="$root/slot_$(date +%Y%m%d).log"
     # Non-blocking mutual exclusion: if the previous run is still alive (DB
@@ -25719,6 +25890,26 @@ _awr_repl_sample() {
     exec 9>"$root/repl.lock"
     flock -n 9 || return 0
     ts=$(date '+%F %T')
+    # ---- role-aware source, re-checked EVERY minute so a switchover flips the
+    # source mid-day without operator action. primary: walsender side
+    # (pg_stat_replication + pg_replication_slots, unchanged). standby: the
+    # walsender views are always empty there -- sample the walreceiver side
+    # instead (pg_stat_get_wal_receiver(), the openGauss counterpart of PG's
+    # pg_stat_wal_receiver view) into its own walrcv_<YYYYMMDD>.log. A failed
+    # role probe falls through to the primary branch (which writes its own
+    # error rows). The OS sample below runs for BOTH roles either way.
+    wrf="$root/walrcv_$(date +%Y%m%d).log"
+    if PGCONNECT_TIMEOUT=15 psql -d postgres -tAc "select pg_is_in_recovery()" 2>/dev/null | grep -qx 't'; then
+        out=$(PGCONNECT_TIMEOUT=15 PGOPTIONS='-c statement_timeout=15000' \
+              psql -d postgres -tAF',' -c "select receiver_pid,local_role,peer_role,peer_state,state,sender_sent_location,sender_write_location,sender_flush_location,sender_replay_location,receiver_received_location,receiver_write_location,receiver_flush_location,receiver_replay_location,sync_percent,channel from pg_stat_get_wal_receiver()" 2>/dev/null)
+        if [ "$?" -ne 0 ]; then
+            printf '%s,error\n' "$ts" >> "$wrf"
+        elif [ -z "$out" ]; then
+            printf '%s,null\n' "$ts" >> "$wrf"
+        else
+            printf '%s\n' "$out" | sed "s|^|$ts,|" >> "$wrf"
+        fi
+    else
     # Bound the attempt: connect fails fast (15s) and the query itself is
     # statement-timeout guarded, so one bad minute cannot stretch into a
     # multi-minute hang that blocks every later sample behind the lock.
@@ -25741,6 +25932,7 @@ _awr_repl_sample() {
     else
         printf '%s\n' "$out" | sed "s|^|$ts,|" >> "$sf"
     fi
+    fi   # end role-aware DB sample
     # ---- OS counters sample: same minute, same lock, own log; /proc reads
     # only (no psql) so it cannot hang; a failed read just writes fewer rows.
     # One awk over seven /proc files; dsk/net rows carry the raw line (fields
@@ -26362,10 +26554,10 @@ PY
     fi
     # repl_/slot_/os_<YYYYMMDD>.log[.gz]: delete only when the WHOLE day is before until
     local rcount=0 rf rd d_ep
-    for rf in "$root"/repl_*.log "$root"/slot_*.log "$root"/os_*.log "$root"/os_*.log.gz; do
+    for rf in "$root"/repl_*.log "$root"/slot_*.log "$root"/walrcv_*.log "$root"/os_*.log "$root"/os_*.log.gz; do
         [ -f "$rf" ] || continue
         rd=$(basename "$rf"); rd="${rd%.gz}"; rd="${rd%.log}"
-        rd="${rd#repl_}"; rd="${rd#slot_}"; rd="${rd#os_}"
+        rd="${rd#repl_}"; rd="${rd#slot_}"; rd="${rd#walrcv_}"; rd="${rd#os_}"
         case "$rd" in
             [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9])
                 d_ep=$(date -d "${rd:0:4}-${rd:4:2}-${rd:6:2}" +%s 2>/dev/null)

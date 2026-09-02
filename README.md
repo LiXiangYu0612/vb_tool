@@ -43,7 +43,7 @@ vb_tool list
 |------|------|
 | `as [pid]` | 显示活跃会话信息 |
 | `asp <type> -b <begin> -e <end>` | 活跃会话概要分析 (cnt/event/waitchain/sql) |
-| `awr create` | 手动创建 AWR 单点快照 |
+| `awr create` | 手动创建 AWR 单点快照（主库/备库均可，备库自动切换备库侧数据源） |
 | `awr enable` / `awr disable` | 启停 cron 定时采样（间隔由 `awr config interval` 控制，默认 60 分钟） |
 | `awr awrrpt begin <id> end <id>` | 生成两快照区间 AWR 报告 (HTML) |
 | `awr awrdiff begin <a> end <b> begin <c> end <d>` | 两区间对比报告 |
@@ -74,8 +74,10 @@ vb_tool list
     ├── retention            # 保留天数（默认 8，0=永久）
     ├── interval             # 采样间隔分钟（默认 60）
     ├── snap_<id>/           # 每快照: meta.json + os/ + db/*.csv
-    ├── repl_<YYYYMMDD>.log  # pg_stat_replication 每分钟采样
-    └── slot_<YYYYMMDD>.log  # pg_replication_slots 每分钟采样
+    ├── repl_<YYYYMMDD>.log  # pg_stat_replication 每分钟采样（主库侧）
+    ├── slot_<YYYYMMDD>.log  # pg_replication_slots 每分钟采样（主库侧）
+    ├── walrcv_<YYYYMMDD>.log # pg_stat_get_wal_receiver 每分钟采样（备库侧）
+    └── os_<YYYYMMDD>.log    # OS 计数器每分钟采样（/proc，主备库都采）
 ```
 
 > v1.4.18 起按端口分目录存储，多实例可并行采样互不干扰；旧版扁平布局在首次运行时自动迁移至 `awrs/<port>/`。
@@ -90,6 +92,7 @@ vb_tool list
 
 | 版本 | 日期 | 要点 |
 |------|------|------|
+| v2.0.10 | 2026-09-02 | awr 备库（physical standby）支持：采集端识别 `pg_is_in_recovery()`，备库快照的 ASH 冲刷只读 local_active_session（gs_asp 是普通堆表、行由主库 WAL 物理复制而来，混入会把主库负载带进备库报告；waitchain 同口径 las-only）；备库快照新增 walreceiver.csv（`pg_stat_get_wal_receiver()` 15 列，openGauss 无 pg_stat_wal_receiver 视图故用底层函数）；每分钟采样器角色感知且每分钟重探——主库照旧采 pg_stat_replication/pg_replication_slots，备库改采 walreceiver 侧写 walrcv_\<YYYYMMDD\>.log，主备切换当日自动换向无需人工干预；awrrpt Replication 节角色感知：备库快照显示 Wal Receiver 子表（Sample Time/State/Peer/四级 LSN + Net/Fsync/Apply/Total lag + Sync% + Channel，lag=LSN 字节距离），窗口跨角色变迁（promote/切换）时两侧子表都显示；ASH 节备库快照标注 las-only 数据来源；retention / delete until 清理覆盖 walrcv_*.log。随版并入的 v2.0.9 就地修复：decode 混型分支（字符串 vs 数值）显式 `::text`（tabstat/sqlhc/as 命令在严格内核上报 `invalid input syntax for type numeric`，A 兼容模式不改变此选择）；sqlhc/sqltext 兼容新版日志参数 type 注解（`$1 = '100' type = bigint`）+ 日志编码自动探测（utf-8 优先→gb18030→latin-1 兜底，修中文参数乱码）；awr list 新增 DB_ROLE 末列 + DB 列固定宽对齐 |
 | v2.0.9 | 2026-08-31 | awrrpt 新增 Active Session History 节（输出对齐 vb_tool asp 命令）：每次快照把 [上个快照, 本快照] 的内核 ASP（gs_asp 优先 + local_active_session 兜底，按 5 分钟桶择源去重——204 实测活跃流会在两表间切换）冲刷为 asp 同构三表 CSV：Count（max_sess/avg_sess/max_active_sess/wait_lock/lwlock/io/wal_sync/trans_sync）、Event（event_type/event/max_cnt/avg_cnt）、Top SQL（每桶 Top5，归一化 50 字符）、Waitchain（递归阻塞链：root_block_sessid/max_b_cnt/h_sql/w_sql，asp waitchain 同构移植；根阻塞含 idle in transaction，标 iit）；Event/Top SQL/Waitchain 默认折叠（Count 展开），event 显式排除 none/wait cmd，节位于 Object Statistics 之后；报告端 date_time 带 [gs_asp]/[local_active_session] 源标签和 5 分钟区间，汇总窗口内全部冲刷。gs_asp 默认只留 2 天，冲刷进 snap 后永久可查。PG 实例或 enable_asp=off 整节隐藏。随 v2.0.9 一并交付的 v2.0.8 就地增强（2026-08-30/31）：TCP RTT 可观测（每分钟 ssrtt 聚合行 + sspeer 问题连接行 + os/net_rtt 快照；TCP Statistics 表并入 RTT 列；TCP RTT / Connections 节含 Mathis 单流吞吐上限与 per-peer Top10 窗口峰值表）；Retrans% 阈值放宽为 >3% 粗体/>5% 红色；报告标题统一去括号、小标题改 13px 粗体黑字对齐 Oracle 风格 |
 | v2.0.8 | 2026-08-29 | 网络阻塞/丢包可观测性 + 报告阈值高亮体系：TCP 逐分钟表新增 ListenDrops/ListenOverflows/Timeouts/SynRetrans 4 列（采样器加读 /proc/net/netstat 新行类型 tcpext，仅新快照起有数据），Retrans% 阈值标色（>0.1% 粗体、>1% 红色粗体，逐分钟+System Activity 汇总）；Network Protocol Errors 补 6 项 TcpExt（OFOQueue/OFODrop/WantZeroWindowAdv/ToZeroWindowAdv/SACKReneging/MemoryPressures，零窗口/乱序队列/SACK/协议栈内存压力，老快照重出报告即生效）；新增 Softnet 节（/proc/net/softnet_stat 跨 CPU 求和，dropped/time_squeeze，awrrpt 整窗+awrdiff P1/P2/Δ）；Network 表新增 RX/TX Util % 列（ethtool Speed 解析，virtio 等无速率环境显示 -）；报告头 AWR 行改为 DB Role（采快照时 pg_is_in_recovery 落 meta.json，primary/physical standby，窗口内角色变迁显示 a -> b，备库场景可辨）；阈值高亮体系：CPU busy >50% 粗/>80% 红、磁盘 r/w_await >10ms 粗/>20ms 红、pswpin/pswpout >10/s 粗/>100/s 红、pgmajfault >5/s 粗/>50/s 红（正常工作量代理指标 pgpgin/pgpgout/pgfault 特意不标）；修复 _awr_collect 漏采 /proc/vmstat+/proc/loadavg（整窗 Memory/Paging 表自始全 0）；Cache Hit Ratio 脚注及列头星号清理 |
 | v2.0.7 | 2026-08-28 | awr OS 每分钟明细+报告折叠：4 个 OS 节（CPU/Disk/Network/Memory-Paging）整窗表下新增默认收起的 Per-minute detail 折叠块（cron 每分钟采样 /proc 写 os_*.log，速率=相邻样本差÷实际秒差，含 r/b、MemUsed/Avail、zone 水位 WM Free/Min/Low/High）；Wait Events/SQL Text/Database Parameters 三整节默认折叠（原生 <details> 无 JS，TOC 锚点保留；awrdiff 同步）；Memory 明细含内核 zone 水位列（/proc/zoneinfo 全 zone 求和，旧格式日志兼容）；System Activity 表头合一；retention 清理覆盖 os_*.log(.gz)；2026-08-28/29 就地并入：TCP 逐分钟表（Opens/s/Retrans/s/Retrans%/CurrEstab）+System Activity TCP 扩展+retention 默认 8 天等，见后续 v2.0.8 前提交 |
