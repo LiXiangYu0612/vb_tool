@@ -21344,7 +21344,7 @@ _awr_collect() {
     # dedupes the seam, same as asp). Flushing at every create keeps each
     # snap self-contained and bounds query cost to one interval. Neither
     # table available (PG / enable_asp off) -> \copy errors swallowed ->
-    # no ash_*.csv -> renderer hides section.
+    # no ash_*.csv -> renderer still shows the section with a no-data note.
     local ash_b ash_e _ash_prev="" _id _best=-1 _d
     ash_e=$(date '+%F %T')
     for _d in "${target%/*}"/snap_*; do
@@ -21392,9 +21392,9 @@ PSQL
     # into the standby's report.
     if [ "$is_standby" = "1" ]; then
         PGCONNECT_TIMEOUT=$_ct PGOPTIONS="$_st" psql -d postgres 2>&1 <<PSQL3 | grep -v '^$' >&2 || true
-\copy (WITH per_sec AS (SELECT sample_time::timestamp(0) AS sec, count(*) AS cnt, sum(CASE WHEN a.state = 'active' THEN 1 ELSE 0 END) AS active_cnt, sum(CASE WHEN b.type = 'LOCK_EVENT' THEN 1 ELSE 0 END) AS wlock, sum(CASE WHEN b.type = 'LWLOCK_EVENT' THEN 1 ELSE 0 END) AS wlw, sum(CASE WHEN b.type = 'IO_EVENT' THEN 1 ELSE 0 END) AS wio, sum(CASE WHEN a.cur_event = 'wait wal sync' THEN 1 ELSE 0 END) AS wwal, sum(CASE WHEN a.cur_event = 'wait transaction sync' THEN 1 ELSE 0 END) AS wtrans FROM dbe_perf.local_active_session a LEFT JOIN dbe_perf.wait_events b ON a.cur_event = b.event WHERE sample_time > '$ash_b' AND sample_time <= '$ash_e' GROUP BY sample_time::timestamp(0)) SELECT 'l' AS src, DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min' AS bucket, max(cnt) AS max_sess, round(avg(cnt)) AS avg_sess, max(active_cnt) AS max_active_sess, max(wlock) AS wait_lock, max(wlw) AS wait_lwlock, max(wio) AS wait_io, max(wwal) AS wait_wal_sync, max(wtrans) AS wait_trans_sync FROM per_sec GROUP BY DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min' ORDER BY bucket, src) TO '$dbd/ash_cnt.csv') TO '$dbd/ash_cnt.csv' WITH CSV HEADER
-\copy (WITH per_sec AS (SELECT sample_time::timestamp(0) AS sec, a.cur_event AS event, b.type AS event_type, count(*) AS cnt FROM dbe_perf.local_active_session a LEFT JOIN dbe_perf.wait_events b ON a.cur_event = b.event WHERE sample_time > '$ash_b' AND sample_time <= '$ash_e' AND a.state = 'active' AND a.cur_event IS NOT NULL AND a.cur_event NOT IN ('none', 'wait cmd') GROUP BY sample_time::timestamp(0), a.cur_event, b.type) SELECT 'l' AS src, DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min' AS bucket, event_type, event, max(cnt) AS max_cnt, round(avg(cnt)) AS avg_cnt FROM per_sec GROUP BY DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min', event_type, event ORDER BY bucket, max_cnt DESC LIMIT 800) TO '$dbd/ash_event.csv') TO '$dbd/ash_event.csv' WITH CSV HEADER
-\copy (WITH per_sec AS (SELECT sample_time::timestamp(0) AS sec, unique_query_id, substr(REGEXP_REPLACE(REGEXP_REPLACE(unique_query, '(\r|\n)+', ' '), ' {2,}', ' '), 1, 50) AS uq, count(*) AS cnt FROM dbe_perf.local_active_session WHERE sample_time > '$ash_b' AND sample_time <= '$ash_e' AND state = 'active' AND unique_query_id > 0 GROUP BY sample_time::timestamp(0), unique_query_id, substr(REGEXP_REPLACE(REGEXP_REPLACE(unique_query, '(\r|\n)+', ' '), ' {2,}', ' '), 1, 50)) SELECT * FROM (SELECT 'l' AS src, DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min' AS bucket, unique_query_id, uq AS unique_query, max(cnt) AS max_cnt, round(avg(cnt)) AS avg_cnt, ROW_NUMBER() OVER (PARTITION BY DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min' ORDER BY max(cnt) DESC) AS rn FROM per_sec GROUP BY DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min', unique_query_id, uq) t2 WHERE rn <= 5 ORDER BY bucket, max_cnt DESC) TO '$dbd/ash_sql.csv') TO '$dbd/ash_sql.csv' WITH CSV HEADER
+\copy (WITH per_sec AS (SELECT sample_time::timestamp(0) AS sec, count(*) AS cnt, sum(CASE WHEN a.state = 'active' THEN 1 ELSE 0 END) AS active_cnt, sum(CASE WHEN b.type = 'LOCK_EVENT' THEN 1 ELSE 0 END) AS wlock, sum(CASE WHEN b.type = 'LWLOCK_EVENT' THEN 1 ELSE 0 END) AS wlw, sum(CASE WHEN b.type = 'IO_EVENT' THEN 1 ELSE 0 END) AS wio, sum(CASE WHEN a.cur_event = 'wait wal sync' THEN 1 ELSE 0 END) AS wwal, sum(CASE WHEN a.cur_event = 'wait transaction sync' THEN 1 ELSE 0 END) AS wtrans FROM dbe_perf.local_active_session a LEFT JOIN dbe_perf.wait_events b ON a.cur_event = b.event WHERE sample_time > '$ash_b' AND sample_time <= '$ash_e' GROUP BY sample_time::timestamp(0)) SELECT 'l' AS src, DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min' AS bucket, max(cnt) AS max_sess, round(avg(cnt)) AS avg_sess, max(active_cnt) AS max_active_sess, max(wlock) AS wait_lock, max(wlw) AS wait_lwlock, max(wio) AS wait_io, max(wwal) AS wait_wal_sync, max(wtrans) AS wait_trans_sync FROM per_sec GROUP BY DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min' ORDER BY bucket, src) TO '$dbd/ash_cnt.csv' WITH CSV HEADER
+\copy (WITH per_sec AS (SELECT sample_time::timestamp(0) AS sec, a.cur_event AS event, b.type AS event_type, count(*) AS cnt FROM dbe_perf.local_active_session a LEFT JOIN dbe_perf.wait_events b ON a.cur_event = b.event WHERE sample_time > '$ash_b' AND sample_time <= '$ash_e' AND a.state = 'active' AND a.cur_event IS NOT NULL AND a.cur_event NOT IN ('none', 'wait cmd') GROUP BY sample_time::timestamp(0), a.cur_event, b.type) SELECT 'l' AS src, DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min' AS bucket, event_type, event, max(cnt) AS max_cnt, round(avg(cnt)) AS avg_cnt FROM per_sec GROUP BY DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min', event_type, event ORDER BY bucket, max_cnt DESC LIMIT 800) TO '$dbd/ash_event.csv' WITH CSV HEADER
+\copy (WITH per_sec AS (SELECT sample_time::timestamp(0) AS sec, unique_query_id, substr(REGEXP_REPLACE(REGEXP_REPLACE(unique_query, '(\r|\n)+', ' '), ' {2,}', ' '), 1, 50) AS uq, count(*) AS cnt FROM dbe_perf.local_active_session WHERE sample_time > '$ash_b' AND sample_time <= '$ash_e' AND state = 'active' AND unique_query_id > 0 GROUP BY sample_time::timestamp(0), unique_query_id, substr(REGEXP_REPLACE(REGEXP_REPLACE(unique_query, '(\r|\n)+', ' '), ' {2,}', ' '), 1, 50)) SELECT * FROM (SELECT 'l' AS src, DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min' AS bucket, unique_query_id, uq AS unique_query, max(cnt) AS max_cnt, round(avg(cnt)) AS avg_cnt, ROW_NUMBER() OVER (PARTITION BY DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min' ORDER BY max(cnt) DESC) AS rn FROM per_sec GROUP BY DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min', unique_query_id, uq) t2 WHERE rn <= 5 ORDER BY bucket, max_cnt DESC) TO '$dbd/ash_sql.csv' WITH CSV HEADER
 PSQL3
     else
         PGCONNECT_TIMEOUT=$_ct PGOPTIONS="$_st" psql -d postgres 2>&1 <<PSQL | grep -v '^$' >&2 || true
@@ -24975,14 +24975,16 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     # every create flushes [prev snap, now]; the window unions every flush
     # in (begin, end]. Output mirrors the `vb_tool asp` command: 5-minute
     # buckets of per-second counts (max/avg), source tag per bucket, top-5
-    # SQL per bucket. Hidden when no ash csv (PG / enable_asp off / idle).
+    # SQL per bucket. Section renders UNCONDITIONALLY (user 2026-09-02):
+    # an absent section reads as "feature missing", an empty one reads as
+    # "no samples in this window" (idle standby / enable_asp off / PG).
     _ash = (load_ash_flushes(repl_dir, m.get("begin_ts", ""), m.get("end_ts", ""))
             if repl_dir is not None else {"cnt": {}, "event": {}, "sql": {}, "waitchain": {}})
+    sec("Active Session History")
+    if "physical standby" in (m.get("db_role") or ""):
+        note("standby snap: sourced from local_active_session only "
+             "(gs_asp holds the primary's physically-replicated history)")
     if _ash["cnt"] or _ash["event"] or _ash["sql"] or _ash["waitchain"]:
-        sec("Active Session History")
-        if "physical standby" in (m.get("db_role") or ""):
-            note("standby snap: sourced from local_active_session only "
-                 "(gs_asp holds the primary's physically-replicated history)")
         def _ash_dt(src, bk):
             from datetime import datetime, timedelta
             tag = "[gs_asp]" if src == "g" else "[local_active_session]"
@@ -25043,6 +25045,8 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             _h.append('<tr><td colspan="5" class="note">no data</td></tr>')
         _h.append('</table>')
         parts.append(_fold("Active Session History Waitchain", "".join(_h)))
+    else:
+        parts.append('<div class="note">no data</div>')
 
     # ================= Wait Events =================
     sec("Wait Events", fold=True)
