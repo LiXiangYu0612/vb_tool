@@ -10258,6 +10258,20 @@ run_collect_log_pglog() {
     fi
 }
 
+# run_collect_log_vtop <outfile> -- capture 3 vtop frames 5s apart into dbinfo/vtop.txt.
+# vtop is a live 5s-refresh monitor; each --once frame is its own two-sample delta
+# (~6s). Plain text: vtop only emits colors when stdout is a tty.
+run_collect_log_vtop() {
+    local out="$1" _vi
+    : > "$out"
+    for _vi in 1 2 3; do
+        echo "===== vtop sample ${_vi}/3 : $(date '+%Y-%m-%d %H:%M:%S') =====" >> "$out"
+        run_vtop --once >> "$out" 2>&1
+        [ "$_vi" -lt 3 ] && sleep 5
+    done
+    return 0
+}
+
 run_collect_log_nodes_info() {
     local node=$1
     [ -z "$node" ] && node=$local_hostname
@@ -10322,6 +10336,11 @@ run_collect_log_nodes_info() {
                 run_collect_log_mem standby > "$output_dir/dbinfo/mem_${node}.txt"
                 run_collect_log_asp standby > "$output_dir/dbinfo/asp_${node}.txt"
             fi
+
+            # e. vtop frames: 3 samples 5s apart -> dbinfo/vtop.txt (live-state
+            # snapshot; captured regardless of the -b/-e window, so history
+            # collections include it; primary and standby both)
+            safe_exec "Collect vtop (3 samples)" "run_collect_log_vtop '$output_dir/dbinfo/vtop.txt'" "120s"
         else
             echo "[WARN ] Database offline or connection timeout - skipping SQL-based metrics."
         fi
@@ -10368,6 +10387,11 @@ EOF
 )
     # Define functions for remote shell
     local func_defs="$(declare -f run_collect_log_osinfo run_nets run_lsds run_as run_asp_cnt_query run_asp_event_query run_asp_waitchain_query run_asp_sql_query run_mem run_xloghc run_dead_tups run_wdr_event run_wdr_summary run_wdr_topsql run_collect_log_asp run_collect_log_wdr run_collect_log_mem run_collect_log_dbinfo run_collect_log_dbfiles run_memhist safe_exec run_collect_log_deadtups run_collect_log_extension run_collect_log_version run_collect_log_stack run_collect_log_cmdn run_collect_log_param run_collect_log_xlog run_collect_log_pglog)"
+    # vtop frame capture: ship the whole vtop family (_vtop_* helpers auto-discovered)
+    # NOTE: $() strips the trailing newline of declare -f output -> must join
+    # with an explicit newline, a space would put "} next_fn ()" on one line
+    func_defs="$func_defs
+$(declare -f run_collect_log_vtop run_vtop $(compgen -A function | grep '^_vtop_' | tr '\n' ' '))"
     local remote_cmd="${func_defs}; ${remote_cmd}"
 
     # Execution
@@ -10403,7 +10427,7 @@ safe_exec() {
     
     # Handle the 250KB function library issue using BASH_ENV
     local TMP_FUNC_FILE="/tmp/vb_funcs_$$.sh"
-    local REQUIRED_FUNCS=(run_collect_log_osinfo run_nets run_lsds run_as run_asp_cnt_query run_asp_event_query run_asp_waitchain_query run_asp_sql_query run_mem run_xloghc run_dead_tups run_wdr_event run_wdr_summary run_wdr_topsql run_collect_log_asp run_collect_log_wdr run_collect_log_mem run_collect_log_dbinfo run_collect_log_dbfiles run_memhist safe_exec run_collect_log_deadtups run_collect_log_extension run_collect_log_version run_collect_log_stack run_collect_log_cmdn run_collect_log_param run_collect_log_xlog run_collect_log_pglog)
+    local REQUIRED_FUNCS=(run_collect_log_osinfo run_nets run_lsds run_as run_asp_cnt_query run_asp_event_query run_asp_waitchain_query run_asp_sql_query run_mem run_xloghc run_dead_tups run_wdr_event run_wdr_summary run_wdr_topsql run_collect_log_asp run_collect_log_wdr run_collect_log_mem run_collect_log_dbinfo run_collect_log_dbfiles run_memhist safe_exec run_collect_log_deadtups run_collect_log_extension run_collect_log_version run_collect_log_stack run_collect_log_cmdn run_collect_log_param run_collect_log_xlog run_collect_log_pglog run_collect_log_vtop run_vtop $(compgen -A function | grep '^_vtop_'))
     [ ! -f "$TMP_FUNC_FILE" ] && declare -f "${REQUIRED_FUNCS[@]}" > "$TMP_FUNC_FILE"
 	
     # Execute and capture both stdout and stderr
