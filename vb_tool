@@ -24981,9 +24981,6 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     _ash = (load_ash_flushes(repl_dir, m.get("begin_ts", ""), m.get("end_ts", ""))
             if repl_dir is not None else {"cnt": {}, "event": {}, "sql": {}, "waitchain": {}})
     sec("Active Session History")
-    if "physical standby" in (m.get("db_role") or ""):
-        note("standby snap: sourced from local_active_session only "
-             "(gs_asp holds the primary's physically-replicated history)")
     if _ash["cnt"] or _ash["event"] or _ash["sql"] or _ash["waitchain"]:
         def _ash_dt(src, bk):
             from datetime import datetime, timedelta
