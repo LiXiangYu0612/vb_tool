@@ -123,7 +123,7 @@ show_list() {
 }
 
 as_help() {
-    echo "Usage: vb_tool as [vb pid]"
+    echo "Usage: vb_tool as <vastbase_pid>"
     echo "Description: Display active session info for the given vb pid."
     echo "  -P <port>: database port (default: current \$PGPORT)"
     echo ""
@@ -171,7 +171,7 @@ asp_help() {
 }
 
 planbyline_help() {
-    echo "Usage: vb_tool planbyline [file]"
+    echo "Usage: vb_tool planbyline <file>"
     echo "Description: Analyze execution plan and output self-time ratio by line."
     echo ""
 }
@@ -449,14 +449,14 @@ memhist_help() {
 
 relxlog_help() {
     echo "Options for relxlog:"
-    echo "  Usage: vb_tool relxlog [START_WAL] [END_WAL]"
+    echo "  Usage: vb_tool relxlog <start_wal> <end_wal>"
     echo "  Description: analyze WAL records for relations"
     echo ""
 }
 
 xlogcom_help() {
     echo "Options for xlogcom:"
-    echo "  Usage: vb_tool xlogcom [START_WAL] [END_WAL]"
+    echo "  Usage: vb_tool xlogcom <start_wal> <end_wal>"
     echo "  Description: analyze WAL commits per second"
     echo ""
 }
@@ -518,7 +518,7 @@ sqltext_help() {
 
 st_help() {
     echo "Options for st:"
-    echo "  Usage: vb_tool st [relname]"
+    echo "  Usage: vb_tool st <relname>"
     echo "  Description: display dict table or view"
     echo "  -P <port>: database port (default: current \$PGPORT)"
     echo ""
