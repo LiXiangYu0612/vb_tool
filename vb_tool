@@ -10396,10 +10396,17 @@ $(declare -f run_collect_log_vtop run_vtop $(compgen -A function | grep '^_vtop_
     local remote_cmd="${func_defs}; ${remote_cmd}"
 
     # Execution
+    # NOTE: remote_cmd (func_defs + script) is often >128KB, which breaks
+    # "ssh node <script>" (kernel MAX_ARG_STRLEN per-argument limit). Shipping
+    # it on stdin (bash -s) also breaks: any command inside that reads fd0
+    # (psql/heredoc edge cases) silently swallows the rest of the script --
+    # observed on a 3-node cluster stopping right after run_dead_tups.
+    # Robust: stream it into a remote temp FILE, run the file, clean up.
     if [ "$node" == "$local_hostname" ]; then
         status=$(eval "$remote_cmd")
     else
-        status=$(ssh -n "$node" "$remote_cmd")
+        status=$(printf '%s\n' "$remote_cmd" | ssh "$node" \
+            'cat > /tmp/vb_cl_$$.sh && bash /tmp/vb_cl_$$.sh; _rc=$?; rm -f /tmp/vb_cl_$$.sh; exit $_rc')
     fi
     
     # Retrieval
