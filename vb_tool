@@ -26653,7 +26653,7 @@ PY
     [ "$n" -gt 0 ] && oldest="$osid  ($ots)" && newest="$nsid  ($nts)"
     local purge="on (after every create / enable)"
     [ "$days" -eq 0 ] && purge="off (retention = 0, keep forever)"
-    local rdesc="${days} day(s)"
+    local rdesc="${days} days"
     [ "$days" -eq 0 ] && rdesc="0 (never purge)"
     # last-snap freshness (shown only while ENABLED): with interval N min a snap
     # lands every ~N min, so anything older than N + 10 min slack means periodic
@@ -26687,8 +26687,8 @@ PY
         echo "status        : DISABLED (no periodic snapshot / sampler crontab entries for port $port)"
     else
         echo "status        : ENABLED"
-        if [ -n "$snapent" ]; then echo "  snapshot:           $snapent"
-        else echo "  snapshot:           (entry missing -- re-run 'awr enable' to fix)"; fi
+        if [ -n "$snapent" ]; then echo "  snapshot           : $snapent"
+        else echo "  snapshot           : (entry missing -- re-run 'awr enable' to fix)"; fi
         if [ -n "$replent" ]; then echo "  replication sampler: $replent"
         else echo "  replication sampler: (entry missing -- re-run 'awr enable' to fix)"; fi
         [ -n "$ageline" ] && echo "$ageline"
@@ -26859,7 +26859,7 @@ _awr_config() {
         r=$(_awr_retention_read); i=$(_awr_interval_read)
         echo "awr config:"
         if [ "$r" -eq 0 ]; then echo "  retention : 0 (never purge)"
-        else echo "  retention : ${r} day(s)"; fi
+        else echo "  retention : ${r} days"; fi
         echo "  interval  : ${i} min"
         echo "usage: vb_tool awr config retention <days>   (0 = never purge, max 3650)"
         echo "       vb_tool awr config interval <min>     (1-60)"
@@ -26880,7 +26880,7 @@ _awr_config() {
                 echo "awr config: retention ${old} -> 0 (never purge)"
                 return 0
             fi
-            echo "awr config: retention ${old} -> ${val} day(s)"
+            echo "awr config: retention ${old} -> ${val} days"
             _awr_purge_expired
             return 0
             ;;
