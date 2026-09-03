@@ -24098,6 +24098,8 @@ body { font-family: Arial, Helvetica, Geneva, sans-serif; font-size: 13px; color
 .rhead table tr td { padding: 3px 8px; font-size: 12px; background: #fff; vertical-align: top; }
 .rhead tr.alt td { background: #FFFFCC; }
 .rhead td.c { text-align: center; }
+.rhead th.c { text-align: center; }
+.rhead th.n { text-align: right; }
 .sec { background: #fff; color: #336699; font-weight: bold; font-size: 24px; padding: 0; margin-top: 26px; border: none; }
 .sec h2 { display: inline; margin: 0; font-size: 24px; color: #336699; font-weight: bold; }
 .sec .totop { float: right; color: #663300; background: #fff; text-decoration: none; border: 1px solid #663300;
@@ -24239,9 +24241,9 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         '<tr><td>%s</td><td>%s</td><td>%s</td></tr></table>'
         '<table><tr><th>Release</th><th>vb_tool (snap / report)</th></tr>'
         '<tr><td>%s</td><td>%s / %s</td></tr></table>'
-        '<table><tr><th>Host Name</th><th>OS Version</th><th>Startup Time</th><th>Port</th></tr>'
+        '<table><tr><th>Host Name</th><th>OS Version</th><th>Startup Time</th><th class="n">Port</th></tr>'
         '<tr><td>%s</td><td>%s</td><td>%s</td><td class="n">%s</td></tr></table>'
-        '<table><tr><th class="nobg"></th><th>Snap Id</th><th>Snap Time</th></tr>'
+        '<table><tr><th class="nobg"></th><th class="n">Snap Id</th><th class="c">Snap Time</th></tr>'
         '<tr><td>Begin Snap:</td><td class="n">%s</td><td class="c">%s</td></tr>'
         '<tr class="alt"><td>End Snap:</td><td class="n">%s</td><td class="c">%s</td></tr>'
         '<tr><td>Elapsed:</td><td></td><td class="c">%s (s)</td></tr>'
@@ -25185,6 +25187,8 @@ body { font-family: Arial, Helvetica, Geneva, sans-serif; font-size: 13px; color
 .rhead table tr td { padding: 3px 8px; font-size: 12px; background: #fff; vertical-align: top; }
 .rhead tr.alt td { background: #FFFFCC; }
 .rhead td.c { text-align: center; }
+.rhead th.c { text-align: center; }
+.rhead th.n { text-align: right; }
 .sec { background: #fff; color: #336699; font-weight: bold; font-size: 24px; padding: 0; margin-top: 26px; border: none; }
 .sec h2 { display: inline; margin: 0; font-size: 24px; color: #336699; font-weight: bold; }
 .sec .totop { float: right; color: #663300; background: #fff; text-decoration: none; border: 1px solid #663300;
@@ -25317,8 +25321,8 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         '<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr></table>'
         '<table><tr><th>Release</th><th>vb_tool (snap / report)</th></tr>'
         '<tr><td>%s</td><td>%s / %s</td></tr></table>'
-        '<table><tr><th class="nobg"></th><th>Snaps</th><th>Window</th><th>Duration (s)</th></tr>'
-        '<tr><td>Period 1:</td><td class="n">%s &rarr; %s</td><td>%s &rarr; %s</td><td class="n">%s</td></tr>'
+        '<table><tr><th class="nobg"></th><th class="n">Snaps</th><th class="c">Window</th><th class="n">Duration (s)</th></tr>'
+        '<tr><td>Period 1:</td><td class="n">%s &rarr; %s</td><td class="c">%s &rarr; %s</td><td class="n">%s</td></tr>'
         '<tr class="alt"><td>Period 2:</td><td class="n">%s &rarr; %s</td><td>%s &rarr; %s</td><td class="n">%s</td></tr>'
         '<tr><td>DB Time (s):</td><td></td><td class="c">%s / %s</td><td class="n">&Delta; %s</td></tr>'
         '</table></div>' % (
