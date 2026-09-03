@@ -22019,6 +22019,7 @@ def replication_section_html(repl):
                  '<th>State</th><th>Sync</th><th>Sent LSN</th><th>Write LSN</th><th>Flush LSN</th>'
                  '<th>Replay LSN</th><th>Net lag</th><th>Fsync lag</th><th>Apply lag</th>'
                  '<th>Total lag</th></tr>')
+    zhidden = 0
     for ts, kind, f in rows:
         if kind != "data":
             msg = "no standby connected" if kind == "null" else "sample error (query failed)"
@@ -22030,6 +22031,10 @@ def replication_section_html(repl):
         def _seg(i, j):   # bytes between pipeline stages; n/a if either LSN unparseable
             a, b = L[i], L[j]
             return fmt_bytes(a - b) if (a is not None and b is not None and a >= b) else "n/a"
+        # healthy minute: sent==write==flush==replay => all four lags 0 => noise row, hidden
+        if all(L[i] is not None and L[i] == L[j] for (i, j) in ((0, 1), (1, 2), (2, 3))):
+            zhidden += 1
+            continue
         parts.append('<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td>'
                      '<td>%s</td><td>%s</td><td>%s</td><td>%s</td>'
                      '<td class="n">%s</td><td class="n">%s</td>'
@@ -22037,7 +22042,13 @@ def replication_section_html(repl):
                      % (esc(ts), esc(f[0]), esc(f[1]), esc(f[2]), esc(f[3]),
                         esc(sent), esc(write), esc(flush), esc(replay),
                         _seg(0, 1), _seg(1, 2), _seg(2, 3), _seg(0, 3)))
+    if zhidden == repl["n_data"] and repl["n_null"] == 0 and repl["n_error"] == 0:
+        return ('<div class="note">replication healthy the whole window: all %d samples had '
+                'zero lag (net / fsync / apply / total) -- healthy minutes not shown.</div>' % zhidden)
     parts.append('</table>')
+    if zhidden:
+        parts.append('<div class="note">%d minute(s) with all lags 0 hidden (healthy minutes).</div>'
+                     % zhidden)
     parts.append('<div class="note">lag = LSN byte distance: '
                  'Net = sent&minus;write, Fsync = write&minus;flush, '
                  'Apply = flush&minus;replay, Total = sent&minus;replay.</div>')
