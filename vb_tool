@@ -21164,6 +21164,8 @@ counter delta between two snapshots (end - begin).
   awrdiff begin <a> end <b> begin <c> end <d>
                             render AWR DIFF html (3-col: Period1 | Period2 | Δ);
                             period1 = snap a->b, period2 = snap c->d;
+                            both periods must be equally long (Δ columns are
+                            raw window deltas; 300s jitter tolerance);
                             written to awrdiff_{db}_{p1_begin}_{p2_begin}.html
   list    [YYYY-MM-DD]     list stored snapshots (snap_id / ts / host / db),
                             newest first; default latest 30, a date lists
@@ -26467,6 +26469,28 @@ _awr_awrdiff() {
     # cross-period restart is allowed -- each period's delta is self-contained).
     _awr_check_uptime "$p1b" "$p1e" || return 1
     _awr_check_uptime "$p2b" "$p2e" || return 1
+    # equal-duration guard: the diff report's headline delta columns (DB Time,
+    # per-SQL times, wait totals) are raw window deltas -- comparable only
+    # across equally long periods (the per-second columns normalize, the deltas
+    # do not). cron snaps land at :00 with seconds jitter, so tolerate 300s.
+    python3 - "$p1b" "$p1e" "$p2b" "$p2e" "$root" <<'PYDUR' || return 1
+import json, sys
+root = sys.argv[5]
+def dur(a, b):
+    try:
+        ea = int(json.load(open("%s/snap_%s/meta.json" % (root, a)))["ts_epoch"])
+        eb = int(json.load(open("%s/snap_%s/meta.json" % (root, b)))["ts_epoch"])
+        return eb - ea
+    except Exception:
+        return None
+d1, d2 = dur(sys.argv[1], sys.argv[2]), dur(sys.argv[3], sys.argv[4])
+if d1 is None or d2 is None:
+    sys.stderr.write("Error: cannot read snap meta for the awrdiff duration guard\n"); sys.exit(1)
+if abs(d1 - d2) > 300:
+    sys.stderr.write("Error: awrdiff periods must be equally long -- the delta columns (DB Time, SQL time, waits) are raw window deltas and mislead across unequal windows.\n")
+    sys.stderr.write("       period1 = %ds, period2 = %ds (difference %ds, tolerance 300s) -- pick equal-length windows.\n" % (d1, d2, abs(d1 - d2)))
+    sys.exit(1)
+PYDUR
     echo "==> rendering awrdiff: period1 snap $p1b->$p1e  vs  period2 snap $p2b->$p2e"
     # no --repl-dir by design: one repl table can't cover two disjoint periods
     _awr_render --awrdiff "$d1b" "$d1e" "$d2b" "$d2e"
