@@ -21922,6 +21922,30 @@ def build_window_from_snaps(begin_dir, end_dir):
     }
     return win
 
+def _os_version():
+    """Host OS string for the report header, read at RENDER time -- the OS is
+    a host-level fact and snaps live on this host in the normal awrrpt flow,
+    so render-time == collection host; reading it here also covers snaps taken
+    before the header had an OS row (no meta backfill needed). Source =
+    /etc/os-release PRETTY_NAME (present everywhere incl. Kylin; redhat-release
+    is NOT relied on -- some Kylin builds lack it), uname -sr fallback; kernel
+    release appended."""
+    import platform
+    v = ""
+    try:
+        for _ln in open("/etc/os-release"):
+            if _ln.startswith("PRETTY_NAME="):
+                v = _ln.split("=", 1)[1].strip().strip('"'); break
+    except Exception:
+        pass
+    if not v:
+        v = " ".join(x for x in (platform.system(), platform.release()) if x)
+    kr = ""
+    try: kr = platform.release()
+    except Exception: pass
+    if v and kr and kr not in v: return "%s %s" % (v, kr)
+    return v or "-"
+
 # ================= Replication sampler (awrrpt only) =================
 # repl_<YYYYMMDD>.log row grammar (written by _awr_repl_sample in bash):
 #   data : ts,application_name,client_addr,state,sync_state,sent,write,flush,replay LSN
@@ -24215,8 +24239,8 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         '<tr><td>%s</td><td>%s</td><td>%s</td></tr></table>'
         '<table><tr><th>Release</th><th>vb_tool (snap / report)</th></tr>'
         '<tr><td>%s</td><td>%s / %s</td></tr></table>'
-        '<table><tr><th>Host Name</th><th>Startup Time</th><th>Port</th></tr>'
-        '<tr><td>%s</td><td>%s</td><td class="n">%s</td></tr></table>'
+        '<table><tr><th>Host Name</th><th>OS Version</th><th>Startup Time</th><th>Port</th></tr>'
+        '<tr><td>%s</td><td>%s</td><td>%s</td><td class="n">%s</td></tr></table>'
         '<table><tr><th class="nobg"></th><th>Snap Id</th><th>Snap Time</th></tr>'
         '<tr><td>Begin Snap:</td><td class="n">%s</td><td class="c">%s</td></tr>'
         '<tr class="alt"><td>End Snap:</td><td class="n">%s</td><td class="c">%s</td></tr>'
@@ -24225,7 +24249,8 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         '</table></div>' % (
             esc(m.get("db_name") or m.get("name") or "?"), esc(m.get("db_role", "?")), esc(_compat),
             esc(m.get("db_version", "?") or "?"), esc(m.get("vb_tool_version", "?")), esc(_GEN_VER),
-            esc(m.get("hostname", "?")), esc(m.get("db_start_time") or "-"),
+            esc(m.get("hostname", "?")), esc(_os_version()),
+            esc(m.get("db_start_time") or "-"),
             esc(str(m.get("port") or "-")),
             esc(m.get("snap_id_begin", "?")), esc(m.get("begin_ts", "?")),
             esc(m.get("snap_id_end", "?")), esc(m.get("end_ts", "?")),
@@ -25288,8 +25313,8 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                "PG": "PG (PostgreSQL)"}.get(_compat_raw, _compat_raw) or "?"
     parts.append(
         '<div class="rhead"><div class="title">Vastbase Performance AWR Diff Report</div>'
-        '<table><tr><th>Instance Name</th><th>Host Name</th><th>DB Role</th><th>DB Compatibility</th></tr>'
-        '<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr></table>'
+        '<table><tr><th>Instance Name</th><th>Host Name</th><th>OS Version</th><th>DB Role</th><th>DB Compatibility</th></tr>'
+        '<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr></table>'
         '<table><tr><th>Release</th><th>vb_tool (snap / report)</th></tr>'
         '<tr><td>%s</td><td>%s / %s</td></tr></table>'
         '<table><tr><th class="nobg"></th><th>Snaps</th><th>Window</th><th>Duration (s)</th></tr>'
@@ -25298,6 +25323,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         '<tr><td>DB Time (s):</td><td></td><td class="c">%s / %s</td><td class="n">&Delta; %s</td></tr>'
         '</table></div>' % (
             esc(m2.get("db_name") or m2.get("name") or "?"), esc(m2.get("hostname", "?")),
+            esc(_os_version()),
             (lambda r1, r2: r1 if r1 == r2 else "%s / %s" % (r1, r2))(
                 m1.get("db_role", "?"), m2.get("db_role", "?")),
             esc(_compat),
