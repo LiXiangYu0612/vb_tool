@@ -26650,8 +26650,13 @@ PY
     osid=$(printf '%s\n' "$inv" | cut -f2); ots=$(printf '%s\n' "$inv" | cut -f3)
     nsid=$(printf '%s\n' "$inv" | cut -f4); nts=$(printf '%s\n' "$inv" | cut -f5)
     local oldest="-" newest="-"
-    [ "$n" -gt 0 ] && oldest="$osid  ($ots)" && newest="$nsid  ($nts)"
-    local purge="on (after every create / enable)"
+    if [ "$n" -gt 0 ]; then
+        # pad ids to the pair's max width so the (ts) parens line up
+        local _w=${#nsid}; [ "${#osid}" -gt "$_w" ] && _w=${#osid}
+        oldest=$(printf "%-*s  (%s)" "$_w" "$osid" "$ots")
+        newest=$(printf "%-*s  (%s)" "$_w" "$nsid" "$nts")
+    fi
+    local purge="on"
     [ "$days" -eq 0 ] && purge="off (retention = 0, keep forever)"
     local rdesc="${days} days"
     [ "$days" -eq 0 ] && rdesc="0 (never purge)"
@@ -26687,16 +26692,16 @@ PY
         echo "status        : DISABLED (no periodic snapshot / sampler crontab entries for port $port)"
     else
         echo "status        : ENABLED"
-        if [ -n "$snapent" ]; then echo "  snapshot           : $snapent"
-        else echo "  snapshot           : (entry missing -- re-run 'awr enable' to fix)"; fi
-        if [ -n "$replent" ]; then echo "  replication sampler: $replent"
-        else echo "  replication sampler: (entry missing -- re-run 'awr enable' to fix)"; fi
+        if [ -n "$snapent" ]; then echo "  snapshot sampler : $snapent"
+        else echo "  snapshot sampler : (entry missing -- re-run 'awr enable' to fix)"; fi
+        if [ -n "$replent" ]; then echo "  replicat sampler : $replent"
+        else echo "  replicat sampler : (entry missing -- re-run 'awr enable' to fix)"; fi
         [ -n "$ageline" ] && echo "$ageline"
     fi
     [ -n "$others" ] && echo "other ports   : awr also enabled on: $others"
     cat <<EOF
 port          : $port
-data dir      : $rootabs (snap_<id>/ per snapshot)
+data dir      : $rootabs
 interval      : ${mins} min
 retention     : $rdesc
 auto-purge    : $purge
