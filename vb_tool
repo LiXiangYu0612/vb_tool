@@ -22041,7 +22041,7 @@ def replication_section_html(repl):
     parts.append('<div class="note">lag = LSN byte distance: '
                  'Net = sent&minus;write, Fsync = write&minus;flush, '
                  'Apply = flush&minus;replay, Total = sent&minus;replay.</div>')
-    return "".join(parts)
+    return _fold("Per-minute detail", "".join(parts))
 
 # ---- Replication slots sampler (awrrpt only; mirrors the repl stat sampler) ----
 # slot_<YYYYMMDD>.log row grammar (written by _awr_repl_sample in bash):
@@ -22112,7 +22112,7 @@ def slots_subtable_html(slots):
                      % (esc(ts), esc(f[0]), esc(f[2]), esc(f[1]), esc(f[3]), esc(f[4]),
                         esc(f[7]), esc(f[5]), esc(f[6]), esc(f[8]), esc(f[9])))
     parts.append('</table>')
-    return "".join(parts)
+    return _fold("Per-minute detail", "".join(parts))
 
 # ---- Walreceiver sampler (awrrpt only, standby role; written by
 # _awr_repl_sample in bash when pg_is_in_recovery()) ----
@@ -22208,7 +22208,7 @@ def walreceiver_subtable_html(wr):
                  'lag = LSN byte distance: Net = sender_sent&minus;received, '
                  'Fsync = received&minus;flush, Apply = flush&minus;replay, '
                  'Total = sender_sent&minus;replay.</div>')
-    return "".join(parts)
+    return _fold("Per-minute detail", "".join(parts))
 
 # ---- OS per-minute sampler (awrrpt only; written by _awr_repl_sample in bash) ----
 # os_<YYYYMMDD>.log[.gz] row grammar (the sampler gzips every PAST day's file):
