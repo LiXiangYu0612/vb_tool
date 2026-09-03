@@ -21164,8 +21164,10 @@ counter delta between two snapshots (end - begin).
   awrdiff begin <a> end <b> begin <c> end <d>
                             render AWR DIFF html (3-col: Period1 | Period2 | Δ);
                             period1 = snap a->b, period2 = snap c->d;
-                            both periods must be equally long (Δ columns are
-                            raw window deltas; differences within 10 min pass);
+                            both periods must span the same number of snapshot
+                            intervals (equal snap_id gap; differing gaps need
+                            durations within 10 min) -- Δ columns are raw
+                            window deltas;
                             written to awrdiff_{db}_{p1_begin}_{p2_begin}.html
   list    [YYYY-MM-DD]     list stored snapshots (snap_id / ts / host / db),
                             newest first; default latest 30, a date lists
@@ -26469,11 +26471,14 @@ _awr_awrdiff() {
     # cross-period restart is allowed -- each period's delta is self-contained).
     _awr_check_uptime "$p1b" "$p1e" || return 1
     _awr_check_uptime "$p2b" "$p2e" || return 1
-    # equal-duration guard: the diff report's headline delta columns (DB Time,
+    # equal-window guard: the diff report's headline delta columns (DB Time,
     # per-SQL times, wait totals) are raw window deltas -- comparable only
     # across equally long periods (the per-second columns normalize, the deltas
-    # do not). cron snaps land at :00 with seconds jitter; user-set tolerance
-    # is 600s (differences within 10 minutes pass).
+    # do not). Primary rule (user): periods spanning the SAME NUMBER of
+    # snapshot intervals (equal snap_id gap) pass -- with a uniform interval
+    # that IS equal length. Equal gap but skewed real durations (manual snaps
+    # inside a window) still pass, with a WARN. Fallback for differing gaps:
+    # durations must match within 600s (cron :00 jitter is seconds).
     python3 - "$p1b" "$p1e" "$p2b" "$p2e" "$root" <<'PYDUR' || return 1
 import json, sys
 root = sys.argv[5]
@@ -26484,12 +26489,20 @@ def dur(a, b):
         return eb - ea
     except Exception:
         return None
+def igap(a, b):
+    try: return int(b) - int(a)
+    except Exception: return None
 d1, d2 = dur(sys.argv[1], sys.argv[2]), dur(sys.argv[3], sys.argv[4])
+g1, g2 = igap(sys.argv[1], sys.argv[2]), igap(sys.argv[3], sys.argv[4])
 if d1 is None or d2 is None:
-    sys.stderr.write("Error: cannot read snap meta for the awrdiff duration guard\n"); sys.exit(1)
+    sys.stderr.write("Error: cannot read snap meta for the awrdiff window guard\n"); sys.exit(1)
+if g1 is not None and g1 == g2:
+    if abs(d1 - d2) > 600:
+        sys.stderr.write("  [WARN] equal snap_id gap (%d interval(s)) but durations differ: period1 = %ds, period2 = %ds (manual snaps inside a window?) -- raw deltas may mislead.\n" % (g1, d1, d2))
+    sys.exit(0)
 if abs(d1 - d2) > 600:
-    sys.stderr.write("Error: awrdiff periods must be equally long -- the delta columns (DB Time, SQL time, waits) are raw window deltas and mislead across unequal windows.\n")
-    sys.stderr.write("       period1 = %ds, period2 = %ds (difference %ds, tolerance 600s) -- pick equal-length windows.\n" % (d1, d2, abs(d1 - d2)))
+    sys.stderr.write("Error: awrdiff periods must span the same number of snapshot intervals (equal snap_id gap), or have durations within 600s -- the delta columns (DB Time, SQL time, waits) are raw window deltas and mislead across unequal windows.\n")
+    sys.stderr.write("       period1 = %ds (gap %s), period2 = %ds (gap %s), difference %ds -- pick equal-length windows.\n" % (d1, g1, d2, g2, abs(d1 - d2)))
     sys.exit(1)
 PYDUR
     echo "==> rendering awrdiff: period1 snap $p1b->$p1e  vs  period2 snap $p2b->$p2e"
