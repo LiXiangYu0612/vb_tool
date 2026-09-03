@@ -21165,7 +21165,7 @@ counter delta between two snapshots (end - begin).
                             render AWR DIFF html (3-col: Period1 | Period2 | Δ);
                             period1 = snap a->b, period2 = snap c->d;
                             both periods must be equally long (Δ columns are
-                            raw window deltas; 300s jitter tolerance);
+                            raw window deltas; differences within 10 min pass);
                             written to awrdiff_{db}_{p1_begin}_{p2_begin}.html
   list    [YYYY-MM-DD]     list stored snapshots (snap_id / ts / host / db),
                             newest first; default latest 30, a date lists
@@ -26472,7 +26472,8 @@ _awr_awrdiff() {
     # equal-duration guard: the diff report's headline delta columns (DB Time,
     # per-SQL times, wait totals) are raw window deltas -- comparable only
     # across equally long periods (the per-second columns normalize, the deltas
-    # do not). cron snaps land at :00 with seconds jitter, so tolerate 300s.
+    # do not). cron snaps land at :00 with seconds jitter; user-set tolerance
+    # is 600s (differences within 10 minutes pass).
     python3 - "$p1b" "$p1e" "$p2b" "$p2e" "$root" <<'PYDUR' || return 1
 import json, sys
 root = sys.argv[5]
@@ -26486,9 +26487,9 @@ def dur(a, b):
 d1, d2 = dur(sys.argv[1], sys.argv[2]), dur(sys.argv[3], sys.argv[4])
 if d1 is None or d2 is None:
     sys.stderr.write("Error: cannot read snap meta for the awrdiff duration guard\n"); sys.exit(1)
-if abs(d1 - d2) > 300:
+if abs(d1 - d2) > 600:
     sys.stderr.write("Error: awrdiff periods must be equally long -- the delta columns (DB Time, SQL time, waits) are raw window deltas and mislead across unequal windows.\n")
-    sys.stderr.write("       period1 = %ds, period2 = %ds (difference %ds, tolerance 300s) -- pick equal-length windows.\n" % (d1, d2, abs(d1 - d2)))
+    sys.stderr.write("       period1 = %ds, period2 = %ds (difference %ds, tolerance 600s) -- pick equal-length windows.\n" % (d1, d2, abs(d1 - d2)))
     sys.exit(1)
 PYDUR
     echo "==> rendering awrdiff: period1 snap $p1b->$p1e  vs  period2 snap $p2b->$p2e"
