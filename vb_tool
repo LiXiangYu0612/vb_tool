@@ -26353,6 +26353,14 @@ _awr_repl_sample() {
 
 # _awr_snap [--root <dir>]  -- allocate snap_id, collect, write meta. The core
 # primitive used by both manual `create` and the cron-fired `create`.
+# _awr_db_up  -- cheap DB reachability probe: one psql connect + select 1,
+# bounded by PGCONNECT_TIMEOUT so a blackholed network fails in 15s, not the
+# kernel's ~127s SYN retries. Used by _awr_snap to gate BEFORE any snap work.
+_awr_db_up() {
+    PGCONNECT_TIMEOUT=15 PGOPTIONS="-c statement_timeout=60000" \
+        psql -d postgres -tAc "select 1" >/dev/null 2>&1
+}
+
 _awr_snap() {
     umask 077   # snapshots carry SQL literals: force 0700/0600 regardless of caller umask
     local root_override=""
@@ -26370,6 +26378,14 @@ _awr_snap() {
         echo "Error: another awr create is still running (lock $root/create.lock) -- try again later" >&2
         return 1
     fi
+    # DB must be UP before ANY snap work (user decision 2026-09-03): no
+    # snap_id consumed, no dir created, no OS collection, nothing to clean up.
+    # _awr_collect keeps its own probe as a second guard (DB can die during
+    # the ~5-10s collection window) -- that path removes the in-flight dir.
+    if ! _awr_db_up; then
+        echo "Error: cannot reach the database (port ${PGPORT:-5432}) -- snapshot NOT taken" >&2
+        return 1
+    fi
     local sid ts ts_ep dir
     sid=$(_awr_next_id) || return 1
     dir="$root/snap_$sid"
@@ -26377,12 +26393,11 @@ _awr_snap() {
     mkdir -p "$dir" 2>/dev/null || { echo "Error: cannot create $dir" >&2; return 1; }
     ts=$(date '+%F %T'); ts_ep=$(date +%s)
     echo "==> capturing snap $sid  ->  $dir"
-    # DB unreachable (connect probe failed) => NO snapshot: a snap without db/
-    # data would poison awr list and reports (user decision 2026-09-03). The
-    # snap_id is consumed (gap in sequence) -- harmless, ids stay monotonic.
+    # collection failed midway (e.g. DB died during collection): discard the
+    # in-flight dir -- a snap without db/ data would poison awr list/reports.
     if ! _awr_collect "$dir"; then
         rm -rf "$dir" 2>/dev/null
-        echo "  [WARN] snap $sid skipped, nothing kept (DB unreachable / collection failed)" >&2
+        echo "  [WARN] snap $sid skipped, nothing kept (collection failed)" >&2
         return 1
     fi
     _awr_write_meta "$dir" "$sid" "$ts" "$ts_ep"
