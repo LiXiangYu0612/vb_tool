@@ -26377,7 +26377,14 @@ _awr_snap() {
     mkdir -p "$dir" 2>/dev/null || { echo "Error: cannot create $dir" >&2; return 1; }
     ts=$(date '+%F %T'); ts_ep=$(date +%s)
     echo "==> capturing snap $sid  ->  $dir"
-    _awr_collect "$dir" || echo "  [WARN] collection reported errors (snap $sid kept)" >&2
+    # DB unreachable (connect probe failed) => NO snapshot: a snap without db/
+    # data would poison awr list and reports (user decision 2026-09-03). The
+    # snap_id is consumed (gap in sequence) -- harmless, ids stay monotonic.
+    if ! _awr_collect "$dir"; then
+        rm -rf "$dir" 2>/dev/null
+        echo "  [WARN] snap $sid skipped, nothing kept (DB unreachable / collection failed)" >&2
+        return 1
+    fi
     _awr_write_meta "$dir" "$sid" "$ts" "$ts_ep"
     echo "==> snap $sid captured at $ts"
     _awr_purge_expired
