@@ -1,6 +1,6 @@
 # vb_tool
 
-VastBase 数据库运维脚本工具集（单文件 Bash 工具，23000+ 行）。
+VastBase 数据库运维脚本工具集（单文件 Bash 工具，29000+ 行）。
 
 ## 安装
 
@@ -35,7 +35,7 @@ vb_tool list
 ## 全局选项
 
 - `-P <port>`：所有连接数据库的命令均可用，指定实例端口（仅本次调用生效，等同临时设置 `PGPORT`；支持前置、尾置、粘连 `-P5433` 三种写法）。不带 `-P` 时连接当前 `$PGPORT` 环境变量指向的实例。
-- 所有命令统一支持 `-h` / `-help` / `--help` 查看各自帮助（v1.4.19 起全命令统一）。
+- 各命令支持 `-h` / `-help` / `--help` 查看帮助（v1.4.19 起统一）。例外：`awr` 的子命令（`list/show/delete/config`）无参数即显示用法，`-h` 会被当作参数解析。
 
 ## 命令列表（节选）
 
@@ -59,7 +59,7 @@ vb_tool list
 | `tps` / `tabstat` / `tabsize` / `sqlstat` | 性能与对象统计 |
 | `lock_details` / `lockchain` | 锁等待分析 |
 | `sqlhc` | SQL 健康检查（支持 .log/.csv 及其 .gz 压缩日志） |
-| `vtop` | oratop 风格实时监控：OS（CPU/内存/网卡/数据盘 IO）+ SESS/LTX 会话与长事务 + ISTAT 负载速率（tps/逻辑物理读/redo/temp）+ EVENT 等待事件 Top5（帧间差值）+ DBMEM/MEMCTX/TOPMEM 内存 + TOPSQL（sqlid 汇总、真实 CPU% 倒序）+ LOCK final blocker（lockchain 同源）；top 式原地刷新、阈值着色、`-i`/`-n`/`--once` |
+| `vtop` | oratop 风格实时监控：OS（CPU/内存/网卡/数据盘 IO）+ SESS/LTX 会话与长事务 + ISTAT 负载速率（tps/逻辑读/物理读/redo/temp）+ EVENT 等待事件 Top5（帧间差值）+ DBMEM/MEMCTX/TOPMEM 内存 + TOPSQL（sqlid 汇总、真实 CPU% 倒序）+ LOCK final blocker（lockchain 同源）；top 式原地刷新、阈值着色、`-i`/`-n`/`--once` |
 
 完整命令见 `vb_tool list`。
 
