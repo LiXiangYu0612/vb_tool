@@ -331,6 +331,7 @@ analyze_log_v2_help() {
     echo "Options for analyze_log_v2:"
     echo "  Usage: vb_tool analyze_log_v2 [-f <file>] [-b <begin>] [-e <end>] [--diff <interval>]"
     echo "         [-p <prefix>] [-d <days>] [-v] [-m <mode>] [-o <output>]"
+    echo "         [--detail top[:N]|all] [--detail-timeout <seconds>]"
     echo "  Description: analyze database logs (slow queries) output html report (enhanced version)"
     echo "  -P <port>: database port (default: current \$PGPORT)"
     echo "  Options:"
@@ -339,13 +340,20 @@ analyze_log_v2_help() {
     echo "    -e: end time (optional, format: 'YYYY-MM-DD HH:MM:SS' or 'YYYY-MM-DD')"
     echo "    --diff: compare interval (30m, 1h, 1d, default: 1d)"
     echo "    -p: log line prefix format (optional, auto-detect from database)"
-    echo "    -d: analyze last N days of logs (default: 2)"
+    echo "    -d: analyze last N days of logs (optional; default 2 days when auto-fetching logs;"
+    echo "        with -f, filters out lines older than now-N days; explicit -b/-e take precedence)"
     echo "    -v: show version"
     echo "    -m/--mode: analysis scope (query|error|all, default: query)"
     echo "         query: analyze SQL statements (DML+DDL), no error logs"
     echo "         error: analyze error logs only (ERROR/WARNING/FATAL/PANIC), no SQL"
     echo "         all:   analyze everything (SQL + error logs)"
     echo "    -o: output HTML report file path (optional, default: hostname + timestamp + mode)"
+    echo "    --detail: query wait events (statement_history) for slow SQL via vsql"
+    echo "         top    - top 20 SQL IDs deduplicated across 4 dimensions (default)"
+    echo "         top:N  - custom top N"
+    echo "         all    - all slow SQL"
+    echo "         if omitted, no wait event query is performed"
+    echo "    --detail-timeout: per-batch vsql timeout in seconds for --detail (default: 120)"
     echo "    --debug: enable debug output"
     echo ""
     echo "  Examples:"
@@ -365,6 +373,9 @@ analyze_log_v2_help() {
     echo "    vb_tool analyze_log_v2 -f /path/to/log.log -m query"
     echo "    vb_tool analyze_log_v2 -f /path/to/log.log -m error"
     echo "    vb_tool analyze_log_v2 -f /path/to/log.log -m all"
+    echo "    vb_tool analyze_log_v2 -f /path/to/log.log --detail top"
+    echo "    vb_tool analyze_log_v2 -f /path/to/log.log --detail top:50"
+    echo "    vb_tool analyze_log_v2 -f /path/to/log.log --detail all --detail-timeout 300"
     echo "    vb_tool analyze_log_v2 -f /path/to/log.log -o /path/to/report.html"
     echo ""
 }
@@ -11279,11 +11290,14 @@ run_analyze_log_v2() {
     
     # Write the enhanced Python script content
     cat << 'PYTHON_EOF' > "$TEMP_SCRIPT"
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 import re
 import sys
 import argparse
 import subprocess
 import gc
+import time
 from itertools import groupby
 from statistics import mean, stdev
 from datetime import datetime, timedelta
@@ -11298,6 +11312,7 @@ import socket
 import base64
 from collections import defaultdict
 from functools import lru_cache
+from concurrent.futures import ThreadPoolExecutor
 ## 导入resource模块 不在Windows上用
 try:
     import resource
@@ -11305,11 +11320,13 @@ except ImportError:
     resource = None
 
 
+
+
+
+
 # 预编译正则表达式以提高性能
-# HTML 中超长 SQL 截断阈值：超过该长度时，页面内嵌文本截断展示，完整内容写入外置 txt
-MAX_INLINE_SQL_LEN = 4096
-# HTML 内联 SQL 截断阈值(独立于 MAX_INLINE_SQL_LEN,仅控制 HTML 展示体积)
-# 超过此长度的 SQL 在 HTML 中截断展示,完整内容通过 Base64 下载按钮提供。
+# HTML 内联 SQL 截断阈值：超过该长度时，页面内嵌文本截断展示，
+# 完整内容（已完成变量替换）通过 Base64 下载按钮提供。
 # 1000 字符约为 1KB,足够看清 SQL 框架;10 万条 × 3 份 SQL × 1KB ≈ 300MB(原 4KB 时约 1.2GB)
 MAX_HTML_INLINE_SQL_LEN = 1000
 TIMESTAMP_PATTERN = re.compile(r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}) ')
@@ -11318,10 +11335,19 @@ ERROR_LEVEL_PATTERN = re.compile(r'\b(ERROR|WARNING|FATAL|PANIC)\s*:')
 IP_PATTERN = re.compile(r'(\d{1,3}\.){3}\d{1,3}\(\d+\)')
 QUERY_TEXT_PATTERN = re.compile(r'Query Text:', re.IGNORECASE)
 EXECUTE_PATTERN = re.compile(r'(?:execute|bind)\s+(?:<[^>]*>|\S+)\s*:|duration:|unique id|statement:', re.IGNORECASE)
-PARAM_PATTERN = re.compile(r'\$(\d+)\s*=\s*([^,\s]+(?:\s*[^,\s]+)*)')
 # 新增预编译正则表达式
 SPLIT_PATTERN = re.compile(r'\s+')
 PARAMETERS_PATTERN = re.compile(r'parameters:\s+')
+
+# 数值绑定变量类型（type = bigint 等）：替换进 SQL 时不带引号
+_NUMERIC_TYPE_NAMES = {
+    'smallint', 'integer', 'bigint', 'int', 'int2', 'int4', 'int8',
+    'numeric', 'decimal', 'real', 'double precision', 'float', 'float4',
+    'float8', 'money', 'smallserial', 'serial', 'bigserial',
+}
+
+# 纯数字字面量（含小数/负数/科学计数），数值类型去引号前校验用
+_NUMERIC_LITERAL_RE = re.compile(r'^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$')
 DURATION_EXTRACT_PATTERN = re.compile(r'duration:\s*(\d+(?:\.\d+)?)\s*(?:ms|s)\b', re.IGNORECASE)
 
 # 锁等待相关正则表达式
@@ -11466,6 +11492,1684 @@ def get_default_log_directory():
         return os.path.join(os.path.abspath(pgdata.strip()), 'pg_log')
     return None
 
+
+# statement_history 需要输出的业务列（用户指定清单），unique_query_id/query_plan/
+# event_text 另外单独处理，不在这个一行输出的列表里
+_SH_COLS = [
+    'db_name', 'schema_name', 'application_name', 'client_addr',
+    'start_time', 'finish_time', 'session_id',
+    'n_soft_parse', 'n_hard_parse', 'n_returned_rows',
+    'n_tuples_fetched', 'n_tuples_returned', 'n_blocks_hit',
+    'cpu_time', 'execution_time', 'parse_time', 'data_io_time',
+    'net_send_info', 'net_recv_info', 'lock_time',
+]
+
+
+def _gz_b64_text(text):
+    """将文本 UTF-8 编码后 gzip 压缩,再 Base64 编码,用于内嵌进 HTML data 属性。
+
+    与报告生成函数内部的 _gz_b64 逻辑一致，提到模块级供汇总信息等非报告上下文复用。
+    """
+    if not text:
+        return ''
+    return base64.b64encode(gzip.compress(text.encode('utf-8'), compresslevel=6)).decode('ascii')
+
+
+def _build_wait_events_query(ids_csv, start_str=None, end_str=None):
+    """构造等待事件查询 SQL。
+
+    每个 unique_query_id 取最大/最小执行时间点各一条记录（执行时间并列时
+    按 start_time 决胜，保证是两条不同记录）; 输出业务列 + query_plan +
+    statement_detail_decode 解码的等待事件。to_jsonb 单行 JSON 避免换行破坏解析；
+    pick 标签以 chr(1) 前缀拼在 JSON 前（jsonb_build_object 在部分库不可用）。
+
+    Args:
+        ids_csv: 逗号分隔的 unique_query_id 列表
+        start_str/end_str: 时间过滤边界；为 None 时不加时间过滤（兜底查询）
+    """
+    cols = ',\n         '.join('h.' + c for c in _SH_COLS)
+    time_filter = ''
+    if start_str and end_str:
+        time_filter = (f"\n    AND h.start_time >= '{start_str}'"
+                       f"\n    AND h.start_time <= '{end_str}'")
+    return (
+        "WITH ranked AS (\n"
+        "  SELECT h.unique_query_id,\n"
+        f"         {cols},\n"
+        "         h.query_plan,\n"
+        "         pg_catalog.statement_detail_decode(h.details, 'plaintext', true) AS event_text,\n"
+        "         ROW_NUMBER() OVER (PARTITION BY h.unique_query_id\n"
+        "                          ORDER BY h.execution_time DESC, h.start_time DESC) AS rn_max,\n"
+        "         ROW_NUMBER() OVER (PARTITION BY h.unique_query_id\n"
+        "                          ORDER BY h.execution_time ASC,  h.start_time ASC)  AS rn_min\n"
+        "  FROM dbe_perf.statement_history h\n"
+        f"  WHERE h.unique_query_id IN ({ids_csv}){time_filter}\n"
+        ")\n"
+        "SELECT (CASE WHEN rn_max = 1 THEN 'max' ELSE 'min' END) ||\n"
+        "       chr(1) || (to_jsonb(ranked) - 'rn_max' - 'rn_min')::text\n"
+        "FROM ranked\n"
+        "WHERE rn_max = 1 OR rn_min = 1\n"
+        "ORDER BY unique_query_id, CASE WHEN rn_max = 1 THEN 'max' ELSE 'min' END DESC;"
+    )
+
+
+def query_wait_events_for_sql_ids(sql_ids, start_time, end_time, batch_size=500, timeout=120, debug=False):
+    """通过 vsql -d postgres 查询慢SQL的等待事件信息（最大/最小执行时间点各一条）。
+
+    每条记录包含: 指定的 statement_history 业务列(见 _SH_COLS) + query_plan +
+    event_text(statement_detail_decode 解码的等待事件) + pick(max/min 标签)。
+    若按日志时间范围查不到数据，自动去掉时间过滤兜底重查一次（statement_history
+    保留周期/时钟偏差都可能导致时间窗口内查不到）。
+
+    Args:
+        sql_ids: 可迭代的 unique_query_id 集合
+        start_time: 分析开始时间 (datetime)
+        end_time: 分析结束时间 (datetime)
+        batch_size: 每批查询的 ID 数量，避免 IN (...) 过长
+        timeout: 单次 vsql 调用超时时间（秒）
+        debug: 是否打印实际执行的 SQL 命令
+
+    Returns:
+        tuple: (wait_events_dict, warning_message)
+            - wait_events_dict: {sql_id: [records]}
+            - warning_message: 连接失败或无数据时返回警告字符串，否则为 None
+    """
+    # 仅保留数值型 ID，避免非数值 ID 进入 SQL 造成语法错误或注入
+    valid_ids = []
+    for sid in sql_ids:
+        s = str(sid).strip()
+        try:
+            int(s)
+            valid_ids.append(s)
+        except (ValueError, TypeError):
+            continue
+
+    if not valid_ids:
+        if debug:
+            print("[DEBUG] wait events: 无有效 SQL ID", file=sys.stderr)
+        return {}, "没有有效的数值型 SQL ID 可查询等待事件"
+
+    # 检查 vsql 是否可用
+    try:
+        test_proc = subprocess.Popen(
+            ['vsql', '--version'],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            universal_newlines=True
+        )
+        test_proc.communicate()
+    except FileNotFoundError:
+        return {}, "无法连接数据库（未找到 vsql 命令），未查询等待事件信息"
+
+    start_str = start_time.strftime('%Y-%m-%d %H:%M:%S') if hasattr(start_time, 'strftime') else str(start_time)
+    end_str = end_time.strftime('%Y-%m-%d %H:%M:%S') if hasattr(end_time, 'strftime') else str(end_time)
+
+    # A3: 分批查询，避免单条 SQL IN (...) 过长
+    total_ids = len(valid_ids)
+    batches = [valid_ids[i:i + batch_size] for i in range(0, total_ids, batch_size)]
+    wait_events = {}
+    stderr_warnings = []
+
+    for batch_idx, batch_ids in enumerate(batches, 1):
+        ids_csv = ','.join(batch_ids)
+        if len(batches) > 1:
+            print(f"[进度] 等待事件分批查询: 第 {batch_idx}/{len(batches)} 批, 本批 {len(batch_ids)} 个 ID", file=sys.stderr)
+        if debug:
+            print(f"[DEBUG] wait events: 批次 {batch_idx}/{len(batches)}, 时间范围=({start_str} ~ {end_str}), IDs={batch_ids[:5]}{'...' if len(batch_ids) > 5 else ''}", file=sys.stderr)
+
+        # 两轮尝试: 先按日志时间范围过滤; 查不到则去掉时间过滤兜底重查
+        batch_hit = 0
+        for attempt, (q_start, q_end, tag) in enumerate([
+                (start_str, end_str, '按日志时间范围'),
+                (None, None, '不限时间(兜底)')], 1):
+            query = _build_wait_events_query(ids_csv, q_start, q_end)
+            if debug:
+                print(f"[DEBUG] wait events 执行命令({tag}): vsql -d postgres -q -A -t -c <query>", file=sys.stderr)
+                print(f"[DEBUG] wait events 完整 SQL({tag}):\n{query}", file=sys.stderr)
+            try:
+                process = subprocess.Popen(
+                    ['vsql', '-d', 'postgres', '-q', '-A', '-t', '-c', query],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    universal_newlines=True
+                )
+                # A2: 超时保护，避免极端情况下脚本长时间阻塞
+                stdout, stderr = process.communicate(timeout=timeout)
+            except FileNotFoundError:
+                return {}, "无法连接数据库（未找到 vsql 命令），未查询等待事件信息"
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.communicate()
+                warning = f"查询等待事件超时（>{timeout}s），已终止该批次查询"
+                print(f"WARNING: {warning}")
+                stderr_warnings.append(warning)
+                break
+            except Exception as e:
+                warning = f"查询等待事件时发生错误: {str(e)}"
+                print(f"WARNING: {warning}")
+                stderr_warnings.append(warning)
+                break
+
+            if process.returncode != 0:
+                warning = f"查询等待事件失败: {stderr.strip()}"
+                print(f"WARNING: {warning}")
+                stderr_warnings.append(warning)
+                break
+
+            # A4: returncode=0 但 stderr 非空时打印 WARNING（NOTICE 等信息不阻断）
+            stderr_text = (stderr or '').strip()
+            if stderr_text:
+                print(f"WARNING: vsql stderr 输出: {stderr_text}", file=sys.stderr)
+                stderr_warnings.append(f"vsql stderr: {stderr_text}")
+
+            for line in stdout.strip().split('\n'):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    # 行格式: "max|min" + chr(1) + JSON 记录（jsonb_build_object 不可用的替代方案）
+                    pick, _, payload = line.partition('\x01')
+                    record = json.loads(payload if payload else line)
+                    if pick in ('max', 'min'):
+                        record['pick'] = pick
+                    uid = str(record.get('unique_query_id', '')).strip()
+                    if uid:
+                        wait_events.setdefault(uid, []).append(record)
+                        batch_hit += 1
+                except json.JSONDecodeError:
+                    continue
+
+            if debug:
+                print(f"[DEBUG] wait events: 批次 {batch_idx} ({tag}) 命中 {batch_hit} 条记录", file=sys.stderr)
+            if batch_hit > 0:
+                break  # 有数据就不再兜底重查
+            if attempt == 1 and debug:
+                print(f"[DEBUG] wait events: 批次 {batch_idx} 时间范围内无数据, 去掉时间过滤重查", file=sys.stderr)
+
+    if not wait_events:
+        base_msg = (f"已查询 {total_ids} 个 SQL ID 的等待事件信息，但未找到任何数据"
+                    f"（已尝试: 日志时间范围 {start_str} 至 {end_str} + 不限时间兜底）")
+        if stderr_warnings:
+            base_msg += f"；期间发生 {len(stderr_warnings)} 个警告"
+        return {}, base_msg
+
+    print(f"等待事件查询完成: {len(wait_events)}/{total_ids} 个 SQL ID 找到数据")
+    if stderr_warnings:
+        # 有数据但也有警告，把警告透传给报告（不阻断）
+        return wait_events, f"部分批次查询出现警告（共 {len(stderr_warnings)} 条），已尽力获取数据"
+    return wait_events, None
+
+
+# ==================== SQLHC 信息收集（参考 vb_tool） ====================
+
+_SQL_KW = {
+    'select', 'from', 'where', 'join', 'inner', 'left', 'right', 'full',
+    'outer', 'cross', 'natural', 'on', 'and', 'or', 'not', 'in', 'exists',
+    'between', 'like', 'is', 'null', 'as', 'by', 'group', 'order', 'having',
+    'union', 'all', 'distinct', 'case', 'when', 'then', 'else', 'end',
+    'insert', 'into', 'update', 'set', 'delete', 'merge', 'using', 'matched',
+    'create', 'alter', 'drop', 'table', 'view', 'index', 'with', 'recursive',
+    'limit', 'offset', 'fetch', 'next', 'rows', 'only', 'row', 'partition',
+    'over', 'window', 'filter', 'within', 'lateral', 'values', 'returning',
+    'truncate', 'begin', 'commit', 'rollback', 'savepoint', 'grant', 'revoke',
+    'pivot', 'unpivot', 'connect', 'start', 'nocycle', 'prior', 'level',
+    'rownum', 'rowid', 'dual', 'if', 'else', 'do', 'loop', 'while', 'for',
+    'exception', 'raise', 'declare', 'procedure', 'function', 'trigger',
+    'top', 'percent', 'ties', 'nulls', 'first', 'last', 'asc', 'desc',
+    'primary', 'foreign', 'key', 'references', 'unique', 'check', 'default',
+    'constraint', 'index', 'replace', 'ignore', 'explain', 'analyze',
+    'intersect', 'except', 'minus', 'tablesample', 'sample',
+}
+
+# 系统表/视图基名（不带 schema 引用时会被补成 public.*，需按表名过滤，
+# 避免对系统对象跑 tabstat/tabsize：慢且无意义）
+_SYSTEM_TABLE_NAMES = {
+    'pg_class', 'pg_attribute', 'pg_namespace', 'pg_type', 'pg_attrdef',
+    'pg_index', 'pg_inherits', 'pg_constraint', 'pg_proc', 'pg_authid',
+    'pg_stats', 'pg_ext_stats', 'pg_stat_all_tables', 'pg_stat_all_indexes',
+    'pg_stat_activity', 'pg_locks', 'pg_partition', 'pg_partition_sequences',
+    'pg_tables', 'pg_views', 'pg_sequences', 'pg_indexes', 'pg_constraints',
+    'pg_statistic', 'pg_statistic_ext', 'pg_depend', 'pg_description',
+    'view_table_usage', 'view_column_usage', 'column_privileges', 'table_privileges',
+    'dba_part_key_columns', 'dba_subpart_key_columns', 'dba_objects', 'dba_tables',
+    'dba_tab_columns', 'dba_part_tables', 'dba_tab_partitions', 'dba_indexes',
+    'dbe_perf_statement', 'pg_stat_statement',
+}
+
+# 内置函数名（可能被误提取为表名，如 substring(a from b) 的解析歧义）
+_SQL_FUNCS = {
+    'substring', 'position', 'overlay', 'trim', 'extract', 'cast',
+    'coalesce', 'nullif', 'greatest', 'least', 'nvl', 'decode', 'to_char',
+    'to_date', 'to_number', 'to_timestamp', 'string_agg', 'array_agg',
+    'generate_series', 'unnest', 'regexp_replace', 'regexp_substr',
+    'regexp_count', 'split_part', 'date_trunc', 'date_part', 'now', 'current_date',
+}
+
+
+def _extract_tables_from_sql(sql_text, default_user='public', _depth=0):
+    """从 SQL 文本中提取涉及的表名列表。
+
+    参考 vb_tool sqlhc 的 extract_tables 逻辑，简化版：
+    - 支持 UPDATE/INSERT/DELETE/MERGE 目标表提取
+    - 支持 FROM/JOIN/USING 表提取
+    - 支持 CTE 名称过滤
+    - 默认 schema 补全
+
+    Args:
+        sql_text: SQL 文本（已填充参数）
+        default_user: 默认 schema（通常为执行用户）
+
+    Returns:
+        list: [(owner, table_name), ...]
+    """
+    def normalize_user(user):
+        user = user.strip().lower()
+        return 'public' if user == 'vastbase' else user
+
+    def strip_literals(s):
+        out = []
+        i = 0
+        while i < len(s):
+            if s[i] == "'":
+                out.append("''")
+                i += 1
+                while i < len(s):
+                    if s[i] == "'" and i + 1 < len(s) and s[i + 1] == "'":
+                        i += 2
+                    elif s[i] == "'":
+                        i += 1
+                        break
+                    else:
+                        i += 1
+            elif s[i] == '"':
+                out.append(s[i])
+                i += 1
+                while i < len(s) and s[i] != '"':
+                    out.append(s[i])
+                    i += 1
+                if i < len(s):
+                    out.append(s[i])
+                    i += 1
+            elif s[i] == '-' and i + 1 < len(s) and s[i + 1] == '-':
+                while i < len(s) and s[i] != '\n':
+                    i += 1
+                out.append(' ')
+            elif s[i] == '/' and i + 1 < len(s) and s[i + 1] == '*':
+                i += 2
+                while i < len(s) - 1 and not (s[i] == '*' and s[i + 1] == '/'):
+                    i += 1
+                i += 2
+                out.append(' ')
+            else:
+                out.append(s[i])
+                i += 1
+        return ''.join(out)
+
+    clean = strip_literals(sql_text)
+    tokens = re.findall(
+        r'"[^"]*"'
+        r'|[a-zA-Z_]\w*(?:\.[a-zA-Z_]\w*)*'
+        r'|[(),;]',
+        clean
+    )
+    n = len(tokens)
+
+    def is_kw(tok):
+        return tok.lstrip('"').rstrip('"').lower() in _SQL_KW
+
+    def add_table(raw):
+        raw = raw.strip('"').lower()
+        if raw in _SQL_KW:
+            return
+        parts = raw.split('.')
+        if len(parts) == 1:
+            owner = normalize_user(default_user)
+            tname = parts[0]
+        elif len(parts) == 2:
+            owner, tname = parts
+        else:
+            owner, tname = parts[-2], parts[-1]
+        # 系统表不需要收集 tabstat/tabsize（SQLHC 仅关心业务表，
+        # 且对系统视图跑 tabstat 很慢），与 tabstat SQL 的排除条件保持一致
+        if owner in ('pg_catalog', 'information_schema', 'sys', 'snapshot') \
+                or owner.startswith('pg_toast') or owner.startswith('cstore'):
+            return
+        # 不带 schema 的系统表名（会被补成 public.*）和内置函数名误判
+        if tname in _SYSTEM_TABLE_NAMES or tname in _SQL_FUNCS:
+            return
+        if tname and tname not in _SQL_KW:
+            seen[(owner, tname)] = True
+
+    def skip_subquery(pos):
+        depth = 1
+        pos += 1
+        while pos < n and depth > 0:
+            if tokens[pos] == '(':
+                depth += 1
+            elif tokens[pos] == ')':
+                depth -= 1
+            pos += 1
+        return pos
+
+    def skip_alias(pos):
+        if pos >= n:
+            return pos
+        if tokens[pos].upper() == 'AS':
+            pos += 1
+        if pos < n and tokens[pos] not in (',', '(', ')', ';') and not is_kw(tokens[pos]):
+            pos += 1
+        return pos
+
+    # CTE 收集
+    cte_names = set()
+
+    def collect_ctes():
+        i = 0
+        while i < n:
+            if tokens[i].upper() == 'WITH':
+                prev = tokens[i - 1].upper() if i > 0 else ''
+                if prev == 'START':
+                    i += 1
+                    continue
+                i += 1
+                while i < n:
+                    if tokens[i].upper() == 'RECURSIVE':
+                        i += 1
+                        continue
+                    if is_kw(tokens[i]) or tokens[i] in ('(', ')', ',', ';'):
+                        break
+                    cte_name = tokens[i].lower().strip('"')
+                    i += 1
+                    if i >= n or tokens[i].upper() != 'AS':
+                        break
+                    i += 1
+                    if i >= n or tokens[i] != '(':
+                        break
+                    cte_names.add(cte_name)
+                    i = skip_subquery(i)
+                    if i < n and tokens[i] == ',':
+                        i += 1
+                        continue
+                    break
+            i += 1
+
+    collect_ctes()
+
+    def add_table_checked(raw):
+        name = raw.strip('"').lower().split('.')[-1]
+        if name not in cte_names:
+            add_table(raw)
+
+    FROM_TRIGGERS = {
+        'FROM', 'JOIN', 'INNER', 'LEFT', 'RIGHT', 'FULL',
+        'CROSS', 'NATURAL', 'STRAIGHT_JOIN',
+    }
+    JOIN_NOISE = {'JOIN', 'OUTER', 'SEMI', 'ANTI', 'INTO', 'BY'}
+
+    seen = {}
+    i = 0
+    while i < n:
+        tok_up = tokens[i].upper()
+
+        if tok_up == 'UPDATE':
+            j = i + 1
+            if j < n and not is_kw(tokens[j]) and tokens[j] not in ('(', ')'):
+                add_table_checked(tokens[j])
+                j = skip_alias(j + 1)
+            i = j if j > i else i + 1
+            continue
+
+        if tok_up in ('INSERT', 'MERGE'):
+            j = i + 1
+            if j < n and tokens[j].upper() == 'INTO':
+                j += 1
+            if j < n and not is_kw(tokens[j]) and tokens[j] not in ('(', ')'):
+                add_table_checked(tokens[j])
+                j = skip_alias(j + 1)
+            i = j if j > i else i + 1
+            continue
+
+        if tok_up == 'DELETE':
+            j = i + 1
+            if j < n and tokens[j].upper() == 'FROM':
+                j += 1
+            if j < n and not is_kw(tokens[j]) and tokens[j] not in ('(', ')'):
+                add_table_checked(tokens[j])
+                j = skip_alias(j + 1)
+            i = j if j > i else i + 1
+            continue
+
+        if tok_up in FROM_TRIGGERS:
+            j = i + 1
+            while j < n and tokens[j].upper() in JOIN_NOISE:
+                j += 1
+            while j < n:
+                t = tokens[j]
+                t_up = t.upper()
+                if t == '(':
+                    i = j
+                    break
+                if t in (')', ';'):
+                    i = j
+                    break
+                if t_up in _SQL_KW and t_up not in ('AS',):
+                    i = j
+                    break
+                add_table_checked(t)
+                j = skip_alias(j + 1)
+                if j < n and tokens[j] == ',':
+                    j += 1
+                    continue
+                i = j
+                break
+            else:
+                i = j
+            continue
+
+        if tok_up == 'USING':
+            j = i + 1
+            if j < n and tokens[j] == '(':
+                j = skip_subquery(j)
+                j = skip_alias(j)
+            elif j < n and not is_kw(tokens[j]):
+                add_table_checked(tokens[j])
+                j = skip_alias(j + 1)
+            i = j if j > i else i + 1
+            continue
+
+        i += 1
+
+    result = [(o, t) for (o, t) in seen.keys() if t not in cte_names]
+
+    # 递归提取字符串字面量中的 SQL（如 SELECT cb_run(4,'x','SELECT ... FROM tree_deep ...')：
+    # 存储过程/函数参数里嵌套的真实 SQL 会被 strip_literals 抹掉，这里找回）
+    if _depth < 2:
+        for m in re.finditer(r"'((?:[^']|'')*)'", sql_text, re.DOTALL):
+            literal = m.group(1).replace("''", "'")
+            # 内容像 SQL 才递归（以 DML 关键字开头）
+            if re.match(r"^\s*(select|insert|update|delete|merge|with)\b", literal, re.IGNORECASE):
+                for ot in _extract_tables_from_sql(literal, default_user, _depth + 1):
+                    if ot not in result:
+                        result.append(ot)
+
+    return result
+
+
+def _query_table_schemas(names, db_name, timeout=60, debug=False):
+    """在指定库中按 relname 批量解析表的实际 schema。
+
+    Args:
+        names: 表名列表（可含重复，会自动去重）
+        db_name: 数据库名（SQL 执行的库）
+        timeout: vsql 超时时间（秒）
+        debug: 是否打印调试日志
+
+    Returns:
+        dict: {relname: [(schema, relname), ...]}，同名表多 schema 时全部保留；
+              查询失败返回 {}
+    """
+    resolved = {}
+    names = sorted({t for t in names if t})
+    if not names:
+        return resolved
+    names_csv = ','.join(f"'{t}'" for t in names)
+    query = (
+        "SELECT n.nspname, c.relname"
+        " FROM pg_catalog.pg_class c"
+        " JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace"
+        " WHERE c.relkind IN ('r','p','v','m','S','f')"
+        "   AND n.nspname <> 'pg_catalog'"
+        "   AND n.nspname !~ '^pg_toast'"
+        "   AND n.nspname <> 'information_schema'"
+        f"  AND c.relname IN ({names_csv});"
+    )
+    if debug:
+        print(f"[DEBUG] 解析表 schema: vsql -d {db_name} -X -q -A -t -F '|', 表数={len(names)}", file=sys.stderr)
+        print(f"[DEBUG] 解析表 schema SQL:\n{query}", file=sys.stderr)
+    try:
+        process = subprocess.Popen(
+            ['vsql', '-d', db_name, '-X', '-q', '-A', '-t', '-F', '|', '-c', query],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            universal_newlines=True
+        )
+        stdout, stderr = process.communicate(timeout=timeout)
+    except Exception as e:
+        if debug:
+            print(f"[DEBUG] 批量解析表 schema 失败: {e}", file=sys.stderr)
+        return resolved
+    if process.returncode != 0:
+        if debug:
+            print(f"[DEBUG] 批量解析表 schema 失败: {stderr.strip()}", file=sys.stderr)
+        return resolved
+
+    for line in stdout.strip().split('\n'):
+        line = line.strip()
+        if not line or '|' not in line:
+            continue
+        schema, tname = line.split('|', 1)
+        schema, tname = schema.strip(), tname.strip()
+        if schema and tname:
+            resolved.setdefault(tname, []).append((schema, tname))
+    return resolved
+
+
+def _apply_schema_resolution(tables, resolved):
+    """按解析结果映射 (owner, table) -> (实际schema, table)。
+
+    解析不到的表保留原 (owner, table) 猜测；同名表多 schema 时全部保留。
+    解析到系统 schema 的结果直接丢弃（系统表不收集 tabstat/tabsize）。
+    """
+
+    def _is_system(schema, tname):
+        return (schema in ('pg_catalog', 'information_schema', 'sys', 'snapshot')
+                or schema.startswith('pg_toast') or schema.startswith('cstore')
+                or tname in _SYSTEM_TABLE_NAMES or tname in _SQL_FUNCS)
+
+    result = []
+    for owner, tname in tables:
+        actual = resolved.get(tname)
+        if actual:
+            # 解析到实际 schema, 用实际值替换猜测(同名表多 schema 时全部保留)
+            for pair in actual:
+                if not _is_system(*pair) and pair not in result:
+                    result.append(pair)
+        else:
+            # 解析不到, 保留原猜测
+            if not _is_system(owner, tname) and (owner, tname) not in result:
+                result.append((owner, tname))
+    return result
+
+
+def _resolve_table_schemas(tables, db_name, timeout=60, debug=False):
+    """在 SQL 执行的库中解析表的实际 schema（单组表版本）。
+
+    SQL 中未带 schema 限定的表默认按执行用户猜测归属，但实际表可能在其他
+    schema（如 public），直接用 (user, table) 查询统计会查不到数据。
+    这里先按 relname 在 pg_class 中解析实际 schema；解析不到时保留原
+    (owner, table) 猜测。
+
+    Args:
+        tables: [(owner, table_name), ...]
+        db_name: 数据库名（SQL 执行的库）
+        timeout: vsql 超时时间（秒）
+        debug: 是否打印调试日志
+
+    Returns:
+        list: [(实际schema, table_name), ...]
+    """
+    if not tables:
+        return tables
+    resolved = _query_table_schemas([t for _, t in tables], db_name, timeout=timeout, debug=debug)
+    result = _apply_schema_resolution(tables, resolved)
+    if debug:
+        print(f"[DEBUG] 表 schema 解析: {tables} -> {result}", file=sys.stderr)
+    return result
+
+
+def _build_sqlhc_tabstats_query(tables):
+    """构建 tabstat 查询 SQL（单个 uid 的表集合）。
+
+    SQL 与 vb_tool v2.0.8 run_sqlhc 的 tabstat 段保持一致（含视图定义回退查询）。
+
+    说明：Oracle 兼容性视图 dba_part_key_columns / dba_subpart_key_columns
+    已按视图定义等价改写为 pg_partition/pg_class/pg_attribute/pg_namespace
+    的原生写法（见下方 part_key_cols_sql / subpart_key_cols_sql），
+    不再依赖兼容视图是否存在。
+
+    Args:
+        tables: [(owner, table_name), ...]
+
+    Returns:
+        str: 完整查询文本（vsql 脚本，含 \\echo 分段标题）
+    """
+    tables_in_clause = ','.join(f"('{o}','{t}')" for o, t in tables)
+
+    # ---------------------------------------------------------------
+    # dba_part_key_columns 的原生等价改写（PG 9.2 语法，无 LATERAL，
+    # generate_subscripts 放在子查询 SELECT 列表中展开，与原视图定义一致）
+    #   语义：每张分区表（pg_class.parttype in ('p','s')）对应 pg_partition 中
+    #   parttype='r' 的根行，partkey(int2vector) 为分区键的 attnum 数组；
+    #   展开后关联 pg_attribute 取列名，按 column_position(=ordinal+1) 顺序拼接。
+    #   保留原视图的权限校验与系统 schema 排除；object_type='TABLE' 为常量，省略。
+    # ---------------------------------------------------------------
+    part_key_cols_sql = """
+        select lower(s.rootschema) schema_name, lower(s.rootrelname) as name,
+               lower(string_agg(a.attname::text, ',' order by s.ordinal)) cols
+        from (
+            select pd.parentid, pd.partkey,
+                   generate_subscripts(pd.partkey, 1) ordinal,
+                   ns.nspname rootschema, class.relname rootrelname,
+                   class.oid classoid, ns.oid nsoid
+            from pg_partition pd
+            join pg_class class on class.oid = pd.parentid
+            join pg_namespace ns on ns.oid = class.relnamespace
+            where class.parttype in ('p', 's')
+              and pd.parttype = 'r'
+        ) s
+        join pg_attribute a on a.attrelid = s.parentid and a.attnum = s.partkey[s.ordinal]
+        where has_column_privilege(s.classoid, a.attnum, 'SELECT, INSERT, UPDATE, REFERENCES')
+          and has_schema_privilege(s.nsoid, 'USAGE')
+          and s.rootschema not in ('pg_catalog', 'information_schema', 'pg_toast')
+        group by s.rootschema, s.rootrelname
+    """
+
+    # ---------------------------------------------------------------
+    # dba_subpart_key_columns 的原生等价改写（PG 9.2 语法，无 LATERAL）
+    #   语义：每张二级分区表（pg_class.parttype='s'）在 pg_partition 中
+    #   parentid=表oid 且 parttype='p' 的行（一级分区），其 partkey 即子分区键；
+    #   原视图用标量子查询取 LIMIT 1，这里保持完全相同的写法；
+    #   若该子查询为 NULL，generate_subscripts 不产生行，inner join 自然过滤。
+    # ---------------------------------------------------------------
+    subpart_key_cols_sql = """
+        select lower(s.rootschema) schema_name, lower(s.rootrelname) as name,
+               lower(string_agg(a.attname::text, ',' order by s.ordinal)) cols
+        from (
+            select ns.nspname rootschema, class.relname rootrelname,
+                   class.oid classoid,
+                   (select p.partkey from pg_partition p
+                    where p.parentid = class.oid and p.parttype = 'p'
+                    limit 1) subpartkey,
+                   generate_subscripts((select p.partkey from pg_partition p
+                    where p.parentid = class.oid and p.parttype = 'p'
+                    limit 1), 1) ordinal
+            from pg_class class
+            join pg_namespace ns on ns.oid = class.relnamespace
+            where class.parttype = 's'
+        ) s
+        join pg_attribute a on a.attrelid = s.classoid and a.attnum = s.subpartkey[s.ordinal]
+        group by s.rootschema, s.rootrelname
+    """
+
+    return f"""
+\\echo '================'
+\\echo 'table statistics'
+\\echo '================'
+SELECT n.nspname AS "owner"
+        ,c.relname AS "tab_name"
+        ,CASE c.relpersistence
+                WHEN 'p' THEN 'perm'
+                WHEN 't' THEN 'temp'
+                WHEN 'u' THEN 'unlog'
+                END AS "tabtype"
+        ,(select CASE p.partstrategy
+            WHEN 'r'::"char" THEN 'RANGE'::varchar(9)
+            WHEN 'i'::"char" THEN 'INTERVAL'::varchar(9)
+            WHEN 'l'::"char" THEN 'LIST'::varchar(9)
+            WHEN 'h'::"char" THEN 'HASH'::varchar(9)
+            WHEN 'd'::"char" THEN 'HASH'::varchar(9)
+            WHEN 'v'::"char" THEN 'VALUE'::varchar(9)
+            WHEN 's'::"char" THEN 'SYSTEM'::varchar(9)
+            WHEN 'n'::"char" THEN 'NONE'::varchar(9)
+         ELSE NULL end from pg_partition p where p.parentid=c.oid limit 1)
+         ||(CASE WHEN p2.cols is not null then '('||p2.cols||')' else '' end)
+         ||(case when (select CASE p1.partstrategy
+            WHEN 'r'::"char" THEN 'RANGE'::varchar(9)
+            WHEN 'i'::"char" THEN 'INTERVAL'::varchar(9)
+            WHEN 'l'::"char" THEN 'LIST'::varchar(9)
+            WHEN 'h'::"char" THEN 'HASH'::varchar(9)
+            WHEN 'd'::"char" THEN 'HASH'::varchar(9)
+            WHEN 'v'::"char" THEN 'VALUE'::varchar(9)
+            WHEN 's'::"char" THEN 'SYSTEM'::varchar(9)
+            WHEN 'n'::"char" THEN 'NONE'::varchar(9)
+         ELSE NULL end from pg_partition p,pg_partition p1 where p.parentid=c.oid and p1.parentid=p.oid limit 1) is not null
+         then '-'||(select CASE p1.partstrategy
+            WHEN 'r'::"char" THEN 'RANGE'::varchar(9)
+            WHEN 'i'::"char" THEN 'INTERVAL'::varchar(9)
+            WHEN 'l'::"char" THEN 'LIST'::varchar(9)
+            WHEN 'h'::"char" THEN 'HASH'::varchar(9)
+            WHEN 'd'::"char" THEN 'HASH'::varchar(9)
+            WHEN 'v'::"char" THEN 'VALUE'::varchar(9)
+            WHEN 's'::"char" THEN 'SYSTEM'::varchar(9)
+            WHEN 'n'::"char" THEN 'NONE'::varchar(9)
+         ELSE NULL end from pg_partition p,pg_partition p1 where p.parentid=c.oid and p1.parentid=p.oid limit 1)||'('||p1.cols||')'
+         else '' end) parttype
+        ,c.relpages
+        ,c.reltuples
+        ,c.relallvisible allvisible
+        ,pg_catalog.pg_size_pretty(pg_catalog.pg_table_size(c.oid)) AS "size"
+        ,replace(replace(replace(c.reloptions::text,'orientation','ori'),'compression','comp'),'fillfactor','fill') as options
+FROM pg_catalog.pg_class c
+LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+LEFT JOIN ({subpart_key_cols_sql}) p1 ON c.relname=p1.name and p1.schema_name=n.nspname
+LEFT JOIN ({part_key_cols_sql}) p2 ON c.relname=p2.name and p2.schema_name=n.nspname
+WHERE c.relkind IN ('r','p','v','m','S','f','')
+        AND n.nspname <> 'pg_catalog'
+        AND n.nspname !~ '^pg_toast'
+        AND n.nspname <> 'information_schema'
+        AND ((n.nspname, c.relname) IN ({tables_in_clause}) or (n.nspname, c.relname) IN (select table_schema,table_name from information_schema.view_table_usage where (view_schema,view_name) IN ({tables_in_clause})));
+
+\\echo '                           '
+select schemaname,relname,n_tup_ins,n_tup_upd,n_tup_del,n_tup_hot_upd,n_live_tup,n_dead_tup,
+       to_char(last_vacuum,'yyyy-mm-dd hh24:mi:ss') last_vacuum,
+       to_char(last_analyze,'yyyy-mm-dd hh24:mi:ss') last_analyze
+from pg_stat_all_tables
+where ((schemaname, relname) IN ({tables_in_clause}) or (schemaname, relname) IN (select table_schema,table_name from information_schema.view_table_usage where (view_schema,view_name) IN ({tables_in_clause})));
+
+\\echo '================'
+\\echo 'index statistics'
+\\echo '================'
+SELECT n.nspname AS "ind_owner"
+        ,c2.relname AS "tab_name"
+        ,c.relname AS "ind_name"
+        ,replace(am.amname||' '||decode(i.indisunique,'t','unique')||' '
+            ||CASE WHEN c.relkind = 'i' and pg_catalog.pg_get_indexdef(i.indexrelid, 0, true) ~ '\\)\\s*LOCAL' then 'local'
+                   WHEN c.relkind = 'I' then 'global'
+               ELSE NULL END,'  ',' ') ind_type
+        ,decode(i.indisusable,'t','usable','unusable') status
+        ,lower(REGEXP_REPLACE(TRIM(BOTH FROM SUBSTRING(pg_catalog.pg_get_indexdef(i.indexrelid, 0, true)
+            FROM 'USING\\s+\\w+\\s+\\(((?:[^()]+|\\([^()]*\\))*)\\)')),
+            '(,|^)\\s*([^,]+?)(?<!DESC)(?<!ASC)\\b\\s*(DESC|ASC)\\b','\\1\\2','gi')) col_list
+        ,c.relpages
+        ,c.reltuples
+        ,pg_catalog.pg_size_pretty(pg_catalog.pg_table_size(c.oid)) AS "Size"
+FROM pg_catalog.pg_class c
+LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+LEFT JOIN pg_catalog.pg_am am ON am.oid = c.relam
+LEFT JOIN pg_catalog.pg_index i ON i.indexrelid = c.oid
+LEFT JOIN pg_catalog.pg_class c2 ON i.indrelid = c2.oid
+LEFT JOIN pg_catalog.pg_namespace n1 ON n1.oid = c2.relnamespace
+WHERE c.relkind IN ('i','I','')
+        AND n.nspname <> 'pg_catalog'
+        AND n.nspname !~ '^pg_toast'
+        AND n.nspname <> 'information_schema'
+        AND ((n1.nspname, c2.relname) IN ({tables_in_clause}) or (n1.nspname, c2.relname) IN (select table_schema,table_name from information_schema.view_table_usage where (view_schema,view_name) IN ({tables_in_clause})))
+        order by 1,2;
+
+\\echo '                                  '
+select schemaname,relname tab_name,indexrelname index_name,idx_scan,idx_tup_read,idx_tup_fetch
+from pg_stat_all_indexes
+where ((schemaname, relname) IN ({tables_in_clause}) or (schemaname, relname) IN (select table_schema,table_name from information_schema.view_table_usage where (view_schema,view_name) IN ({tables_in_clause})))
+order by 1,2;
+
+\\echo '================='
+\\echo 'column statistics'
+\\echo '================='
+SELECT
+    relname AS tab_name,
+    t.attname AS col_name,
+    CASE
+        WHEN t.type LIKE '%without time zone%' THEN replace(t.type, ' without time zone', '')
+        WHEN t.type LIKE '%with time zone%' THEN replace(replace(t.type, ' with time zone', ''), 'timestamp', 'timestamptz')
+        ELSE t.type
+    END AS type,
+    decode(attstorage, 'p', 'plain', 'e', 'external', 'm', 'main', 'x', 'extended') AS attstorage,
+    decode(attnotnull, 'true', 'not null', round(null_frac, 5)) AS nullfreq,
+    avg_width,
+    round(n_distinct, 5) AS n_dist,
+    round(correlation, 5) AS corr,
+    t1.top3_freqs
+FROM (
+    SELECT
+        c.relname,
+        a.attname,
+        a.attnum,
+        pg_catalog.format_type(a.atttypid, a.atttypmod) AS type,
+        a.attnotnull,
+        b.null_frac,
+        b.avg_width,
+        b.n_distinct,
+        b.correlation,
+        a.attstorage,
+        d.nspname
+    FROM pg_catalog.pg_attribute a
+    JOIN pg_class c ON a.attrelid = c.oid
+    JOIN pg_catalog.pg_namespace d ON c.relnamespace = d.oid
+    LEFT JOIN pg_catalog.pg_stats b ON a.attname = b.attname
+        AND c.relname = b.tablename
+        AND b.schemaname = d.nspname
+    WHERE a.attrelid = c.oid
+        AND a.attnum > 0
+        AND NOT a.attisdropped
+        AND (d.nspname, c.relname) IN ({tables_in_clause})
+) t
+LEFT JOIN (
+    SELECT
+        tablename,
+        schemaname,
+        attname,
+        CONCAT(
+            COALESCE(split_part(val_string, '|', 1), '') ||
+            CASE WHEN split_part(val_string, '|', 1)  is not null  and split_part(val_string, '|', 1) is distinct from ''
+                 THEN '(' || COALESCE(split_part(freq_string, '|', 1)::NUMERIC::TEXT, '0') || ')'
+                 ELSE ''
+            END,
+            CASE WHEN split_part(val_string, '|', 2)  is not null  and split_part(val_string, '|', 2) is distinct from ''
+                 THEN CHR(10) || split_part(val_string, '|', 2) ||
+                      '(' || COALESCE(split_part(freq_string, '|', 2)::NUMERIC::TEXT, '0') || ')'
+                 ELSE ''
+            END,
+            CASE WHEN split_part(val_string, '|', 3)  is not null  and split_part(val_string, '|', 3) is distinct from ''
+                 THEN CHR(10) || split_part(val_string, '|', 3) ||
+                      '(' || COALESCE(split_part(freq_string, '|', 3)::NUMERIC::TEXT, '0') || ')'
+                 ELSE ''
+            END
+        ) AS top3_freqs
+    FROM (
+        SELECT
+            tablename,
+            schemaname,
+            attname,
+            array_to_string(most_common_vals, '|') AS val_string,
+            array_to_string(most_common_freqs, '|') AS freq_string
+        FROM pg_stats
+        WHERE ((schemaname, tablename) IN ({tables_in_clause}) or (schemaname, tablename) IN (select table_schema,table_name from information_schema.view_table_usage where (view_schema,view_name) IN ({tables_in_clause})))
+            AND most_common_freqs IS NOT NULL
+    ) t2
+) t1 ON t.attname = t1.attname
+    AND t.relname = t1.tablename
+    AND t.nspname = t1.schemaname
+ORDER BY t.nspname, t.relname, t.attnum;
+
+\\echo '===================='
+\\echo 'partition statistics'
+\\echo '===================='
+select n.nspname schema_name,c.relname tab_name,partitionno partno,p.relname part_name,
+       CASE p.partstrategy
+            WHEN 'r'::"char" THEN 'RANGE'::varchar(9)
+            WHEN 'i'::"char" THEN 'INTERVAL'::varchar(9)
+            WHEN 'l'::"char" THEN 'LIST'::varchar(9)
+            WHEN 'h'::"char" THEN 'HASH'::varchar(9)
+            WHEN 'd'::"char" THEN 'HASH'::varchar(9)
+            WHEN 'v'::"char" THEN 'VALUE'::varchar(9)
+            WHEN 's'::"char" THEN 'SYSTEM'::varchar(9)
+            WHEN 'n'::"char" THEN 'NONE'::varchar(9)
+         ELSE NULL end parttype,
+       cols partkey,p.relpages,p.reltuples,
+       pg_size_pretty(pg_partition_size(p.parentid,p.oid)) as size,boundaries
+from pg_partition p
+    ,pg_class c
+    ,({part_key_cols_sql}) p1
+    ,pg_namespace n
+where p.parttype in ('p')
+  and c.oid=p.parentid
+  and p.subpartitionno is null
+  and p1.name=c.relname
+  and n.oid=c.relnamespace
+  and p1.schema_name=n.nspname
+  and ((n.nspname, c.relname) IN ({tables_in_clause}) or (n.nspname, c.relname) IN (select table_schema,table_name from information_schema.view_table_usage where (view_schema,view_name) IN ({tables_in_clause})))
+order by 1,2,3;
+
+\\echo '======================='
+\\echo 'subpartition statistics'
+\\echo '======================='
+select c.relname tab_name,p.relname part_name,ps.relname subpart_name,
+       CASE p.partstrategy
+            WHEN 'r'::"char" THEN 'RANGE'::varchar(9)
+            WHEN 'i'::"char" THEN 'INTERVAL'::varchar(9)
+            WHEN 'l'::"char" THEN 'LIST'::varchar(9)
+            WHEN 'h'::"char" THEN 'HASH'::varchar(9)
+            WHEN 'd'::"char" THEN 'HASH'::varchar(9)
+            WHEN 'v'::"char" THEN 'VALUE'::varchar(9)
+            WHEN 's'::"char" THEN 'SYSTEM'::varchar(9)
+            WHEN 'n'::"char" THEN 'NONE'::varchar(9)
+         ELSE NULL end||'('||p1.cols||')-'
+       ||CASE ps.partstrategy
+            WHEN 'r'::"char" THEN 'RANGE'::varchar(9)
+            WHEN 'i'::"char" THEN 'INTERVAL'::varchar(9)
+            WHEN 'l'::"char" THEN 'LIST'::varchar(9)
+            WHEN 'h'::"char" THEN 'HASH'::varchar(9)
+            WHEN 'd'::"char" THEN 'HASH'::varchar(9)
+            WHEN 'v'::"char" THEN 'VALUE'::varchar(9)
+            WHEN 's'::"char" THEN 'SYSTEM'::varchar(9)
+            WHEN 'n'::"char" THEN 'NONE'::varchar(9)
+         ELSE NULL end||'('||p2.cols||')' part_type,
+       ps.relpages,ps.reltuples,
+       pg_size_pretty(pg_partition_size(ps.parentid,ps.oid)) as size,
+       p.boundaries partbound,ps.boundaries subpartbound
+from pg_partition p
+    ,pg_partition ps
+    ,pg_class c
+    ,pg_namespace n
+    ,({part_key_cols_sql}) p1
+    ,({subpart_key_cols_sql}) p2
+where (p.parttype='s' or (p.parttype='p' and p.subpartitionno is not null))
+  and c.oid=p.parentid
+  and c.relname=p1.name
+  and n.oid=c.relnamespace
+  and p1.schema_name=n.nspname
+  and ps.parentid=p.oid
+  and ((n.nspname, c.relname) IN ({tables_in_clause}) or (n.nspname, c.relname) IN (select table_schema,table_name from information_schema.view_table_usage where (view_schema,view_name) IN ({tables_in_clause})))
+order by 1,2,3;
+
+\\echo '==================='
+\\echo 'extended statistics'
+\\echo '==================='
+SELECT a.schemaname as owner
+        ,a.tablename tab_name
+        ,a.attname
+        ,null_frac
+        ,avg_width
+        ,n_distinct
+        ,n_dndistinct
+        ,top3_freqs
+FROM (
+        SELECT schemaname,tablename,attname,null_frac,avg_width,n_distinct,n_dndistinct
+        FROM pg_catalog.pg_ext_stats
+        WHERE (schemaname, tablename) IN ({tables_in_clause})
+        ) a
+LEFT JOIN (
+        SELECT tablename,schemaname,attname,
+               string_agg(top3_freq::TEXT,',' ORDER BY top3_freq DESC) top3_freqs
+        FROM (
+                SELECT tablename,schemaname,attname,
+                       round(UNNEST(most_common_freqs)::DECIMAL,4) top3_freq,
+                       row_number() OVER (PARTITION BY tablename,attname
+                           ORDER BY round(UNNEST(most_common_freqs)::DECIMAL,4) DESC) rn
+                FROM pg_catalog.pg_ext_stats
+                WHERE ((schemaname, tablename) IN ({tables_in_clause}) or (schemaname, tablename) IN (select table_schema,table_name from information_schema.view_table_usage where (view_schema,view_name) IN ({tables_in_clause})))
+                ) d
+        WHERE rn <= 3
+        GROUP BY attname,tablename,schemaname
+        ) b ON a.attname=b.attname and a.tablename=b.tablename and a.schemaname=b.schemaname;
+"""
+
+
+
+def query_sqlhc_tabstats(tables, db_name, timeout=120, debug=False):
+    """查询单个 uid 表集合的表统计信息（table + index + column + partition + subpartition + extended）。
+
+    SQL 取自 vb_tool v2.0.8 run_sqlhc 的 tabstat 段（含视图定义回退查询），
+    连接 SQL 实际执行的库查询，对齐格式输出（类似 t_1_1.stats.txt）。
+
+    Args:
+        tables: [(owner, table_name), ...]
+        db_name: 数据库名（SQL 执行的库）
+        timeout: vsql 超时时间（秒）
+        debug: 是否打印调试日志
+
+    Returns:
+        str: 格式化的文本结果（vsql 对齐格式）
+    """
+    if not tables:
+        if debug:
+            print(f"[DEBUG] sqlhc tabstats: 表列表为空, db={db_name}", file=sys.stderr)
+        return "No tables found."
+
+    if debug:
+        print(f"[DEBUG] sqlhc tabstats: db={db_name}, tables={tables}", file=sys.stderr)
+
+    query = _build_sqlhc_tabstats_query(tables)
+
+    if debug:
+        print(f"[DEBUG] sqlhc tabstats 执行命令: vsql -d {db_name} -X -P footer=off", file=sys.stderr)
+        print(f"[DEBUG] sqlhc tabstats 完整 SQL:\n{query}", file=sys.stderr)
+    try:
+        # 对齐格式输出（不加 -A -t，footer=off），与 vb_tool psql -d <db> -X -P footer=off 一致
+        process = subprocess.Popen(
+            ['vsql', '-d', db_name, '-X', '-P', 'footer=off'],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            universal_newlines=True
+        )
+        stdout, stderr = process.communicate(input=query, timeout=timeout)
+    except FileNotFoundError:
+        return "vsql not found, skip tabstat."
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.communicate()
+        return f"Query timeout after {timeout}s."
+    except Exception as e:
+        return f"Query error: {e}"
+
+    if debug and stderr.strip():
+        print(f"[DEBUG] sqlhc tabstats vsql stderr:\n{stderr.strip()}", file=sys.stderr)
+    if process.returncode != 0:
+        return f"Query failed: {stderr.strip()}"
+
+    result = stdout.rstrip()
+    if debug:
+        print(f"[DEBUG] sqlhc tabstats: db={db_name}, 返回长度={len(result)}", file=sys.stderr)
+    return result
+
+
+def _build_sqlhc_statement_stats_query(uid):
+    """构建单个 uid 的 sqlstat 查询 SQL。
+
+    SQL 取自 vb_tool v2.0.8 run_sqlhc 的 postgres 段（psql -d postgres）。
+
+    Args:
+        uid: unique_sql_id（int）
+
+    Returns:
+        str: 完整查询文本（vsql 脚本，含 \\echo 分段标题）
+    """
+    return f"""
+\\echo '======================'
+\\echo 'sqlstat from statement'
+\\echo '======================'
+\\echo '                          '
+SELECT user_name,n_calls,
+round(db_time/1e3/nullif(n_calls,0),1) avg_db_ms,
+round(execution_time/1e3/nullif(n_calls,0),1) avg_et_ms,
+round(cpu_time/1e3/nullif(n_calls,0),1) avg_cpu_ms,
+round(data_io_time/1e3/nullif(n_calls,0),1) avg_io_ms,
+round((parse_time+plan_time+rewrite_time)/1e3/nullif(n_calls,0),1) avg_plan_ms,
+round(pl_execution_time/1e3/nullif(n_calls,0),1) avg_plsql_ms,
+round(sort_time/1e3/nullif(n_calls,0),1) a_sort_ms,
+round(hash_time/1e3/nullif(n_calls,0),1) a_hash_ms,
+round(n_blocks_fetched/nullif(n_calls,0),1) avg_cr,
+round((n_blocks_fetched-n_blocks_hit)/nullif(n_calls,0),1) avg_pr,
+round((n_returned_rows+n_tuples_inserted+n_tuples_updated+n_tuples_deleted)/nullif(n_calls,0),1) avg_rows
+FROM dbe_perf.statement WHERE unique_sql_id={uid};
+"""
+
+
+def query_sqlhc_statement_stats(unique_id, timeout=120, debug=False):
+    """连接 postgres 库查询单个 uid 的 SQL 统计信息（sqlstat from statement）。
+
+    对齐格式输出。批量收集场景请用 batch_query_sqlhc_statement_stats。
+
+    Args:
+        unique_id: unique_query_id
+        timeout: vsql 超时时间（秒）
+        debug: 是否打印调试日志
+
+    Returns:
+        str: 格式化的文本结果（vsql 对齐格式）
+    """
+    try:
+        uid = int(str(unique_id).strip())
+    except (ValueError, TypeError):
+        return f"无效的 unique_query_id: {unique_id}"
+
+    query = _build_sqlhc_statement_stats_query(uid)
+
+    if debug:
+        print("[DEBUG] sqlhc statement stats 执行命令: vsql -d postgres -X -P footer=off", file=sys.stderr)
+        print(f"[DEBUG] sqlhc statement stats 完整 SQL:\n{query}", file=sys.stderr)
+    try:
+        # dbe_perf.statement 固定连接 postgres 库查询
+        process = subprocess.Popen(
+            ['vsql', '-d', 'postgres', '-X', '-P', 'footer=off'],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            universal_newlines=True
+        )
+        stdout, stderr = process.communicate(input=query, timeout=timeout)
+    except FileNotFoundError:
+        return "vsql not found, skip statement stats."
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.communicate()
+        return f"Query timeout after {timeout}s."
+    except Exception as e:
+        return f"Query error: {e}"
+
+    if debug and stderr.strip():
+        print(f"[DEBUG] sqlhc statement stats vsql stderr:\n{stderr.strip()}", file=sys.stderr)
+    if process.returncode != 0:
+        return f"Query failed: {stderr.strip()}"
+
+    result = stdout.rstrip()
+    if debug:
+        print(f"[DEBUG] sqlhc statement stats: uid={uid}, 返回长度={len(result)}", file=sys.stderr)
+    return result
+
+
+def query_sqlhc_opt_params(timeout=120, debug=False):
+    """连接 postgres 库查询优化器相关参数（opt params）与数据库版本。
+
+    SQL 取自 vb_tool v2.0.8 run_sqlhc 的 opt params 段。
+    与具体 SQL 无关，整个报告只需查询一次，结果展示在"汇总信息"栏目。
+
+    Args:
+        timeout: vsql 超时时间（秒）
+        debug: 是否打印调试日志
+
+    Returns:
+        dict: {
+            'version': 数据库版本+兼容性文本（含原始对齐输出，用于汇总信息展示）,
+            'params_text': opt params 完整文本（含版本头，用于下载）,
+            'error': 查询失败时的错误信息（成功时为 None）
+        }
+    """
+    # 版本查询: vsql 默认对齐输出,直接展示到汇总信息
+    version_query = "select vb_version(),(select distinct datcompatibility from pg_database);"
+    # 参数查询: 纯 SELECT 输出，下载为文本
+    params_query = """
+SELECT name,
+       decode(unit, '8kB', setting*8||'kB', setting||COALESCE(unit,' ')) setting,
+       context,
+       short_desc
+FROM pg_settings
+WHERE (
+    lower(short_desc) LIKE '%plan%'
+    OR lower(short_desc) LIKE '%rewrite%'
+    OR lower(short_desc) LIKE '%expr%'
+    OR lower(short_desc) LIKE '%from-list%'
+    OR name LIKE 'geqo%'
+    OR name LIKE '%cost%'
+    OR short_desc LIKE '%partition%'
+    OR short_desc LIKE '%elimination%'
+    OR name IN ('work_mem', 'shared_buffers')
+    OR category LIKE 'Query Tuning%'
+    OR short_desc LIKE '%targetlist%'
+)
+AND name NOT IN ('num_internal_lock_partitions', 'partition_lock_upgrade_timeout', 'log_max_size')
+ORDER BY CASE WHEN short_desc LIKE '%planner%' THEN 'planner' ELSE short_desc END;
+"""
+
+    def _run(q, tag):
+        if debug:
+            print(f"[DEBUG] sqlhc opt params({tag}) 执行命令: vsql -d postgres -X -P footer=off", file=sys.stderr)
+            print(f"[DEBUG] sqlhc opt params({tag}) 完整 SQL:\n{q}", file=sys.stderr)
+        try:
+            process = subprocess.Popen(
+                ['vsql', '-d', 'postgres', '-X', '-P', 'footer=off'],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                universal_newlines=True
+            )
+            out, err = process.communicate(input=q, timeout=timeout)
+        except FileNotFoundError:
+            return None, "vsql not found"
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.communicate()
+            return None, f"query timeout after {timeout}s"
+        except Exception as e:
+            return None, f"query error: {e}"
+        if debug and err.strip():
+            print(f"[DEBUG] sqlhc opt params({tag}) vsql stderr:\n{err.strip()}", file=sys.stderr)
+        if process.returncode != 0:
+            return None, f"query failed: {err.strip()}"
+        return out.rstrip(), None
+
+    version_text, ver_err = _run(version_query, 'version')
+    params_body, par_err = _run(params_query, 'params')
+    err = ver_err or par_err
+
+    header = ("==========================\n"
+              "        opt params        \n"
+              "==========================\n")
+    parts = []
+    if version_text:
+        parts.append(version_text)
+    if params_body:
+        parts.append(params_body)
+    params_text = header + "\n\n".join(parts) if parts else ""
+
+    if debug:
+        print(f"[DEBUG] sqlhc opt params: version长度={len(version_text or '')}, params长度={len(params_body or '')}, error={err}", file=sys.stderr)
+
+    return {
+        'version': version_text or '',
+        'params_text': params_text,
+        'error': err,
+    }
+
+
+def _build_sqlhc_tabsize_query(tables):
+    """构建单个 uid 表集合的 tabsize 查询 SQL。
+
+    SQL 取自 vb_tool v2.0.8 tabsize 段（分区表特殊处理：主表 + 所有分区）。
+
+    Args:
+        tables: [(owner, table_name), ...]
+
+    Returns:
+        str: 完整查询文本（vsql 脚本，含 \\echo 分段标题）
+    """
+    # 构建过滤条件
+    conditions = []
+    for owner, tname in tables:
+        conditions.append(f"(N.nspname='{owner}' AND C.relname='{tname}')")
+    table_condition = "AND (" + " OR ".join(conditions) + ")"
+
+    return f"""
+\\echo '================'
+\\echo 'table size'
+\\echo '================'
+SELECT dbname, schemaname, tablename,
+       pg_size_pretty(table_size) AS "table_size",
+       pg_size_pretty(indexes_size) AS "indexes_size",
+       pg_size_pretty(toast_size) AS "toast_size",
+       pg_size_pretty(toast_indexes_size) AS "toast_indexes_size",
+       pg_size_pretty(total_size) AS "total_size"
+FROM (
+    SELECT current_database() AS dbname,
+           N.nspname AS schemaname,
+           C.relname AS tablename,
+           CASE WHEN EXISTS(SELECT inhparent FROM pg_inherits WHERE C.oid = inhparent)
+                THEN (SELECT pg_table_size(C.oid) + sum(pg_table_size(t.partition_name::regclass))
+                      FROM (SELECT quote_ident(nc.nspname)||'.'||quote_ident(c.relname) AS partition_name
+                            FROM pg_inherits i
+                            JOIN pg_class c ON c.oid = i.inhrelid
+                            JOIN pg_class pc ON pc.oid = i.inhparent
+                            JOIN pg_namespace nc ON nc.oid = c.relnamespace
+                            WHERE i.inhparent = C.oid) t)
+                ELSE pg_table_size(C.oid)
+           END AS table_size,
+           pg_indexes_size(C.oid) AS indexes_size,
+           pg_table_size(C.reltoastrelid) AS toast_size,
+           pg_indexes_size(C.reltoastrelid) AS toast_indexes_size,
+           CASE WHEN EXISTS(SELECT inhparent FROM pg_inherits WHERE C.oid = inhparent)
+                THEN (SELECT pg_total_relation_size(C.oid) + sum(pg_total_relation_size(t.partition_name::regclass))
+                      FROM (SELECT quote_ident(nc.nspname)||'.'||quote_ident(c.relname) AS partition_name
+                            FROM pg_inherits i
+                            JOIN pg_class c ON c.oid = i.inhrelid
+                            JOIN pg_class pc ON pc.oid = i.inhparent
+                            JOIN pg_namespace nc ON nc.oid = c.relnamespace
+                            WHERE i.inhparent = C.oid) t)
+                ELSE pg_total_relation_size(C.oid)
+           END AS total_size
+    FROM pg_class C
+    LEFT JOIN pg_namespace N ON N.oid = C.relnamespace
+    WHERE NOT EXISTS(SELECT inhrelid FROM pg_inherits WHERE C.oid = inhrelid)
+      AND nspname NOT IN ('pg_catalog', 'information_schema', 'snapshot')
+      AND C.relkind IN ('r','l')
+      AND nspname !~ '^pg_toast'
+      {table_condition}
+    ORDER BY total_size DESC
+) tt
+ORDER BY tt.total_size DESC;
+"""
+
+
+def query_sqlhc_tabsize(tables, db_name, timeout=120, debug=False):
+    """查询单个 uid 表集合的表大小信息（table + indexes + toast）。
+
+    SQL 取自 vb_tool v2.0.8 tabsize 段（分区表特殊处理：主表 + 所有分区），
+    连接 SQL 实际执行的库查询，对齐格式输出。
+
+    Args:
+        tables: [(owner, table_name), ...]
+        db_name: 数据库名（SQL 执行的库）
+        timeout: vsql 超时时间（秒）
+        debug: 是否打印调试日志
+
+    Returns:
+        str: 格式化的文本结果（vsql 对齐格式）
+    """
+    if not tables:
+        if debug:
+            print(f"[DEBUG] sqlhc tabsize: 表列表为空, db={db_name}", file=sys.stderr)
+        return "No tables found."
+
+    if debug:
+        print(f"[DEBUG] sqlhc tabsize: db={db_name}, tables={tables}", file=sys.stderr)
+
+    query = _build_sqlhc_tabsize_query(tables)
+
+    if debug:
+        print(f"[DEBUG] sqlhc tabsize 执行命令: vsql -d {db_name} -X -P footer=off", file=sys.stderr)
+        print(f"[DEBUG] sqlhc tabsize 完整 SQL:\n{query}", file=sys.stderr)
+    try:
+        # 对齐格式输出（不加 -A -t，footer=off）
+        process = subprocess.Popen(
+            ['vsql', '-d', db_name, '-X', '-P', 'footer=off'],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            universal_newlines=True
+        )
+        stdout, stderr = process.communicate(input=query, timeout=timeout)
+    except FileNotFoundError:
+        return "vsql not found, skip tabsize."
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.communicate()
+        return f"Query timeout after {timeout}s."
+    except Exception as e:
+        return f"Query error: {e}"
+
+    if debug and stderr.strip():
+        print(f"[DEBUG] sqlhc tabsize vsql stderr:\n{stderr.strip()}", file=sys.stderr)
+    if process.returncode != 0:
+        return f"Query failed: {stderr.strip()}"
+
+    result = stdout.rstrip()
+    if debug:
+        print(f"[DEBUG] sqlhc tabsize: db={db_name}, 返回长度={len(result)}", file=sys.stderr)
+    return result
+
+
+def _run_vsql_batch(db_name, blocks, timeout=120, debug=False, label='sqlhc batch'):
+    """单次 vsql 会话批量执行多个查询块，按标记拆分输出。
+
+    每个 block 前自动加 \\echo '<marker>' 行，会话输出中该行作为分隔标记，
+    据此把输出拆分为各 block 的结果（单条语句出错不影响其他 block）。
+
+    Args:
+        db_name: 目标数据库名
+        blocks: [(marker, query_text), ...]，marker 仅允许 [A-Za-z0-9_:-]
+        timeout: 单块超时时间（秒），会话超时按块数放大
+        debug: 是否打印调试日志
+        label: 日志标签
+
+    Returns:
+        (dict, str): marker -> 该块输出文本；错误信息（无错为 None）
+    """
+    results, error = {}, None
+    if not blocks:
+        return results, error
+
+    script_parts = []
+    for marker, query in blocks:
+        script_parts.append(f"\\echo '{marker}'")
+        script_parts.append(query)
+    script = '\n'.join(script_parts) + '\n'
+    # 会话级超时: 每块原本独立享有 timeout, 批量时按块数放大
+    session_timeout = timeout * max(1, len(blocks))
+
+    if debug:
+        print(f"[DEBUG] {label}: vsql -d {db_name} -X -P footer=off, 共 {len(blocks)} 块, 会话超时 {session_timeout}s", file=sys.stderr)
+    try:
+        process = subprocess.Popen(
+            ['vsql', '-d', db_name, '-X', '-P', 'footer=off'],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            universal_newlines=True
+        )
+        stdout, stderr = process.communicate(input=script, timeout=session_timeout)
+    except FileNotFoundError:
+        return results, "vsql not found."
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.communicate()
+        return results, f"batch query timeout after {session_timeout}s."
+    except Exception as e:
+        return results, f"batch query error: {e}"
+
+    if debug and stderr.strip():
+        print(f"[DEBUG] {label} vsql stderr:\n{stderr.strip()}", file=sys.stderr)
+    if process.returncode != 0:
+        error = stderr.strip() or f"vsql exit code {process.returncode}"
+
+    # 按标记行拆分输出: parts = [前导, marker1, body1, marker2, body2, ...]
+    pattern = re.compile('^(' + '|'.join(re.escape(m) for m, _ in blocks) + r')\s*$', re.M)
+    parts = pattern.split(stdout)
+    for i in range(1, len(parts), 2):
+        marker = parts[i]
+        body = parts[i + 1] if i + 1 < len(parts) else ''
+        results[marker] = body.strip('\n')
+    if debug:
+        print(f"[DEBUG] {label}: 解析出 {len(results)}/{len(blocks)} 块", file=sys.stderr)
+    return results, error
+
+
+def batch_query_sqlhc_statement_stats(unique_ids, timeout=120, debug=False):
+    """批量查询所有 uid 的 sqlstat（postgres 库，一次 vsql 会话）。
+
+    Args:
+        unique_ids: unique_query_id 集合/列表
+        timeout: 单块超时时间（秒）
+        debug: 是否打印调试日志
+
+    Returns:
+        dict: uid字符串 -> 格式化文本；查询失败的 uid 不在结果中（由调用方回退单查）
+    """
+    blocks, uid_by_marker = [], {}
+    for uid in unique_ids:
+        uid_str = str(uid).strip()
+        try:
+            u = int(uid_str)
+        except (ValueError, TypeError):
+            continue
+        marker = f"__SQLHC_BLOCK__:{u}:sqlstat__"
+        blocks.append((marker, _build_sqlhc_statement_stats_query(u)))
+        uid_by_marker[marker] = uid_str
+
+    results, error = _run_vsql_batch(
+        'postgres', blocks, timeout=timeout, debug=debug, label='sqlhc statement stats batch')
+    if error:
+        print(f"WARNING: sqlhc statement stats 批量查询: {error}", file=sys.stderr)
+    return {uid_by_marker[m]: body for m, body in results.items()}
+
+
+def batch_query_sqlhc_table_info(uid_tables, db_name, timeout=120, debug=False, workers=6):
+    """批量查询多个 uid 的 tabstat + tabsize（同一库）。
+
+    优化:
+      1. 表集合去重 —— 表集合完全相同的 uid 只查一次，结果共享（输出一致）
+      2. 动态并行 —— 每个唯一表集合一个任务，工作线程做完即取下一个，
+         避免静态分片时慢表集合（大分区表 tabsize）拖尾
+
+    Args:
+        uid_tables: [(uid_str, resolved_tables), ...]，resolved_tables 为
+                    已解析 schema 的表列表 [(schema, table), ...]
+        db_name: 数据库名（SQL 执行的库）
+        timeout: 单块超时时间（秒）
+        debug: 是否打印调试日志
+        workers: 并行 vsql 会话数
+
+    Returns:
+        (dict, dict): uid -> tabstat文本, uid -> tabsize文本；
+                      查询失败的 uid 不在结果中（由调用方回退单查）
+    """
+    # 1. 按"表集合"去重: 相同集合的 uid 共享同一次查询
+    set_key_to_uids = {}  # 表集合key -> [uid_str, ...]
+    for uid_str, tables in uid_tables:
+        uid_str = str(uid_str).strip()
+        if not tables or not re.fullmatch(r'[A-Za-z0-9_-]+', uid_str):
+            continue
+        key = tuple(sorted(set(tables)))
+        set_key_to_uids.setdefault(key, []).append(uid_str)
+
+    unique_sets = list(set_key_to_uids.keys())
+    if not unique_sets:
+        return {}, {}
+
+    # 2. 动态并行: 一个表集合一个任务（单次 vsql 会话含 tabstat+tabsize 两块）
+    workers = max(1, min(workers, len(unique_sets)))
+
+    def _run_set(idx, key):
+        m_stat = f"__SQLHC_BLOCK__:s{idx}:tabstat__"
+        m_size = f"__SQLHC_BLOCK__:s{idx}:tabsize__"
+        blocks = [
+            (m_stat, _build_sqlhc_tabstats_query(list(key))),
+            (m_size, _build_sqlhc_tabsize_query(list(key))),
+        ]
+        _t = time.monotonic()
+        results, error = _run_vsql_batch(
+            db_name, blocks, timeout=timeout, debug=debug,
+            label=f'sqlhc table info({db_name})#{idx}')
+        if debug:
+            tables_show = ','.join(f'{o}.{t}' for o, t in key)
+            print(f"[DEBUG] sqlhc table info({db_name})#{idx}: {tables_show} 耗时 {time.monotonic() - _t:.1f}s", file=sys.stderr)
+        return idx, key, results, error
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        set_results = list(executor.map(
+            lambda arg: _run_set(*arg), list(enumerate(unique_sets))))
+
+    # 3. 汇总: marker -> 表集合key，再映射回所有共享 uid
+    key_to_tabstats, key_to_tabsize = {}, {}
+    for idx, key, results, error in set_results:
+        if error:
+            print(f"WARNING: sqlhc table info 批量查询({db_name})#{idx}: {error}", file=sys.stderr)
+        for marker, body in results.items():
+            if marker.endswith(':tabstat__'):
+                key_to_tabstats[key] = body
+            else:
+                key_to_tabsize[key] = body
+
+    tabstats_map, tabsize_map = {}, {}
+    for key, uids in set_key_to_uids.items():
+        if key in key_to_tabstats or key in key_to_tabsize:
+            for uid_str in uids:
+                if key in key_to_tabstats:
+                    tabstats_map[uid_str] = key_to_tabstats[key]
+                if key in key_to_tabsize:
+                    tabsize_map[uid_str] = key_to_tabsize[key]
+    if debug:
+        print(f"[DEBUG] sqlhc table info({db_name}): {len(uid_tables)} 个 uid 去重为 {len(unique_sets)} 个表集合, {workers} 并行会话(动态)", file=sys.stderr)
+    return tabstats_map, tabsize_map
+
+
+def _format_wait_events_for_sqlhc(records):
+    """把等待事件记录格式化为 SQLHC 文本块。
+
+    每个 SQL 输出最大/最小执行时间点两条记录，分三部分:
+      1. statement_history 记录  —— 指定业务列(_SH_COLS)一行输出 col=val | ...
+      2. 执行计划 query_plan      —— 单独列出
+      3. 等待事件 event_text      —— 单独列出 (statement_detail_decode 解码, 保留多行)
+
+    Args:
+        records: query_wait_events_for_sql_ids 返回的记录列表(含 pick 标签)
+
+    Returns:
+        str: 文本块；records 为空时返回空串
+    """
+    if not records:
+        return ''
+
+    def _oneline(v):
+        return str(v if v is not None else '').replace('\r', ' ').replace('\n', ' ')
+
+    max_recs = [r for r in records if str(r.get('pick', '')) == 'max']
+    min_recs = [r for r in records if str(r.get('pick', '')) == 'min']
+    # 兼容无 pick 标签的记录：按一条处理
+    if not max_recs and not min_recs:
+        max_recs = records[:1]
+
+    groups = []  # [(标签, record)]
+    if max_recs:
+        groups.append(('最大执行时间点', max_recs[0]))
+    if min_recs:
+        groups.append(('最小执行时间点', min_recs[0]))
+    if len(groups) == 1:
+        # 时间范围内仅 1 条记录（最大/最小为同一次执行）
+        groups = [('最大/最小执行时间点(同一次执行)', groups[0][1])]
+
+    lines = ["================", "等待事件信息", "================"]
+
+    # 1. statement_history 记录（指定业务列，一行输出）
+    for tag, rec in groups:
+        lines.append("")
+        lines.append(f"------ statement_history 记录 ({tag}) ------")
+        pairs = [f"{c}={_oneline(rec.get(c))}" for c in _SH_COLS if c in rec]
+        lines.append(' | '.join(pairs) if pairs else '(无记录)')
+
+    # 2. 执行计划 query_plan（单独列出，最大/最小各一个）
+    for tag, rec in groups:
+        lines.append("")
+        lines.append(f"------ 执行计划 query_plan ({tag}) ------")
+        plan = str(rec.get('query_plan', '') or '').strip('\r\n')
+        lines.append(plan if plan else '(无执行计划)')
+
+    # 3. 等待事件（单独列出，最大/最小各一个，保留原始多行）
+    for tag, rec in groups:
+        lines.append("")
+        lines.append(f"------ 等待事件 ({tag}) ------")
+        event_text = str(rec.get('event_text', '') or '').strip('\r\n')
+        lines.append(event_text if event_text else '(无等待事件明细)')
+
+    return '\n'.join(lines).rstrip()
+
+
+def generate_sqlhc_content(unique_id, stat, db_name, timeout=120, wait_events_records=None, debug=False,
+                           statement_stats_text=None, resolved_tables=None, tabstats_text=None, tabsize_text=None):
+    """生成单个 SQL 的 SQLHC 报告文本。
+
+    信息收集参考 vb_tool v2.0.8 run_sqlhc:
+      1. sqltext            —— 日志中提取（参数已填充）
+      2. 执行统计            —— 日志侧统计（次数/耗时/锁等待）
+      3. 等待事件信息        —— dbe_perf.statement_history（postgres 库）: 指定业务列一行输出，\n                              query_plan 和等待事件(statement_detail_decode)单独列出，最大/最小各一条
+      4. sqlstat            —— postgres 库: sqlstat from statement
+      5. tabstat            —— SQL 执行的库: table/index/column/partition/subpartition/extended statistics
+      6. tabsize            —— SQL 执行的库: table/indexes/toast/total size
+      7. opt params         —— postgres 库: 优化器相关参数(报告末尾)
+
+    Args:
+        unique_id: SQL 的 unique_query_id
+        stat: 该 SQL 的统计信息字典（含 database/user/qry_text/max_duration_query 等）
+        db_name: 数据库名（SQL 执行的库，用于表统计/表大小查询）
+        timeout: vsql 超时时间
+        wait_events_records: 该 SQL 的等待事件记录列表（query_wait_events_for_sql_ids 返回）
+        debug: 是否打印调试日志
+        statement_stats_text: 批量收集的 sqlstat 文本；None 时本函数内单查（回退）
+        resolved_tables: 批量解析 schema 后的表列表 [(schema, table), ...]；
+                         None 时本函数内提取并解析（回退）
+        tabstats_text: 批量收集的 tabstat 文本；None 时本函数内单查（回退）
+        tabsize_text: 批量收集的 tabsize 文本；None 时本函数内单查（回退）
+
+    Returns:
+        str: 完整的 SQLHC 文本报告
+    """
+    lines = []
+    lines.append("================")
+    lines.append(f"SQLHC Report for unique_query_id: {unique_id}")
+    lines.append("================")
+    lines.append("")
+
+    sql_text = stat.get('max_duration_query', '') or stat.get('qry_text', '')
+    user = (stat.get('user') or 'public').strip().lower()
+    if user == 'vastbase':
+        user = 'public'
+    if debug:
+        print(f"[DEBUG] sqlhc[{unique_id}]: db={db_name}, user={user}, wait_events={len(wait_events_records or [])}", file=sys.stderr)
+
+    # 1. SQL 文本（日志中获取，参数已填充）
+    lines.append("================")
+    lines.append(f"sqltext(database: {db_name}  user: {user})")
+    lines.append("================")
+    lines.append(sql_text)
+    lines.append("")
+
+    # 2. 执行统计（日志侧）
+    lines.append("================")
+    lines.append("Execution Statistics (from log)")
+    lines.append("================")
+    lines.append(f"Total calls : {stat.get('count', 0)}")
+    lines.append(f"Sum duration: {stat.get('sum_duration', 0):.3f}s")
+    lines.append(f"Avg duration: {stat.get('avg_duration', 0):.3f}s")
+    lines.append(f"Max duration: {stat.get('max_duration', 0):.3f}s")
+    lines.append(f"Min duration: {stat.get('min_duration', 0):.3f}s")
+    lines.append(f"Stddev      : {stat.get('duration_stddev', 0):.3f}s")
+    lines.append(f"Lock wait   : {stat.get('sum_lock_wait_time_ms', 0)/1000:.3f}s")
+    lines.append("")
+
+    # 3. 等待事件信息（postgres 库 dbe_perf.statement_history，
+    #    最大/最小执行时间点各 1 条: 业务列一行输出 + query_plan 单独列出
+    #    + statement_detail_decode 等待事件单独列出）
+    wait_events_block = _format_wait_events_for_sqlhc(wait_events_records)
+    if wait_events_block:
+        lines.append(wait_events_block)
+    else:
+        lines.append("================")
+        lines.append("等待事件信息")
+        lines.append("================")
+        lines.append("No wait events found in statement_history.")
+    lines.append("")
+
+    # 4. sqlstat（postgres 库: dbe_perf.statement 实时统计 / opt params）
+    if statement_stats_text is not None:
+        lines.append(statement_stats_text)
+    else:
+        lines.append(query_sqlhc_statement_stats(unique_id, timeout=timeout, debug=debug))
+    lines.append("")
+
+    # 5. tabstat（SQL 执行的库: 表/索引/列/分区/子分区/扩展统计，对齐格式）
+    if resolved_tables is not None:
+        # 批量模式: 表已在主流程提取并解析 schema
+        tables = resolved_tables
+    else:
+        tables = _extract_tables_from_sql(sql_text, default_user=user)
+        if debug:
+            print(f"[DEBUG] sqlhc[{unique_id}]: 提取表数量={len(tables)}, 默认 user={user}, tables={tables}", file=sys.stderr)
+        if tables:
+            # 在目标库解析表的实际 schema（未带 schema 的表可能不在执行用户同名 schema 下）
+            tables = _resolve_table_schemas(tables, db_name, timeout=timeout, debug=debug)
+    if tables:
+        lines.append(f"Tables found: {', '.join(f'{o}.{t}' for o, t in tables)}")
+        lines.append("")
+        if tabstats_text is not None:
+            lines.append(tabstats_text)
+        else:
+            lines.append(query_sqlhc_tabstats(tables, db_name, timeout, debug=debug))
+    else:
+        lines.append("No tables extracted from SQL, skip table statistics.")
+    lines.append("")
+
+    # 6. tabsize（SQL 执行的库: 表/索引/toast 大小）
+    if tables:
+        if tabsize_text is not None:
+            lines.append(tabsize_text)
+        else:
+            lines.append(query_sqlhc_tabsize(tables, db_name, timeout, debug=debug))
+    else:
+        lines.append("No tables extracted from SQL, skip table size.")
+    lines.append("")
+
+    # 7. opt params 已从 sqlhc 文本移除（与具体 SQL 无关），
+    #    改为在"汇总信息"栏目展示数据库版本并提供参数下载
+
+    return '\n'.join(lines)
+
+
 # Helper function to parse date strings
 @lru_cache(maxsize=16384)
 def parse_datetime(date_str):
@@ -11526,9 +13230,9 @@ parser = argparse.ArgumentParser(
   # 查看版本
   python analyze_log.py -v
   # 分析 SQL 语句 (DML+DDL)，不分析错误日志（默认）
-  python analyze_log.py -f /path/to/log.log --mode query
+  python analyze_log.py -f /path/to/log.log -m query
   # 仅分析错误日志 (ERROR/WARNING/FATAL/PANIC)，不分析 SQL
-  python analyze_log.py -f /path/to/log.log --mode error
+  python analyze_log.py -f /path/to/log.log -m error
   # 分析所有内容（SQL + 错误日志）
   python analyze_log.py -f /path/to/log.log -m all
   # 启用调试输出
@@ -11541,18 +13245,58 @@ parser.add_argument('-b', '--begin', type=str,
 parser.add_argument('-e', '--end', type=str, 
                     help="分析结束时间，格式: 'YYYY-MM-DD HH:MM:SS' 或 'YYYY-MM-DD'")
 parser.add_argument('-p', '--prefix', type=str, 
-                    help="日志行前缀格式，如 '%%m %%u %%d %%r %%p %%S [%%x]'。不指定则从数据库获取")
+                    help="日志行前缀格式，不指定则从数据库获取,如获取失败则使用默认格式: '%%m %%r %%d %%u [%%x] [%%p]'。")
 parser.add_argument('--diff', type=str, default='1d',
                     help="对比时间间隔，格式: 数字+m/h/d，例如 30m, 1h, 1d。默认为 1d")
-parser.add_argument('-d', '--days', type=int, default=2,
-                    help="分析最近N天的日志，默认为2天")
+parser.add_argument('-d', '--days', type=int, default=None,
+                    help="分析最近N天的日志（自动获取日志时默认2天；与 -f 同用时按行过滤超出 now-N天 的日志；显式指定 -b/-e 的时间边界优先）")
 parser.add_argument('-v', '--version', action='store_true', help="显示版本信息")
 parser.add_argument('-m', '--mode', type=str, default='query', choices=['all', 'query', 'error'],
                     help="分析范围: query(默认，分析 SQL 语句 DML+DDL，不分析错误日志), error(仅分析错误日志 ERROR/WARNING/FATAL/PANIC，不分析 SQL), all(分析所有内容：SQL + 错误日志)")
 parser.add_argument('-o', '--output', type=str, default=None,
                     help="输出HTML报告的文件路径，例如: report.html 或 /path/to/report.html。不指定则使用默认路径")
 parser.add_argument('--debug', action='store_true', help="启用调试输出")
+def _parse_detail_arg(value):
+    """解析 --detail 参数值。
+
+    合法取值:
+        top       -> ('top', 20)      # 默认 Top20
+        top:N     -> ('top', N)       # 自定义 Top N
+        all       -> ('all', None)    # 所有慢 SQL
+
+    Returns:
+        tuple: (mode, topn)
+    """
+    if value is None:
+        return ('top', 20)  # nargs='?' 时 const 兜底, 正常不会走到
+    v = str(value).strip().lower()
+    if v == 'top':
+        return ('top', 20)
+    if v == 'all':
+        return ('all', None)
+    if v.startswith('top:'):
+        n_str = v[4:].strip()
+        try:
+            n = int(n_str)
+            if n <= 0:
+                raise ValueError
+            return ('top', n)
+        except ValueError:
+            raise argparse.ArgumentTypeError(
+                f"--detail top:N 中 N 必须为正整数, 收到: '{n_str}'")
+    raise argparse.ArgumentTypeError(
+        f"无效的 --detail 取值 '{value}', 支持: top / top:N / all")
+
+
+parser.add_argument('--detail', type=_parse_detail_arg, nargs='?', const=('top', 20), default=None,
+                    metavar='top[:N]|all',
+                    help="查询慢SQL的等待事件信息: top(默认Top20 4个维度去重后的SQL ID), top:N(自定义TopN), all(查询所有慢SQL)。不指定则不查询")
+parser.add_argument('--detail-timeout', type=int, default=120,
+                    help="--detail 查询等待事件的单批次 vsql 超时时间(秒), 默认 120")
 args = parser.parse_args()
+# -e 只给日期时按“当天结束”理解（否则按 00:00 边界会把当天日志整文件排除）
+if args.end and re.match(r'^\d{4}-\d{2}-\d{2}$', args.end.strip()):
+    args.end = args.end.strip() + ' 23:59:59.999'
 file_names = args.file
 
 # 验证 --mode 参数
@@ -11570,7 +13314,7 @@ else:
 
 
 if args.version:
-    print("The analyze_log version is 16")
+    print("The version is 1.5")
     sys.exit(0)
 
 # 获取日志行前缀格式
@@ -11582,7 +13326,7 @@ if not log_prefix:
         print(f"从数据库获取到日志前缀格式: {log_prefix}")
     else:
         print("无法从数据库获取日志前缀格式，使用默认格式")
-        log_prefix = '%m %u %d %r %p %S [%x]'
+        log_prefix = '%m %r %d %u [%x] [%p]'
 else:
     print(f"使用指定的日志前缀格式: {log_prefix}")
 
@@ -12334,10 +14078,12 @@ def find_recent_log_files(log_directory, days=2, begin_time=None, end_time=None)
         return filtered_files
     else:
         # 没有指定时间范围，使用默认的天数限制
+        # 按文件创建时间/修改时间过滤（不使用文件名时间戳，文件名格式可能不准确）
         cutoff_date = datetime.now() - timedelta(days=days)
         recent_files = []
         for file_path, create_time, mod_time, filename_time in all_files:
-            if (filename_time if filename_time else create_time) >= cutoff_date:
+            # 文件在截止时间之后仍有活动（被修改），或在截止时间之后创建
+            if mod_time >= cutoff_date or create_time >= cutoff_date:
                 recent_files.append(file_path)
         # 按修改时间排序，最旧的在前（从远到近）
         recent_files.sort(key=lambda x: _file_mod_time_cache.get(f"{x}_mod", os.path.getmtime(x)), reverse=False)
@@ -12447,7 +14193,7 @@ if not args.file:
     if args.end:
         end_time = parse_datetime(args.end)
     
-    # 如果指定了时间范围，则使用指定的时间范围，否则使用默认的7天
+    # 如果指定了时间范围，则使用指定的时间范围，否则按最近N天（默认2天）筛选
     if begin_time or end_time:
         recent_files = find_recent_log_files(log_directory, days=args.days, begin_time=begin_time, end_time=end_time)
         if recent_files:
@@ -12459,7 +14205,7 @@ if not args.file:
             print("在指定时间范围内未找到日志文件")
             sys.exit(1)
     else:
-        recent_files = find_recent_log_files(log_directory, days=args.days)
+        recent_files = find_recent_log_files(log_directory, days=args.days if args.days is not None else 2)
         if recent_files:
             print(f"找到 {len(recent_files)} 个最近的日志文件:")
             for i, file_name in enumerate(recent_files, 1):
@@ -12481,61 +14227,252 @@ else:
 
 
 
+def _split_param_segments(params):
+    """按引号外的逗号拆分 parameters 字符串。
+
+    引号内的逗号（如 '$1 = "a,b"'）不作为分隔符；
+    括号内的逗号（如 type = numeric(10,2)）也不作为分隔符。
+    """
+    segments, buf = [], []
+    i, in_quote, depth = 0, False, 0
+    while i < len(params):
+        c = params[i]
+        if in_quote:
+            buf.append(c)
+            if c == "'":
+                if i + 1 < len(params) and params[i + 1] == "'":
+                    buf.append(params[i + 1])
+                    i += 2
+                    continue
+                in_quote = False
+            i += 1
+        else:
+            if c == "'":
+                in_quote = True
+                buf.append(c)
+                i += 1
+            elif c == '(':
+                depth += 1
+                buf.append(c)
+                i += 1
+            elif c == ')':
+                depth = max(0, depth - 1)
+                buf.append(c)
+                i += 1
+            elif c == ',' and depth == 0:
+                segments.append(''.join(buf))
+                buf = []
+                i += 1
+            else:
+                buf.append(c)
+                i += 1
+    segments.append(''.join(buf))
+    return segments
+
+
+def _parse_bind_params(params):
+    """解析 parameters 字符串为 (编号, 值, 类型) 列表。
+
+    支持两种格式:
+      - 新格式（带绑定变量类型）: $1 = '100' type = bigint, $2 = 'abc' type = text
+      - 旧格式: $1 = 'value1', $2 = 'value2'
+
+    type = xxx 是绑定变量的类型标注而非值的一部分；仅在引号外识别，
+    避免把值内部的 " type = " 字样误判为类型标注。
+
+    Returns:
+        list: [(param_num_str, value, type_or_None), ...] 按出现顺序
+    """
+    parsed = []
+    for seg in _split_param_segments(params):
+        seg = seg.strip()
+        if not seg:
+            continue
+        m = re.match(r'\$(\d+)\s*=\s*(.*)$', seg, re.DOTALL)
+        if not m:
+            continue
+        param_num, rest = m.group(1), m.group(2).strip()
+        ptype = None
+        if rest.startswith("'"):
+            # 带引号值: 提取到闭引号（'' 转义），尾部再识别 type = xxx
+            j = 1
+            while j < len(rest):
+                if rest[j] == "'":
+                    if j + 1 < len(rest) and rest[j + 1] == "'":
+                        j += 2
+                        continue
+                    break
+                j += 1
+            value = rest[:j + 1] if j < len(rest) else rest
+            tail = rest[len(value):].strip()
+            tm = re.match(r'type\s*=\s*(.+)$', tail, re.DOTALL)
+            if tm:
+                ptype = tm.group(1).strip()
+        else:
+            # 无引号值（NULL/数字/标识符）: 按空白分割出 type = xxx 后缀
+            tm = re.search(r'\s+type\s*=\s*(\S.*)$', rest, re.DOTALL)
+            if tm:
+                value = rest[:tm.start()].strip()
+                ptype = tm.group(1).strip()
+            else:
+                value = rest
+        parsed.append((param_num, value, ptype))
+    return parsed
+
+
+def _is_numeric_bind_type(ptype):
+    """判断绑定变量类型是否为数值类型（如 bigint、numeric(10,2)、double precision）。"""
+    if not ptype:
+        return False
+    base = ptype.strip().lower().split('(')[0].strip()
+    return base in _NUMERIC_TYPE_NAMES
+
+
+def _prepare_param_types(query_template, params_text):
+    """生成 prepare 声明用的参数类型序列（按占位符编号升序）。
+
+    类型来自 parameters 日志的 type = xxx 标注；缺失/无标注的参数回退为 text。
+    类型间用 '|' 连接（类型名不会含 '|'，且能容纳 numeric(10,2) 这类带逗号类型），
+    供前端 data-param-types 属性使用。
+
+    Returns:
+        str: 如 'varchar|bigint|text'；无占位符时返回 ''
+    """
+    params = sorted({int(n) for n in re.findall(r'\$(\d+)', query_template)})
+    if not params:
+        return ''
+    type_map = {}
+    for num, _val, ptype in _parse_bind_params(params_text or ''):
+        type_map[int(num)] = (ptype or 'text').strip()
+    return '|'.join(type_map.get(n, 'text') for n in params)
+
+
+def _substitute_placeholders(query_text, param_dict):
+    """单次扫描替换 SQL 中的 $n 占位符，跳过字面量与注释。
+
+    逐占位符正则替换的复杂度为 O(参数个数 × SQL 长度)，对超长 SQL 耗时不可控；
+    这里按字符单次扫描：仅在引号（'' / ""）和注释（-- / /* */）之外替换 $n，
+    复杂度降为 O(SQL 长度)，且 $1 天然不会误吃 $10。
+
+    替换值来自字典查找，不存在反斜杠/分组符被 re 解释的问题；
+    无对应参数的占位符保留原文，便于排查参数缺失。
+    """
+    out = []
+    i, n = 0, len(query_text)
+    while i < n:
+        c = query_text[i]
+        # -- 行注释
+        if c == '-' and i + 1 < n and query_text[i + 1] == '-':
+            j = query_text.find('\n', i)
+            j = n if j < 0 else j
+            out.append(query_text[i:j])
+            i = j
+        # /* */ 块注释（支持嵌套）
+        elif c == '/' and i + 1 < n and query_text[i + 1] == '*':
+            depth = 1
+            j = i + 2
+            while j < n and depth > 0:
+                if query_text[j] == '/' and j + 1 < n and query_text[j + 1] == '*':
+                    depth += 1
+                    j += 2
+                elif query_text[j] == '*' and j + 1 < n and query_text[j + 1] == '/':
+                    depth -= 1
+                    j += 2
+                else:
+                    j += 1
+            out.append(query_text[i:j])
+            i = j
+        # ' 单引号字面量（'' 转义）
+        elif c == "'":
+            j = i + 1
+            while j < n:
+                if query_text[j] == "'":
+                    if j + 1 < n and query_text[j + 1] == "'":
+                        j += 2
+                        continue
+                    j += 1
+                    break
+                j += 1
+            out.append(query_text[i:j])
+            i = j
+        # " 双引号标识符（"" 转义）
+        elif c == '"':
+            j = i + 1
+            while j < n:
+                if query_text[j] == '"':
+                    if j + 1 < n and query_text[j + 1] == '"':
+                        j += 2
+                        continue
+                    j += 1
+                    break
+                j += 1
+            out.append(query_text[i:j])
+            i = j
+        # $n 占位符：仅在此处替换
+        elif c == '$' and i + 1 < n and query_text[i + 1].isdigit():
+            j = i + 1
+            while j < n and query_text[j].isdigit():
+                j += 1
+            placeholder = query_text[i:j]
+            out.append(param_dict.get(placeholder, placeholder))
+            i = j
+        else:
+            out.append(c)
+            i += 1
+    return ''.join(out)
+
+
 def fill_sql_params(query_text, params):
     """
     填充SQL变量，将参数值替换到SQL语句中
-    
+
+    数值类型的绑定变量（type = bigint 等）替换时去掉引号；
+    parameters 原文以 -- 注释追加到 SQL 文本末尾，便于对照。
+
     Args:
         query_text (str): 原始SQL语句
         params (str): 参数字符串
-        
+
     Returns:
         tuple: (filled_query, param_values) - 填充变量后的SQL语句和参数值列表
     """
     if not params or params.strip() == '':
         return query_text, []
 
-    # 超长 SQL 跳过参数替换（但保留参数值解析）：参数填充是按 $n 占位符逐个正则替换，
-    # 复杂度随参数个数×SQL长度增长，对数万参数、数百万字符的 SQL 会产生分钟级耗时；
-    # 此类 SQL 在 HTML 中仅截断展示无需填充，但 param_values 仍需用于拼接 execute 语句。
-    skip_fill = len(query_text) > MAX_INLINE_SQL_LEN
+    # 所有 SQL（含超长）都执行占位符替换；超长带来的体积/卡顿风险由
+    # 展示层的 MAX_HTML_INLINE_SQL_LEN 截断与 Base64 压缩下载承担。
 
-    # 解析参数字符串，格式通常是: $1 = 'value1', $2 = 'value2', ...
-    param_dict = {}
-    param_list = []  # 按参数编号顺序存储参数值
-    # 使用预编译的正则表达式
-    matches = PARAM_PATTERN.findall(params)
-
-    for param_num, param_value in matches:
-        # 仅去除首尾空白，保留原始引号（如 'xxx' 或 "xxx"）
-        preserved_value = param_value.strip()
-        param_dict[f'${param_num}'] = preserved_value
+    # 解析参数字符串: $1 = 'value1' [type = xxx], $2 = 'value2', ...
+    param_dict = {}   # 占位符 -> 替换用值（数值类型已去引号）
+    param_list = []   # 按参数编号顺序存储原始参数值（保留引号，用于 execute 语句拼接）
+    for param_num, value, ptype in _parse_bind_params(params):
+        # 替换值: 数值类型且值是带引号纯数字时去引号（如 '100' -> 100）
+        subst = value
+        if (_is_numeric_bind_type(ptype) and len(value) >= 2
+                and value[0] == "'" and value[-1] == "'"
+                and _NUMERIC_LITERAL_RE.match(value[1:-1])):
+            subst = value[1:-1]
+        param_dict[f'${param_num}'] = subst
 
         # 确保param_list按参数编号顺序排列
         param_index = int(param_num) - 1
-        # 扩展列表以容纳新索引
         while len(param_list) <= param_index:
             param_list.append(None)
-        param_list[param_index] = preserved_value
+        param_list[param_index] = value
 
     # 过滤掉None值（如果没有按顺序提供所有参数）
     filtered_param_list = [param for param in param_list if param is not None]
 
-    # 超长 SQL 不执行占位符替换，直接返回原文 + 参数值列表
-    if skip_fill:
-        return query_text, filtered_param_list
+    # parameters 原文以 -- 注释追加到 SQL 文本，便于值与语句对照
+    param_lines = params.strip().splitlines()
+    param_comment = '-- parameters: ' + param_lines[0]
+    for line in param_lines[1:]:
+        param_comment += '\n-- ' + line
 
-    # 替换SQL中的参数占位符（避免 $1 误替换 $10 等情况）
-    filled_query = query_text
-    # 按参数编号长度/数值降序，先替换更长编号
-    for placeholder in sorted(param_dict.keys(), key=lambda k: int(k[1:]), reverse=True):
-        value = param_dict[placeholder]
-        # 精确匹配占位符，不匹配后续数字
-        pattern = re.compile(rf"\{placeholder}(?!\d)")
-        # 使用函数式替换以避免替换文本中的反斜杠/分组符被 re 解释
-        filled_query = pattern.sub(lambda m, v=value: v, filled_query)
+    # 单次扫描替换全部 $n 占位符，跳过字符串字面量/标识符与注释
+    filled_query = _substitute_placeholders(query_text, param_dict)
 
-    return filled_query, filtered_param_list
+    return filled_query.rstrip('\n') + '\n' + param_comment, filtered_param_list
 
 
 def normalize_sql_for_display(sql_text):
@@ -12582,6 +14519,33 @@ def process_single_file(file_name, args, total_elapsed_time=0):
     if not blocks:
         print("警告: 未在文件中找到符合格式的日志记录")
         return [], [], file_size_mb, [], [], []
+
+    # -d 按行过滤：丢弃超出 now - N天 的日志块（-f 指定文件时同样生效；
+    # 显式 -b 指定的开始时间优先于 -d；天数下界不会越过 -e 结束时间）
+    if args.days is not None:
+        v_days_cutoff = datetime.now() - timedelta(days=args.days)
+        v_eff_begin = parse_datetime(args.begin) if args.begin else None
+        if v_eff_begin is not None and v_eff_begin > v_days_cutoff:
+            # -b 比 -d 更晚（范围更窄），-d 裁剪交由 -b 逻辑处理
+            v_days_cutoff = None
+        else:
+            v_end_time = parse_datetime(args.end) if args.end else None
+            if v_end_time is not None and v_days_cutoff > v_end_time:
+                # -d 下界越过 -e 会导致范围为空，此时以 -b/-e 范围为准
+                v_days_cutoff = None
+        if v_days_cutoff is not None:
+            _di = 0
+            while _di + 1 < len(blocks):
+                _dts = parse_datetime(blocks[_di])
+                if _dts is not None and _dts >= v_days_cutoff:
+                    break
+                _di += 2
+            if _di >= len(blocks):
+                print(f"提示: 文件内所有日志均早于 {v_days_cutoff}（-d {args.days}），跳过该文件")
+                return [], [], file_size_mb, [], [], []
+            if _di > 0:
+                print(f"按 -d {args.days} 过滤: 丢弃前 {_di // 2} 条超出时间范围的日志块（早于 {v_days_cutoff}）")
+                blocks = blocks[_di:]
 
     # Parse start and end times（更健壮的跨文件范围过滤）
     start_n = 0
@@ -12761,7 +14725,35 @@ class ReportGenerator:
             if waiting_ts is None or ts < waiting_ts:
                 waiting_ts = ts
         return str(waiting_ts) if waiting_ts is not None else str(event.get('timestamp', ''))
-    
+
+    @staticmethod
+    def _collect_top10_uids(stats_dict, topn=10):
+        """收集 Top N 慢SQL 4个维度（总耗时/平均耗时/执行次数/最大耗时）去重后的 SQL ID。
+
+        Args:
+            stats_dict: 原始统计字典，key 为 unique_id
+            topn: 每个维度取的 Top 数量，默认 10
+
+        Returns:
+            set: 去重后的 unique_query_id 集合
+        """
+        uids = set()
+        stats_list_dml = [(uid, data) for uid, data in stats_dict.items() if data.get('sql_type') == 'dml']
+        stats_list_ddl = [(uid, data) for uid, data in stats_dict.items() if data.get('sql_type') == 'ddl']
+        for stats_list in [stats_list_dml, stats_list_ddl]:
+            if not stats_list:
+                continue
+            sorted_lists = [
+                sorted(stats_list, key=lambda x: x[1]['sum_duration'], reverse=True)[:topn],
+                sorted(stats_list, key=lambda x: x[1]['avg_duration'], reverse=True)[:topn],
+                sorted(stats_list, key=lambda x: x[1]['count'], reverse=True)[:topn],
+                sorted(stats_list, key=lambda x: x[1]['max_duration'], reverse=True)[:topn],
+            ]
+            for sorted_list in sorted_lists:
+                for uid, _ in sorted_list:
+                    uids.add(uid)
+        return uids
+
     # 耗时区间定义与对应颜色
     TIME_RANGES = [
         (60, float('inf'), '#8B0000', '60s以上'),      # 深红
@@ -12771,7 +14763,7 @@ class ReportGenerator:
         (1, 3, '#CCCCCC', '1-3s'),                    # 灰 (边框区分)
         (0, 1, '#4CAF50', '1s以下'),                  # 绿
     ]
-    
+
     @staticmethod
     def generate_sql_summary(stats_dict, all_total_list):
         """生成SQL汇总部分的HTML和图表数据。
@@ -12870,10 +14862,18 @@ class ReportGenerator:
             sorted_by_count = sorted(stats_list, key=lambda x: x[1]['count'], reverse=True)[:10]
             # 按最大耗时 (max_duration) 排序
             sorted_by_max = sorted(stats_list, key=lambda x: x[1]['max_duration'], reverse=True)[:10]
-            # 按变异系数 (CV = stddev / avg) 排序
+            # 按抖动系数 (CV = stddev / avg) 排序
             sorted_by_cv = sorted(stats_list, key=lambda x: x[1]['duration_stddev'] / x[1]['avg_duration'] if x[1]['avg_duration'] > 0 else 0, reverse=True)[:10]
             # 按标准差 (stddev) 排序
             sorted_by_stddev = sorted(stats_list, key=lambda x: x[1]['duration_stddev'], reverse=True)[:10]
+
+            # 该类型(DQL/DDL)所有慢SQL的总耗时,用于计算每条SQL的耗时占比
+            total_sum_duration = sum(x[1]['sum_duration'] for x in stats_list)
+
+            def _rank_text(idx, stat):
+                """排名列文本: 排名(该SQL总耗时占本类型慢SQL总耗时的比例)"""
+                pct = (stat['sum_duration'] / total_sum_duration * 100) if total_sum_duration > 0 else 0
+                return f"{idx}({pct:.0f}%)"
 
             html_parts = []
             
@@ -12892,7 +14892,7 @@ class ReportGenerator:
                 sql_text_display = f"{sql_text_short}..." if len(sql_text_full) > 50 else sql_text_short
                 html_parts.append(f"""
                         <tr>
-                            <td>{idx}</td>
+                            <td>{_rank_text(idx, stat)}</td>
                             <td><a href="#detail-{uid_safe}" class="uid-link" onclick="goToDetail('{uid_safe}', event)">{uid_escaped}</a></td>
                             <td class="sql-text-col" title="{html.escape(sql_text_full, quote=True)}">{sql_text_display}</td>
                             <td>{stat['sum_duration']:.3f}</td>
@@ -12903,7 +14903,7 @@ class ReportGenerator:
                     </table>
                 </div>
             """)
-            
+
             # 平均耗时 Top 10
             html_parts.append(f"""
                 <div class="top10-section" data-sql-type="{sql_type}">
@@ -12917,9 +14917,10 @@ class ReportGenerator:
                 sql_text_full = stat.get('qry_text', '')
                 sql_text_short = html.escape(sql_text_full[:50], quote=True) if sql_text_full else ''
                 sql_text_display = f"{sql_text_short}..." if len(sql_text_full) > 100 else sql_text_short
+
                 html_parts.append(f"""
                         <tr>
-                            <td>{idx}</td>
+                            <td>{_rank_text(idx, stat)}</td>
                             <td><a href="#detail-{uid_safe}" class="uid-link" onclick="goToDetail('{uid_safe}', event)">{uid_escaped}</a></td>
                             <td class="sql-text-col" title="{html.escape(sql_text_full, quote=True)}">{sql_text_display}</td>
                             <td>{stat['avg_duration']:.3f}</td>
@@ -12946,7 +14947,7 @@ class ReportGenerator:
                 sql_text_display = f"{sql_text_short}..." if len(sql_text_full) > 100 else sql_text_short
                 html_parts.append(f"""
                         <tr>
-                            <td>{idx}</td>
+                            <td>{_rank_text(idx, stat)}</td>
                             <td><a href="#detail-{uid_safe}" class="uid-link" onclick="goToDetail('{uid_safe}', event)">{uid_escaped}</a></td>
                             <td class="sql-text-col" title="{html.escape(sql_text_full, quote=True)}">{sql_text_display}</td>
                             <td>{stat['avg_duration']:.3f}</td>
@@ -12971,10 +14972,10 @@ class ReportGenerator:
                 sql_text_full = stat.get('qry_text', '')
                 sql_text_short = html.escape(sql_text_full[:50], quote=True) if sql_text_full else ''
                 sql_text_display = f"{sql_text_short}..." if len(sql_text_full) > 100 else sql_text_short
-                
+
                 html_parts.append(f"""
                         <tr>
-                            <td>{idx}</td>
+                            <td>{_rank_text(idx, stat)}</td>
                             <td><a href="#detail-{uid_safe}" class="uid-link" onclick="goToDetail('{uid_safe}', event)">{uid_escaped}</a></td>
                             <td class="sql-text-col" title="{html.escape(sql_text_full, quote=True)}">{sql_text_display}</td>
                             <td>{stat['max_duration']:.3f}</td>
@@ -12986,12 +14987,12 @@ class ReportGenerator:
                 </div>
             """)
 
-            # 变异系数 Top 10
+            # 抖动系数 Top 10
             html_parts.append(f"""
                 <div class="top10-section" data-sql-type="{sql_type}">
-                    <h4>按变异系数排序 (CV = stddev / avg)</h4>
+                    <h4>按抖动系数排序 (CV = stddev / avg)</h4>
                     <table class="top10-table">
-                        <tr><th>排名</th><th>Unique ID</th><th>SQL Text</th><th>变异系数</th><th>执行次数</th></tr>
+                        <tr><th>排名</th><th>Unique ID</th><th>SQL Text</th><th>抖动系数</th><th>执行次数</th></tr>
             """)
             for idx, (uid, stat) in enumerate(sorted_by_cv, 1):
                 uid_escaped = html.escape(str(uid).strip(), quote=True)
@@ -13002,7 +15003,7 @@ class ReportGenerator:
                 cv = stat['duration_stddev'] / stat['avg_duration'] if stat['avg_duration'] > 0 else 0
                 html_parts.append(f"""
                         <tr>
-                            <td>{idx}</td>
+                            <td>{_rank_text(idx, stat)}</td>
                             <td><a href="#detail-{uid_safe}" class="uid-link" onclick="goToDetail('{uid_safe}', event)">{uid_escaped}</a></td>
                             <td class="sql-text-col" title="{html.escape(sql_text_full, quote=True)}">{sql_text_display}</td>
                             <td>{cv:.3f}</td>
@@ -13030,7 +15031,7 @@ class ReportGenerator:
                 duration_range = stat['max_duration'] - stat['min_duration']
                 html_parts.append(f"""
                         <tr>
-                            <td>{idx}</td>
+                            <td>{_rank_text(idx, stat)}</td>
                             <td><a href="#detail-{uid_safe}" class="uid-link" onclick="goToDetail('{uid_safe}', event)">{uid_escaped}</a></td>
                             <td class="sql-text-col" title="{html.escape(sql_text_full, quote=True)}">{sql_text_display}</td>
                             <td>{stat['duration_stddev']:.3f}</td>
@@ -13110,9 +15111,22 @@ class ReportGenerator:
         return desc
 
     @staticmethod
-    def _build_overview_table(all_total_list, error_list, statement_filter='query'):
+    def _build_overview_table(all_total_list, error_list, statement_filter='query', opt_params_info=None):
         """构建汇总信息表格(展示在导航栏下方、饼图上方)。"""
+        opt_params_info = opt_params_info or {}
         rows = []
+        # ---- 数据库版本（--detail 时查询，含参数下载按钮） ----
+        db_version = (opt_params_info.get('version') or '').strip()
+        params_text = opt_params_info.get('params_text') or ''
+        if db_version:
+            version_html = '<pre class="ov-version">%s</pre>' % html.escape(db_version)
+            if params_text:
+                params_b64 = _gz_b64_text(params_text)
+                version_html += ('<button class="copy-btn" data-sql-b64="%s" data-filename="opt_params.txt.gz" '
+                                 'data-done-text="已下载" onclick="downloadEmbeddedText(this)">📥 下载参数配置(.gz)</button>' % params_b64)
+            rows.append(('数据库版本', version_html))
+        elif opt_params_info.get('error'):
+            rows.append(('数据库版本', '<span class="ov-na">未获取（%s）</span>' % html.escape(str(opt_params_info['error']))))
         # ---- 错误统计 ----
         if statement_filter == 'query':
             # query 模式未提取错误日志，显示 N/A 并给出提示
@@ -13142,10 +15156,11 @@ class ReportGenerator:
         ddl_list = [item for item in all_total_list if item.get('sql_type') == 'ddl']
 
         def _build_slow_sql_stats(items, label):
-            """构建单个类型的慢 SQL 统计行(空数据下返回完整 3 行结构,保持报告一致性)"""
+            """构建单个类型的慢 SQL 统计行(空数据下返回完整 4 行结构,保持报告一致性)"""
             if not items:
                 return [
                     (f'{label} 慢 SQL 触发次数', '0 次'),
+                    (f'{label} 慢 SQL 总耗时', '<span class="ov-na">无记录</span>'),
                     (f'{label} 慢 SQL 最多时段', '<span class="ov-na">无记录</span>'),
                     (f'{label} 最长慢语句', '<span class="ov-na">无记录</span>'),
                 ]
@@ -13153,7 +15168,9 @@ class ReportGenerator:
             total = len(items)
             durations = [item['duration'] for item in items]
             avg_dur = sum(durations) / total
+            total_dur = sum(durations)
             sub_rows.append((f'{label} 慢 SQL 触发次数', f'{total} 次，平均 {avg_dur:.2f} s'))
+            sub_rows.append((f'{label} 慢 SQL 总耗时', f'{total_dur:.2f} s'))
             slow_hours = defaultdict(int)
             for item in items:
                 t = item.get('time')
@@ -13174,7 +15191,12 @@ class ReportGenerator:
             return sub_rows
 
         # 无论是否有慢SQL记录,都展示完整栏目结构(总次数 + DQL 3 行 + DDL 3 行)
-        rows.append(('慢 SQL 触发总次数', f'{total_slow} 次'))
+        if total_slow:
+            _total_dur = sum(item['duration'] for item in all_total_list)
+            _avg_dur = _total_dur / total_slow
+            rows.append(('慢 SQL 触发', f'总次数: {total_slow} 次, 总耗时: {_total_dur:.2f} s, 平均耗时: {_avg_dur:.2f} s'))
+        else:
+            rows.append(('慢 SQL 触发', '总次数: 0 次, 总耗时: <span class="ov-na">无记录</span>, 平均耗时: <span class="ov-na">无记录</span>'))
         rows.extend(_build_slow_sql_stats(dml_list, 'DQL'))
         rows.extend(_build_slow_sql_stats(ddl_list, 'DDL'))
 
@@ -14638,7 +16660,7 @@ class ReportGenerator:
         return ''.join(html_parts), chart_data
     
     @staticmethod
-    def generate_full_html_report(sorted_data, summary_info, time_analysis_info, overall_min_time, overall_max_time, total_size_mb_all, total_elapsed_seconds_all, all_total_list, deadlock_list=None, lock_event_list=None, lock_chain_list=None, error_list=None, statement_filter='query', debug=False):
+    def generate_full_html_report(sorted_data, summary_info, time_analysis_info, overall_min_time, overall_max_time, total_size_mb_all, total_elapsed_seconds_all, all_total_list, deadlock_list=None, lock_event_list=None, lock_chain_list=None, error_list=None, statement_filter='query', sqlhc_data=None, opt_params_info=None, debug=False):
         """生成完整的HTML报告，包含导航栏和所有三个部分。
 
         超长 SQL 不落地外置文件，而是以 Base64 内嵌进 HTML，点击按钮时由前端
@@ -14648,6 +16670,8 @@ class ReportGenerator:
         lock_event_list = lock_event_list or []
         lock_chain_list = lock_chain_list or []
         error_list = error_list or []
+        sqlhc_data = sqlhc_data or {}
+        opt_params_info = opt_params_info or {}
 
         # ===== HTML 体积埋点统计(调试用,仅 debug=True 时输出) =====
         _debug = bool(debug)
@@ -14713,7 +16737,6 @@ class ReportGenerator:
         error_section_html = ReportGenerator.generate_error_section(error_list, statement_filter)
         _record_size('error_section', error_section_html)
         _record_size('input_error_list', f'count={len(error_list)}', is_html=False)
-        # 统计 error_list 内上下文 + full_log 字节总量
         try:
             _total_err_bytes = sum(
                 len((e.get('context_before') or '').encode('utf-8')) +
@@ -14745,7 +16768,7 @@ class ReportGenerator:
         """
 
         # 2. 汇总部分
-        overview_table_html = ReportGenerator._build_overview_table(all_total_list, error_list, statement_filter)
+        overview_table_html = ReportGenerator._build_overview_table(all_total_list, error_list, statement_filter, opt_params_info)
         _record_size('overview_table_html', overview_table_html)
         summary_section = f"""
         <section id="summary-section">
@@ -14757,7 +16780,11 @@ class ReportGenerator:
         _record_size('summary_info.html', summary_info.get('html', ''))
 
         # 锁/死锁详情分析部分(组合后体积)
-        _record_size('lock_section_html', lock_section_html if 'lock_section_html' in dir() else '')
+        try:
+            _lock_section = lock_section_html if 'lock_section_html' in dir() else ''
+            _record_size('lock_section_html', _lock_section)
+        except Exception:
+            pass
         
         # 4. 分时段分析部分（动态处理所有维度）
         time_analysis_html_parts = ['''<section id="time-analysis-section">
@@ -14781,16 +16808,24 @@ class ReportGenerator:
         # 按间隔分钟数排序
         sorted_dims.sort(key=lambda x: x[0])
         for _, key in sorted_dims:
-            _dim_html = time_analysis_info[key].get('html', '')
-            _record_size(f'time_analysis[{key}]', _dim_html)
-            time_analysis_html_parts.append(_dim_html)
+            time_analysis_html_parts.append(time_analysis_info[key]['html'])
         time_analysis_html_parts.append('</section>')
         time_analysis_section = ''.join(time_analysis_html_parts)
         _record_size('time_analysis_section(总)', time_analysis_section)
         _record_size('input_all_total_list', f'count={len(all_total_list)}', is_html=False)
+        # 同时按维度单独统计
+        for _key in time_analysis_info:
+            if _key.startswith('by_'):
+                _dim_html = time_analysis_info[_key].get('html', '')
+                _record_size(f'time_analysis[{_key}]', _dim_html)
         
         # 4. 详情部分
-        detail_html_parts = ['<section id="detail-section"><div style="display: flex; justify-content: space-between; align-items: center;"><h2>SQL详情列表</h2><a href="#top10-ranking" class="back-to-top" title="返回Top 10排名" onclick="collapseAllDetails()">↑ Top 10</a></div><table class="detail-table"><thead>']
+        detail_header = ('<section id="detail-section">'
+                         '<div style="display: flex; justify-content: space-between; align-items: center;">'
+                         '<h2>SQL详情列表</h2>'
+                         '<a href="#top10-ranking" class="back-to-top" title="返回Top 10排名" onclick="collapseAllDetails()">↑ Top 10</a>'
+                         '</div>')
+        detail_html_parts = [detail_header + '<table class="detail-table"><thead>']
         detail_html_parts.append("""
         <tr>
             <th>Unique ID<span class="col-divider"></span></th>
@@ -14829,8 +16864,9 @@ class ReportGenerator:
             # 生成详细执行语句HTML：超长 SQL 仅截断展示，完整内容以 Base64 内嵌进
             # data 属性，点击按钮时由前端解码并通过 Blob 触发 txt 下载；避免数百万字符
             # 的 SQL 被 normalize/escape/json.dumps 反复处理导致卡顿
-            # 注意:HTML 展示截断阈值独立于 fill_sql_params 用的 MAX_INLINE_SQL_LEN,
-            # 避免影响参数填充逻辑。此处用 MAX_HTML_INLINE_SQL_LEN(默认 1000)控制 HTML 体积。
+            # 注意:HTML 展示截断阈值 MAX_HTML_INLINE_SQL_LEN(默认 1000)仅控制页面展示体积,
+            # 不影响 fill_sql_params 的参数填充逻辑——所有 SQL 均已完成变量替换,
+            # 超长内容在替换后由 Base64 压缩下载承担。
             max_full = stat['max_duration_query']
             min_full = stat['min_duration_query']
             is_max_long = len(max_full) > MAX_HTML_INLINE_SQL_LEN
@@ -14858,11 +16894,18 @@ class ReportGenerator:
             max_execute_html = html.escape(max_execute_stmt, quote=True)
             min_execute_html = html.escape(min_execute_stmt, quote=True)
 
-            def _build_prepared_text(query_template, execute_stmt):
-                """预先生成完整 Prepared 语句文本（与前端 generatePreparedStatement 逻辑一致）。"""
-                params = sorted({int(n) for n in re.findall(r'\$(\d+)', query_template)})
-                types_str = ', '.join(['text'] * len(params))
-                return f"prepare bind_sql({types_str}) as {query_template.strip()};\n{execute_stmt}"
+            def _build_prepared_text(query_template, execute_stmt, params_text=''):
+                """预先生成完整 Prepared 语句文本（与前端 generatePreparedStatement 逻辑一致）。
+
+                参数类型优先取 parameters 日志的 type = xxx 标注，缺失时回退 text。
+                """
+                types_pipe = _prepare_param_types(query_template, params_text)
+                if types_pipe:
+                    decl = f"bind_sql({', '.join(types_pipe.split('|'))})"
+                else:
+                    # 无绑定变量时不带括号: prepare bind_sql as ...
+                    decl = 'bind_sql'
+                return f"prepare {decl} as {query_template.strip()};\n{execute_stmt}"
 
             # 列表 Query Text 列：截断展示(独立阈值控制 HTML 体积)
             qry_text_cell = html.escape(qry_text_full[:MAX_HTML_INLINE_SQL_LEN], quote=True)
@@ -14872,23 +16915,33 @@ class ReportGenerator:
             if is_max_long or is_qry_long:
                 # 超长：复制按钮→下载完整 SQL(gzip 压缩)；生成 Prepared→下载预先生成的完整 prepared 文本(gzip 压缩)
                 max_copy_btn = f"<button class='copy-btn' data-sql-b64=\"{max_b64}\" data-filename=\"sql_{unique_id_safe}_max.txt.gz\" onclick=\"downloadEmbeddedText(this)\">📥 下载完整SQL(.gz)</button>"
-                max_prepared_text = _build_prepared_text(qry_text_full, max_execute_stmt)
+                max_prepared_text = _build_prepared_text(qry_text_full, max_execute_stmt, stat.get('qry_params', ''))
                 max_prepared_btn = f"<button class='copy-btn' data-sql-b64=\"{_gz_b64(max_prepared_text)}\" data-filename=\"prepared_{unique_id_safe}_max.txt.gz\" onclick=\"downloadEmbeddedText(this)\">📥 下载 Prepared(.gz)</button>"
             else:
                 qry_text_html = html.escape(qry_text_full, quote=True)
                 max_query_copy = html.escape(json.dumps(max_full, ensure_ascii=False), quote=True)
                 max_copy_btn = f"<button class='copy-btn' data-copy-text=\"{max_query_copy}\" onclick=\"copyToClipboard(this)\">复制</button>"
-                max_prepared_btn = f"<button class='copy-btn' data-query-template=\"{qry_text_html}\" data-execute-stmt=\"{max_execute_html}\" onclick=\"generatePreparedStatement(this)\">生成 Prepared</button>"
+                max_param_types_html = html.escape(_prepare_param_types(qry_text_full, stat.get('qry_params', '')), quote=True)
+                max_prepared_btn = f"<button class='copy-btn' data-query-template=\"{qry_text_html}\" data-param-types=\"{max_param_types_html}\" data-execute-stmt=\"{max_execute_html}\" onclick=\"generatePreparedStatement(this)\">生成 Prepared</button>"
+
+            # sqlhc 下载按钮：有数据（--detail）才生成，无数据则隐藏
+            sqlhc_content = sqlhc_data.get(str(unique_id).strip(), '')
+            if sqlhc_content:
+                sqlhc_b64 = _gz_b64(sqlhc_content)
+                sqlhc_btn = f"<button class='sqlhc-btn' data-sql-b64=\"{sqlhc_b64}\" data-filename=\"sqlhc_{unique_id_safe}.txt.gz\" data-done-text=\"已下载\" data-done-class=\"done\" onclick=\"downloadEmbeddedText(this)\">SQLHC</button>"
+            else:
+                sqlhc_btn = ''
 
             if is_min_long or is_qry_long:
                 min_copy_btn = f"<button class='copy-btn' data-sql-b64=\"{min_b64}\" data-filename=\"sql_{unique_id_safe}_min.txt.gz\" onclick=\"downloadEmbeddedText(this)\">📥 下载完整SQL(.gz)</button>"
-                min_prepared_text = _build_prepared_text(qry_text_full, min_execute_stmt)
+                min_prepared_text = _build_prepared_text(qry_text_full, min_execute_stmt, stat.get('qry_params', ''))
                 min_prepared_btn = f"<button class='copy-btn' data-sql-b64=\"{_gz_b64(min_prepared_text)}\" data-filename=\"prepared_{unique_id_safe}_min.txt.gz\" onclick=\"downloadEmbeddedText(this)\">📥 下载 Prepared(.gz)</button>"
             else:
                 qry_text_html = html.escape(qry_text_full, quote=True)
                 min_query_copy = html.escape(json.dumps(min_full, ensure_ascii=False), quote=True)
                 min_copy_btn = f"<button class='copy-btn' data-copy-text=\"{min_query_copy}\" onclick=\"copyToClipboard(this)\">复制</button>"
-                min_prepared_btn = f"<button class='copy-btn' data-query-template=\"{qry_text_html}\" data-execute-stmt=\"{min_execute_html}\" onclick=\"generatePreparedStatement(this)\">生成 Prepared</button>"
+                min_param_types_html = html.escape(_prepare_param_types(qry_text_full, stat.get('qry_params', '')), quote=True)
+                min_prepared_btn = f"<button class='copy-btn' data-query-template=\"{qry_text_html}\" data-param-types=\"{min_param_types_html}\" data-execute-stmt=\"{min_execute_html}\" onclick=\"generatePreparedStatement(this)\">生成 Prepared</button>"
             
             # 格式化时间戳为字符串
             max_times_str = stat['max_times'].strftime('%Y-%m-%d %H:%M:%S.%f')[:-3] if hasattr(stat['max_times'], 'strftime') else str(stat['max_times'])
@@ -14990,9 +17043,14 @@ class ReportGenerator:
             
             # Duration(s) 列中的总锁耗时
             sum_lock_wait_sec = sum_lock_wait_time_ms / 1000.0
-            
+
+            # 等待事件信息仅合并进 SQLHC 文本，详情页不再单独展示，避免 SQL 详情过长
+            max_wait_events_html = ''
+            min_wait_events_html = ''
+
             if stat['count'] == 1 or stat['max_duration'] == stat['min_duration']:
                 detail_html = f"""
+                {sqlhc_btn}
                 <details>
                     <summary onclick="toggleSqlDetail(event, this)">点击详情</summary>
                     <div class='duration-info'>
@@ -15002,11 +17060,13 @@ class ReportGenerator:
                         <p><strong>执行时间点:</strong> {max_times_str}</p>
                         <pre>{html.escape(max_q_disp, quote=False)}</pre>
                         {max_lock_events_html}
+                        {max_wait_events_html}
                     </div>
                 </details>
                 """
             else:
                 detail_html = f"""
+                {sqlhc_btn}
                 <details>
                     <summary onclick="toggleSqlDetail(event, this)">点击详情</summary>
                     <div class='duration-info'>
@@ -15016,12 +17076,14 @@ class ReportGenerator:
                         <p><strong>执行时间点:</strong> {max_times_str}</p>
                         <pre>{html.escape(max_q_disp, quote=False)}</pre>
                         {max_lock_events_html}
+                        {max_wait_events_html}
                         <p><strong>最小执行时间语句 ({stat['min_duration']:.3f}s){min_lock_wait_str}:</strong>
                            <span class="detail-action-btns">{min_copy_btn} {min_prepared_btn}</span>
                         </p>
                         <p><strong>执行时间点:</strong> {min_times_str}</p>
                         <pre>{html.escape(min_q_disp, quote=False)}</pre>
                         {min_lock_events_html}
+                        {min_wait_events_html}
                     </div>
                 </details>
                 """
@@ -15073,7 +17135,6 @@ class ReportGenerator:
         detail_section = ''.join(detail_html_parts)
         _record_size('detail_section(慢SQL详情)', detail_section)
         _record_size('input_sorted_data', f'count={len(sorted_data)}', is_html=False)
-        # 额外统计 sorted_data 内 SQL 文本总字节(便于判断是否 SQL 本身就大)
         try:
             _total_sql_bytes = sum(
                 len((s[1].get('qry_text') or '').encode('utf-8')) +
@@ -15108,10 +17169,10 @@ class ReportGenerator:
                 chart_js_data['time_analysis'][key] = ensure_chart_data_structure(
                     time_analysis_info[key]['chart_data'] if time_analysis_info[key]['show'] else {}
                 )
-        _record_size('chart_js_data(summary+time_analysis)', json.dumps(chart_js_data, ensure_ascii=False, separators=(',', ':')))
-
+        
         # 将数据转换为安全的JSON字符串以嵌入JavaScript
         chart_js_data_json = json.dumps(chart_js_data, ensure_ascii=False, separators=(',', ':'))
+        _record_size('chart_js_data(summary+time_analysis)', chart_js_data_json)
     
         
         # 6. 组装完整HTML
@@ -15333,11 +17394,17 @@ class ReportGenerator:
                     text-overflow: ellipsis;
                     white-space: nowrap;
                 }}
-                .top10-table th:nth-child(1) {{ width: 5%; }}
+                .top10-table th:nth-child(1) {{ width: 7%; min-width: 72px; }}
                 .top10-table th:nth-child(2) {{ width: 18%; min-width: 120px; }}
-                .top10-table th:nth-child(3) {{ width: 50%; }}
+                .top10-table th:nth-child(3) {{ width: 48%; }}
                 .top10-table th:nth-child(4) {{ width: 15%; }}
                 .top10-table th:nth-child(5) {{ width: 12%; }}
+                .top10-table td:nth-child(1) {{
+                    white-space: nowrap;
+                    overflow: visible;
+                    text-overflow: clip;
+                    word-break: keep-all;
+                }}
                 .top10-table td:nth-child(2) {{
                     white-space: nowrap;
                     overflow: visible;
@@ -15977,6 +18044,12 @@ class ReportGenerator:
                 .overview-table .ov-warn {{ color: #e67e22; font-weight: 700; }}
                 .overview-table .ov-sql {{ font-family: Consolas, monospace; font-size: 12px; color: #555; }}
                 .overview-table .ov-na {{ color: #95a5a6; font-style: italic; }}
+                .overview-table .ov-version {{
+                    margin: 0 0 8px 0; padding: 8px 10px; background: #fff;
+                    border: 1px solid #d6e4f0; border-radius: 5px;
+                    font-family: Consolas, monospace; font-size: 12.5px;
+                    max-height: none; white-space: pre-wrap; word-break: break-word;
+                }}
 
                 /* 错误日志分析栏目 */
                 .err-lv {{ font-weight: 700; padding: 2px 8px; border-radius: 4px; font-size: 13px; color: #fff; }}
@@ -16107,6 +18180,34 @@ class ReportGenerator:
                 .uid-link:hover {{
                     text-decoration: underline;
                     color: #0056b3;
+                }}
+
+                /* SQLHC 下载按钮: 与"点击详情"(summary)保持一致的大小形状
+                   button 默认使用浏览器内置较小字号,需显式继承父级字号/字体才与 summary 一致 */
+                .sqlhc-btn {{
+                    cursor: pointer;
+                    font-weight: bold;
+                    color: white;
+                    background: #007bff;
+                    padding: 8px 15px;
+                    border-radius: 5px;
+                    display: inline-block;
+                    transition: all 0.3s;
+                    border: none;
+                    outline: none;
+                    font-size: inherit;
+                    font-family: inherit;
+                    margin: 0 0 6px 0;
+                }}
+                .sqlhc-btn:hover {{
+                    background: #0056b3;
+                    transform: translateY(-1px);
+                    box-shadow: 0 3px 6px rgba(0,0,0,0.15);
+                }}
+                /* 下载完成后的渐变反馈 */
+                .sqlhc-btn.done {{
+                    background: linear-gradient(135deg, #28a745, #20c997);
+                    transform: scale(0.98);
                 }}
                 
                 /* Back to top 链接样式 */
@@ -16330,15 +18431,17 @@ class ReportGenerator:
                     const b64 = button.getAttribute('data-sql-b64') || '';
                     const filename = button.getAttribute('data-filename') || 'download.txt.gz';
                     if (!b64) {{ alert('无可下载内容'); return; }}
-                    // 保存原始文案,下载成功后短暂显示"已下载"并加 .copied 类(复用复制按钮的视觉反馈)
+                    // 保存原始文案,下载成功后短暂显示完成文案并加完成类(视觉反馈)
+                    // data-done-text / data-done-class 可覆盖默认"已下载"文案与 .copied 类
                     const originalText = button.textContent;
-                    const copiedClass = 'copied';
+                    const copiedClass = button.getAttribute('data-done-class') || 'copied';
+                    const doneText = button.getAttribute('data-done-text') || '已下载';
                     const reset = () => {{
                         button.textContent = originalText;
                         button.classList.remove(copiedClass);
                     }};
                     const markDownloaded = () => {{
-                        button.textContent = '已下载';
+                        button.textContent = doneText;
                         button.classList.add(copiedClass);
                         setTimeout(reset, 1500);
                     }};
@@ -16370,11 +18473,52 @@ class ReportGenerator:
                     }}
                 }}
 
+                // 复制 Base64 编码的文本（用于执行计划等含换行的内容）
+                function copyBase64Text(button) {{
+                    const b64 = button.getAttribute('data-b64-text') || '';
+                    if (!b64) {{ alert('无可复制内容'); return; }}
+                    const originalText = button.textContent;
+                    const markCopied = () => {{
+                        button.textContent = '已复制';
+                        setTimeout(() => {{ button.textContent = originalText; }}, 600);
+                    }};
+                    try {{
+                        const binStr = atob(b64);
+                        const len = binStr.length;
+                        const bytes = new Uint8Array(len);
+                        for (let i = 0; i < len; i++) {{ bytes[i] = binStr.charCodeAt(i); }}
+                        const text = new TextDecoder('utf-8').decode(bytes);
+                        if (navigator.clipboard && window.isSecureContext) {{
+                            navigator.clipboard.writeText(text).then(markCopied, (err) => {{
+                                console.error('无法复制文本: ', err);
+                            }});
+                        }} else {{
+                            const textArea = document.createElement("textarea");
+                            textArea.value = text;
+                            textArea.style.position = "fixed";
+                            textArea.style.left = "-999999px";
+                            textArea.style.top = "-999999px";
+                            document.body.appendChild(textArea);
+                            textArea.focus();
+                            textArea.select();
+                            try {{ document.execCommand('copy'); markCopied(); }}
+                        catch (err) {{ console.error('无法复制文本: ', err); }}
+                        document.body.removeChild(textArea);
+                        }}
+                    }} catch (err) {{
+                        console.error('复制失败: ', err);
+                        alert('复制失败: ' + err);
+                    }}
+                }}
+
                 // 生成Prepared语句
                 function generatePreparedStatement(button) {{
                     const queryTemplate = button.getAttribute('data-query-template');
                     const executeStmt = button.getAttribute('data-execute-stmt');
-                    
+                    // 参数类型序列(按占位符编号升序, '|'分隔), 来自日志 type 标注; 旧格式无此属性
+                    const paramTypesAttr = button.getAttribute('data-param-types') || '';
+                    const paramTypeList = paramTypesAttr ? paramTypesAttr.split('|') : [];
+
                     // 提取参数占位符
                     const paramPattern = /\\$([0-9]+)/g;
                     const matches = [];
@@ -16382,14 +18526,19 @@ class ReportGenerator:
                     while ((match = paramPattern.exec(queryTemplate)) !== null) {{
                         matches.push(parseInt(match[1]));
                     }}
-                    
-                    // 生成参数类型声明（简化处理，均为text类型）
-                    const paramTypes = Array(matches.length).fill('text');
-                    const paramTypesStr = paramTypes.join(', ');
-                    
-                    // 生成prepare语句
+
+                    // 生成prepare语句: 无占位符时不带括号(prepare bind_sql as ...);
+                    // 有占位符时按编号升序声明类型, 类型取日志 type 标注, 缺失回退 text
                     const preparedName = 'bind_sql';
-                    const prepareStmt = `prepare ${{preparedName}}(${{paramTypesStr}}) as ${{queryTemplate.trim()}};`;
+                    let prepareStmt;
+                    if (matches.length === 0) {{
+                        prepareStmt = `prepare ${{preparedName}} as ${{queryTemplate.trim()}};`;
+                    }} else {{
+                        const uniqNums = Array.from(new Set(matches)).sort((a, b) => a - b);
+                        const typeOf = n => (paramTypeList[n - 1] || 'text');
+                        const paramTypesStr = uniqNums.map(typeOf).join(', ');
+                        prepareStmt = `prepare ${{preparedName}}(${{paramTypesStr}}) as ${{queryTemplate.trim()}};`;
+                    }}
                     
                     // 组合完整语句
                     const fullStmt = prepareStmt + '\\n' + executeStmt;
@@ -16397,7 +18546,7 @@ class ReportGenerator:
                     // 复制到剪贴板
                     if (navigator.clipboard && window.isSecureContext) {{
                         navigator.clipboard.writeText(fullStmt).then(() => {{
-                            alert('Prepared语句已复制到剪贴板!\\n 默认全部使用的text类型，注意语句中的实际数据类型');
+                                alert('Prepared语句已复制到剪贴板!\\n 参数类型取自日志 type 标注，缺失时回退为text');
                         }}, (err) => {{
                             console.error('无法复制文本: ', err);
                         }});
@@ -16412,7 +18561,7 @@ class ReportGenerator:
                         textArea.select();
                         try {{
                             document.execCommand('copy');
-                            alert('Prepared语句已复制到剪贴板!\\n 默认全部使用的text类型，注意语句中的实际数据类型');
+                            alert('Prepared语句已复制到剪贴板!\\n 参数类型取自日志 type 标注，缺失时回退为text');
                         }} catch (err) {{
                             console.error('无法复制文本: ', err);
                         }}
@@ -17511,7 +19660,7 @@ class ReportGenerator:
                     const targetElement = document.getElementById(anchorId);
                     if (!targetElement) {{
                         console.error('[jumpToLockDetail] ✗ 未找到锚点元素: #' + anchorId);
-                        console.warn('[jumpToLockDetail] 可能原因:');
+                        console.warn('[jumpToLockDetail] 可能原因:')
                         console.warn('[jumpToLockDetail]   1) Top10 锁事件栏目未渲染该事件(可能被 Top50 限制截断)');
                         console.warn('[jumpToLockDetail]   2) 锚点 id 不匹配(慢SQL 详情与 Top10 表生成的 id 不一致)');
                         console.warn('[jumpToLockDetail]   3) 锁事件栏目在隐藏的 tab/折叠面板中');
@@ -17997,7 +20146,6 @@ class ReportGenerator:
             print(f"[HTML 体积统计] generate_full_html_report 耗时: {_elapsed:.2f}s")
             print(f"[HTML 体积统计] 最终 HTML 字符数: {len(full_html):,}  字节(UTF-8): {len(full_html.encode('utf-8')):,}  ({len(full_html.encode('utf-8'))/1024/1024:.2f} MB)")
             print("-" * 80)
-            # 按字节降序输出
             _sorted_stats = sorted(_html_size_stats.items(), key=lambda x: x[1].get('bytes', 0), reverse=True)
             print(f"{'栏目':<50} {'字符数':>15} {'字节(MB)':>12} {'<tr行数':>10}")
             print("-" * 80)
@@ -19238,6 +21386,124 @@ if __name__ == "__main__":
         time_analysis_info = ReportGenerator.generate_time_analysis(all_total_list, overall_min_time, overall_max_time, diff_interval, args.diff)
         print(f"[进度] 时间维度分析完成, 耗时 {_main_timer.time() - _t0:.1f}s", file=sys.stderr)
 
+        # --detail：查询慢SQL的等待事件信息（仅查询分析范围内最大/最小执行时间点）
+        wait_events_data = {}
+        wait_events_warning = None
+        if args.detail:
+            _t0 = _main_timer.time()
+            detail_mode, detail_topn = args.detail
+            if detail_mode == 'top':
+                uids_to_query = ReportGenerator._collect_top10_uids(stats, topn=detail_topn)
+                print(f"[进度] --detail top:{detail_topn}: 需查询 {len(uids_to_query)} 个去重后的 Top{detail_topn} SQL ID 的等待事件", file=sys.stderr)
+            else:  # 'all'
+                uids_to_query = set(stats.keys())
+                print(f"[进度] --detail all: 需查询 {len(uids_to_query)} 个慢SQL ID 的等待事件", file=sys.stderr)
+            try:
+                wait_events_data, wait_events_warning = query_wait_events_for_sql_ids(
+                    uids_to_query, overall_min_time, overall_max_time,
+                    timeout=args.detail_timeout, debug=args.debug)
+            except Exception as e:
+                wait_events_data = {}
+                wait_events_warning = f"等待事件反查失败: {e}"
+                print(f"WARNING: {wait_events_warning}", file=sys.stderr)
+            print(f"[进度] 等待事件查询完成, 耗时 {_main_timer.time() - _t0:.1f}s", file=sys.stderr)
+
+        # 数据库版本/优化器参数（opt params）始终查询，展示到汇总信息，不受 --detail 控制
+        opt_params_info = {'version': '', 'params_text': '', 'error': None}
+        _t0 = _main_timer.time()
+        print("[进度] 查询数据库版本与优化器参数 (opt params)...", file=sys.stderr)
+        opt_params_info = query_sqlhc_opt_params(timeout=args.detail_timeout, debug=args.debug)
+        if opt_params_info.get('error'):
+            print(f"WARNING: opt params 查询失败: {opt_params_info['error']}", file=sys.stderr)
+        print(f"[进度] opt params 查询完成, 耗时 {_main_timer.time() - _t0:.1f}s", file=sys.stderr)
+
+        # --detail：收集 sqlhc 信息（sqlstat + tabstat + tabsize，SQL 取自 vb_tool v2.0.8）
+        sqlhc_data = {}
+        if args.detail:
+            _t0 = _main_timer.time()
+            print(f"[进度] 开始收集 sqlhc 信息 (共 {len(uids_to_query)} 个 SQL ID, 批量模式)...", file=sys.stderr)
+            try:
+                # 批量收集：减少 vsql 进程数，N 个 SQL 原本最多 4N 次 vsql →
+                # 1 次 postgres(sqlstat) + 每个库 1 次 schema 解析 + 每个库 1 次(tabstat+tabsize)
+                # - sqlstat 连 postgres 库批量查
+                # - schema 解析按库分组批量查
+                # - tabstat/tabsize 按库分组合并为单次会话
+                uid_list = [str(uid).strip() for uid in uids_to_query
+                            if str(uid).strip() in stats]
+
+                # 1. 批量查 sqlstat（postgres 库一次会话）
+                _t1 = _main_timer.time()
+                statement_stats_map = batch_query_sqlhc_statement_stats(
+                    uid_list, timeout=args.detail_timeout, debug=args.debug)
+                print(f"[进度] sqlhc sqlstat 批量完成: {len(statement_stats_map)}/{len(uid_list)}, 耗时 {_main_timer.time() - _t1:.1f}s", file=sys.stderr)
+
+                # 2. 按 uid 提取表 + 按库分组批量解析 schema
+                _t1 = _main_timer.time()
+                uid_to_tables = {}  # uid_str -> 原始 (owner, table) 列表
+                uid_to_db = {}     # uid_str -> db_name
+                db_to_names = {}    # db_name -> set(relname) 用于 schema 解析
+                for uid_str in uid_list:
+                    stat = stats[uid_str]
+                    db_name = stat.get('database', 'postgres')
+                    user = (stat.get('user') or 'public').strip().lower()
+                    if user == 'vastbase':
+                        user = 'public'
+                    sql_text = stat.get('max_duration_query', '') or stat.get('qry_text', '')
+                    tables = _extract_tables_from_sql(sql_text, default_user=user)
+                    uid_to_tables[uid_str] = tables
+                    uid_to_db[uid_str] = db_name
+                    if tables:
+                        db_to_names.setdefault(db_name, set()).update(t for _, t in tables)
+
+                uid_to_resolved = {}  # uid_str -> 已解析 schema 的 [(schema, table), ...]
+                for db_name, names in db_to_names.items():
+                    resolved = _query_table_schemas(
+                        list(names), db_name, timeout=args.detail_timeout, debug=args.debug)
+                    for uid_str, tables in uid_to_tables.items():
+                        if uid_to_db[uid_str] == db_name and tables:
+                            uid_to_resolved[uid_str] = _apply_schema_resolution(tables, resolved)
+                print(f"[进度] sqlhc schema 解析完成: {len(uid_to_resolved)} 个 SQL 有表, 耗时 {_main_timer.time() - _t1:.1f}s", file=sys.stderr)
+
+                # 3. 按库分组批量查 tabstat + tabsize（每库一次会话）
+                _t1 = _main_timer.time()
+                db_uid_tables = {}  # db_name -> [(uid_str, resolved_tables), ...]
+                for uid_str in uid_list:
+                    tables = uid_to_resolved.get(uid_str)
+                    if tables:
+                        db_name = uid_to_db[uid_str]
+                        db_uid_tables.setdefault(db_name, []).append((uid_str, tables))
+
+                tabstats_map = {}
+                tabsize_map = {}
+                for db_name, uid_tables in db_uid_tables.items():
+                    ts, sz = batch_query_sqlhc_table_info(
+                        uid_tables, db_name,
+                        timeout=args.detail_timeout, debug=args.debug)
+                    tabstats_map.update(ts)
+                    tabsize_map.update(sz)
+                print(f"[进度] sqlhc tabstat/tabsize 批量完成: {len(tabstats_map)}/{sum(len(v) for v in db_uid_tables.values())} 块, 耗时 {_main_timer.time() - _t1:.1f}s", file=sys.stderr)
+
+                # 4. 按 uid 组装 sqlhc 文本，批量缺失的回退单查保证容错
+                for uid_str in uid_list:
+                    stat = stats[uid_str]
+                    db_name = uid_to_db[uid_str]
+                    wait_events_records = wait_events_data.get(uid_str, [])
+                    sqlhc_content = generate_sqlhc_content(
+                        uid_str, stat, db_name,
+                        timeout=args.detail_timeout,
+                        wait_events_records=wait_events_records,
+                        debug=args.debug,
+                        statement_stats_text=statement_stats_map.get(uid_str),
+                        resolved_tables=uid_to_resolved.get(uid_str, []),
+                        tabstats_text=tabstats_map.get(uid_str),
+                        tabsize_text=tabsize_map.get(uid_str))
+                    sqlhc_data[uid_str] = sqlhc_content
+            except Exception as e:
+                sqlhc_data = {}
+                sqlhc_warning = f"sqlhc 信息收集失败: {e}"
+                print(f"WARNING: {sqlhc_warning}", file=sys.stderr)
+            print(f"[进度] sqlhc 信息收集完成, 耗时 {_main_timer.time() - _t0:.1f}s", file=sys.stderr)
+
         _t0 = _main_timer.time()
         print(f"[进度] 开始生成完整 HTML 报告 (共 {len(sorted_data)} 行详情)...", file=sys.stderr)
         full_html = ReportGenerator.generate_full_html_report(
@@ -19254,6 +21520,8 @@ if __name__ == "__main__":
                 lock_chain_list=all_lock_chain_list,
                 error_list=all_error_list,
                 statement_filter=statement_filter,
+                sqlhc_data=sqlhc_data,
+                opt_params_info=opt_params_info,
                 debug=args.debug
             )
         print(f"[进度] HTML 报告生成完成, 耗时 {_main_timer.time() - _t0:.1f}s, HTML 大小 {len(full_html)/1024/1024:.1f} MB", file=sys.stderr)
@@ -19288,7 +21556,6 @@ if __name__ == "__main__":
                 except Exception:
                     pass
             
-
 PYTHON_EOF
 
     # Execute the python script with the provided arguments
