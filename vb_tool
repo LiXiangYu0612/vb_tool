@@ -1,13 +1,13 @@
 #!/bin/bash
 #--------------------------------------------------------------------------------
 #-- File name:   vb_tool
-#-- Version  ：  v2.0.11
-#-- Commit at：  2026-09-03 18:20:00
+#-- Version  ：  v2.1.0
+#-- Commit at：  2026-09-08 08:10:00
 #-- Purpose:     Vastbase Script Tool
 #-- Author:      MVS & Second-line Team 
 #--------------------------------------------------------------------------------
 set -o pipefail
-export VB_TOOL_VERSION="v2.0.11"
+export VB_TOOL_VERSION="v2.1.0"
 show_help() {
     echo "Vastbase Script Tool (vb_tool)"
     echo ""
@@ -23624,7 +23624,7 @@ unset _vb_port_args
 
 awr_help() {
     cat <<'EOF'
-Usage: vb_tool awr <create|enable|disable|awrrpt|awrdiff|list|show|delete|config> [options]
+Usage: vb_tool awr <create|enable|disable|awrrpt|awrdiff|topsql|event|summary|tabstat|list|show|delete|config> [options]
 
 Single-point performance snapshots (Oracle AWR style). Each snapshot is an
 instantaneous OS+DB sample assigned a monotonic snap_id. An AWR report is the
@@ -23650,6 +23650,23 @@ counter delta between two snapshots (end - begin).
                             durations within 10 min) -- Δ columns are raw
                             window deltas;
                             written to awrdiff_{db}_{p1_begin}_{p2_begin}.html
+  topsql  begin <id> end <id> [-n N] [-m dbtime|cpu|io|calls|lreads|preads|rows]
+                            print the window's Top SQL to the SCREEN (no html);
+                            ranking dimension via -m (default dbtime), the pct%
+                            column follows it; -n top N (default 10)
+  event   begin <id> end <id> [-E <event>]
+                            print top wait events to the screen (CPU time +
+                            events by total wait time, 5 rows, wdr_event style);
+                            -E prints only that event (case-insensitive match)
+  summary begin <id> end <id>
+                            print a one-line workload summary to the screen
+                            (dbtime/aas/tps/iops/mbps/... wdr_summary style);
+                            iops/mbps/wal need snaps captured by this vb_tool
+                            or newer (older snaps show '-')
+  tabstat begin <id> end <id> -d <db> -s <schema> -t <table>
+                            print one table's window scan/DML deltas plus
+                            live/dead tuple counts (wdr_tabstat style); works
+                            for tables of ANY database (all-db capture)
   list    [YYYY-MM-DD]     list stored snapshots (snap_id / ts / host / db),
                             newest first; default latest 30, a date lists
                             that whole day
@@ -23683,6 +23700,11 @@ Storage (per snapshot; <root> = $VB_TOOL_HOME/awrs/<port>, per instance):
   os logs:    <root>/os_<YYYYMMDD>.log  per-minute OS counters for awrrpt detail
               (cpu/pg/mem numeric rows + dsk/net raw /proc lines; same cron as
                repl/slot sampling -- 'awr enable' starts all three)
+  iostat:     <root>/snap_<id>/db/file_iostat.csv  per-file rows (filenum/
+              dbid/spcid + phyrds/phywrts/phyblkrd/phyblkwrt) -- the renderer
+              diffs per file so temp/log file churn cannot skew the sums;
+              file_redo_iostat.csv = single global row. For the awr summary
+              iops/mbps/wal columns (this vb_tool version+)
 
 Env: VB_TOOL_HOME  base dir (default ~/.vb_tool); snaps under $VB_TOOL_HOME/awrs/<port>/snap_<id>/
 Port:   -P <port> anywhere on the command line selects the instance (default: current $PGPORT)
@@ -23848,7 +23870,11 @@ _awr_collect() {
     # ---- ASH flush window: [previous snap ts, now]. Output replicates the
     # `vb_tool asp` command (per-second counts rolled to 5-minute buckets,
     # max/avg columns; top-5 SQL per bucket; both sources gs_asp AND
-    # dbe_perf.local_active_session tagged g/l -- the live stream hands off
+    # get_local_active_session() tagged g/l -- the live stream hands off (the
+    # dbe_perf.local_active_session VIEW is deliberately NOT used anywhere:
+    # its WITH RECURSIVE final_block_sessionid walks every row even when
+    # nobody is blocked -- linear-cost recursion per snap (user 2026-09-08);
+    # the waitchain queries grow their own chain from blocked rows ONLY)
     # between them, observed on 204; the renderer's per-bucket source pick
     # dedupes the seam, same as asp). Flushing at every create keeps each
     # snap self-contained and bounds query cost to one interval. Neither
@@ -23893,6 +23919,8 @@ _awr_collect() {
 \copy (SELECT name,setting,unit,context,short_desc FROM pg_settings ORDER BY name) TO '$dbd/pg_settings.csv' WITH CSV HEADER
 \copy (SELECT application_name, client_addr, state, sync_state, sender_sent_location, receiver_write_location, receiver_flush_location, receiver_replay_location FROM pg_stat_replication ORDER BY application_name) TO '$dbd/replication.csv' WITH CSV HEADER
 \copy (SELECT slot_name, plugin, slot_type, database, active, xmin, catalog_xmin, restart_lsn, dummy_standby, confirmed_flush FROM pg_replication_slots ORDER BY slot_name) TO '$dbd/replication_slots.csv' WITH CSV HEADER
+\copy (SELECT filenum, dbid, spcid, phyrds, phywrts, phyblkrd, phyblkwrt FROM dbe_perf.file_iostat) TO '$dbd/file_iostat.csv' WITH CSV HEADER
+\copy (SELECT sum(phywrts) phywrts, sum(phyblkwrt) phyblkwrt FROM dbe_perf.file_redo_iostat) TO '$dbd/file_redo_iostat.csv' WITH CSV HEADER
 PSQL
     # ---- ASH flush sources. primary: gs_asp('g') + local_active_session('l')
     # dual source (the live stream hands off between them, observed on 204).
@@ -23901,15 +23929,15 @@ PSQL
     # into the standby's report.
     if [ "$is_standby" = "1" ]; then
         PGCONNECT_TIMEOUT=$_ct PGOPTIONS="$_st" psql -d postgres 2>&1 <<PSQL3 | grep -v '^$' >&2 || true
-\copy (WITH per_sec AS (SELECT sample_time::timestamp(0) AS sec, count(*) AS cnt, sum(CASE WHEN a.state = 'active' THEN 1 ELSE 0 END) AS active_cnt, sum(CASE WHEN b.type = 'LOCK_EVENT' THEN 1 ELSE 0 END) AS wlock, sum(CASE WHEN b.type = 'LWLOCK_EVENT' THEN 1 ELSE 0 END) AS wlw, sum(CASE WHEN b.type = 'IO_EVENT' THEN 1 ELSE 0 END) AS wio, sum(CASE WHEN a.cur_event = 'wait wal sync' THEN 1 ELSE 0 END) AS wwal, sum(CASE WHEN a.cur_event = 'wait transaction sync' THEN 1 ELSE 0 END) AS wtrans FROM dbe_perf.local_active_session a LEFT JOIN dbe_perf.wait_events b ON a.cur_event = b.event WHERE sample_time > '$ash_b' AND sample_time <= '$ash_e' GROUP BY sample_time::timestamp(0)) SELECT 'l' AS src, DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min' AS bucket, max(cnt) AS max_sess, round(avg(cnt)) AS avg_sess, max(active_cnt) AS max_active_sess, max(wlock) AS wait_lock, max(wlw) AS wait_lwlock, max(wio) AS wait_io, max(wwal) AS wait_wal_sync, max(wtrans) AS wait_trans_sync FROM per_sec GROUP BY DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min' ORDER BY bucket, src) TO '$dbd/ash_cnt.csv' WITH CSV HEADER
-\copy (WITH per_sec AS (SELECT sample_time::timestamp(0) AS sec, a.cur_event AS event, b.type AS event_type, count(*) AS cnt FROM dbe_perf.local_active_session a LEFT JOIN dbe_perf.wait_events b ON a.cur_event = b.event WHERE sample_time > '$ash_b' AND sample_time <= '$ash_e' AND a.state = 'active' AND a.cur_event IS NOT NULL AND a.cur_event NOT IN ('none', 'wait cmd') GROUP BY sample_time::timestamp(0), a.cur_event, b.type) SELECT 'l' AS src, DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min' AS bucket, event_type, event, max(cnt) AS max_cnt, round(avg(cnt)) AS avg_cnt FROM per_sec GROUP BY DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min', event_type, event ORDER BY bucket, max_cnt DESC LIMIT 800) TO '$dbd/ash_event.csv' WITH CSV HEADER
-\copy (WITH per_sec AS (SELECT sample_time::timestamp(0) AS sec, unique_query_id, substr(REGEXP_REPLACE(REGEXP_REPLACE(unique_query, '(\r|\n)+', ' '), ' {2,}', ' '), 1, 50) AS uq, count(*) AS cnt FROM dbe_perf.local_active_session WHERE sample_time > '$ash_b' AND sample_time <= '$ash_e' AND state = 'active' AND unique_query_id > 0 GROUP BY sample_time::timestamp(0), unique_query_id, substr(REGEXP_REPLACE(REGEXP_REPLACE(unique_query, '(\r|\n)+', ' '), ' {2,}', ' '), 1, 50)) SELECT * FROM (SELECT 'l' AS src, DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min' AS bucket, unique_query_id, uq AS unique_query, max(cnt) AS max_cnt, round(avg(cnt)) AS avg_cnt, ROW_NUMBER() OVER (PARTITION BY DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min' ORDER BY max(cnt) DESC) AS rn FROM per_sec GROUP BY DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min', unique_query_id, uq) t2 WHERE rn <= 5 ORDER BY bucket, max_cnt DESC) TO '$dbd/ash_sql.csv' WITH CSV HEADER
+\copy (WITH per_sec AS (SELECT sample_time::timestamp(0) AS sec, count(*) AS cnt, sum(CASE WHEN a.state = 'active' THEN 1 ELSE 0 END) AS active_cnt, sum(CASE WHEN b.type = 'LOCK_EVENT' THEN 1 ELSE 0 END) AS wlock, sum(CASE WHEN b.type = 'LWLOCK_EVENT' THEN 1 ELSE 0 END) AS wlw, sum(CASE WHEN b.type = 'IO_EVENT' THEN 1 ELSE 0 END) AS wio, sum(CASE WHEN a.cur_event = 'wait wal sync' THEN 1 ELSE 0 END) AS wwal, sum(CASE WHEN a.cur_event = 'wait transaction sync' THEN 1 ELSE 0 END) AS wtrans FROM get_local_active_session() a LEFT JOIN dbe_perf.wait_events b ON a.cur_event = b.event WHERE sample_time > '$ash_b' AND sample_time <= '$ash_e' GROUP BY sample_time::timestamp(0)) SELECT 'l' AS src, DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min' AS bucket, max(cnt) AS max_sess, round(avg(cnt)) AS avg_sess, max(active_cnt) AS max_active_sess, max(wlock) AS wait_lock, max(wlw) AS wait_lwlock, max(wio) AS wait_io, max(wwal) AS wait_wal_sync, max(wtrans) AS wait_trans_sync FROM per_sec GROUP BY DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min' ORDER BY bucket, src) TO '$dbd/ash_cnt.csv' WITH CSV HEADER
+\copy (WITH per_sec AS (SELECT sample_time::timestamp(0) AS sec, a.cur_event AS event, b.type AS event_type, count(*) AS cnt FROM get_local_active_session() a LEFT JOIN dbe_perf.wait_events b ON a.cur_event = b.event WHERE sample_time > '$ash_b' AND sample_time <= '$ash_e' AND a.state = 'active' AND a.cur_event IS NOT NULL AND a.cur_event NOT IN ('none', 'wait cmd') GROUP BY sample_time::timestamp(0), a.cur_event, b.type) SELECT 'l' AS src, DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min' AS bucket, event_type, event, max(cnt) AS max_cnt, round(avg(cnt)) AS avg_cnt FROM per_sec GROUP BY DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min', event_type, event ORDER BY bucket, max_cnt DESC LIMIT 800) TO '$dbd/ash_event.csv' WITH CSV HEADER
+\copy (WITH per_sec AS (SELECT sample_time::timestamp(0) AS sec, unique_query_id, substr(REGEXP_REPLACE(REGEXP_REPLACE(unique_query, '(\r|\n)+', ' '), ' {2,}', ' '), 1, 50) AS uq, count(*) AS cnt FROM get_local_active_session() WHERE sample_time > '$ash_b' AND sample_time <= '$ash_e' AND state = 'active' AND unique_query_id > 0 GROUP BY sample_time::timestamp(0), unique_query_id, substr(REGEXP_REPLACE(REGEXP_REPLACE(unique_query, '(\r|\n)+', ' '), ' {2,}', ' '), 1, 50)) SELECT * FROM (SELECT 'l' AS src, DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min' AS bucket, unique_query_id, uq AS unique_query, max(cnt) AS max_cnt, round(avg(cnt)) AS avg_cnt, ROW_NUMBER() OVER (PARTITION BY DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min' ORDER BY max(cnt) DESC) AS rn FROM per_sec GROUP BY DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min', unique_query_id, uq) t2 WHERE rn <= 5 ORDER BY bucket, max_cnt DESC) TO '$dbd/ash_sql.csv' WITH CSV HEADER
 PSQL3
     else
         PGCONNECT_TIMEOUT=$_ct PGOPTIONS="$_st" psql -d postgres 2>&1 <<PSQL | grep -v '^$' >&2 || true
-\copy (SELECT * FROM (WITH per_sec AS (SELECT sample_time::timestamp(0) AS sec, count(*) AS cnt, sum(CASE WHEN a.state = 'active' THEN 1 ELSE 0 END) AS active_cnt, sum(CASE WHEN b.type = 'LOCK_EVENT' THEN 1 ELSE 0 END) AS wlock, sum(CASE WHEN b.type = 'LWLOCK_EVENT' THEN 1 ELSE 0 END) AS wlw, sum(CASE WHEN b.type = 'IO_EVENT' THEN 1 ELSE 0 END) AS wio, sum(CASE WHEN a.event = 'wait wal sync' THEN 1 ELSE 0 END) AS wwal, sum(CASE WHEN a.event = 'wait transaction sync' THEN 1 ELSE 0 END) AS wtrans FROM gs_asp a LEFT JOIN dbe_perf.wait_events b ON a.event = b.event WHERE sample_time > '$ash_b' AND sample_time <= '$ash_e' GROUP BY sample_time::timestamp(0)) SELECT 'g' AS src, DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min' AS bucket, max(cnt) AS max_sess, round(avg(cnt)) AS avg_sess, max(active_cnt) AS max_active_sess, max(wlock) AS wait_lock, max(wlw) AS wait_lwlock, max(wio) AS wait_io, max(wwal) AS wait_wal_sync, max(wtrans) AS wait_trans_sync FROM per_sec GROUP BY DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min' UNION ALL SELECT * FROM (WITH per_sec AS (SELECT sample_time::timestamp(0) AS sec, count(*) AS cnt, sum(CASE WHEN a.state = 'active' THEN 1 ELSE 0 END) AS active_cnt, sum(CASE WHEN b.type = 'LOCK_EVENT' THEN 1 ELSE 0 END) AS wlock, sum(CASE WHEN b.type = 'LWLOCK_EVENT' THEN 1 ELSE 0 END) AS wlw, sum(CASE WHEN b.type = 'IO_EVENT' THEN 1 ELSE 0 END) AS wio, sum(CASE WHEN a.cur_event = 'wait wal sync' THEN 1 ELSE 0 END) AS wwal, sum(CASE WHEN a.cur_event = 'wait transaction sync' THEN 1 ELSE 0 END) AS wtrans FROM dbe_perf.local_active_session a LEFT JOIN dbe_perf.wait_events b ON a.cur_event = b.event WHERE sample_time > '$ash_b' AND sample_time <= '$ash_e' GROUP BY sample_time::timestamp(0)) SELECT 'l' AS src, DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min' AS bucket, max(cnt) AS max_sess, round(avg(cnt)) AS avg_sess, max(active_cnt) AS max_active_sess, max(wlock) AS wait_lock, max(wlw) AS wait_lwlock, max(wio) AS wait_io, max(wwal) AS wait_wal_sync, max(wtrans) AS wait_trans_sync FROM per_sec GROUP BY DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min') x) u ORDER BY bucket, src) TO '$dbd/ash_cnt.csv' WITH CSV HEADER
-\copy (SELECT * FROM (WITH per_sec AS (SELECT sample_time::timestamp(0) AS sec, a.event AS event, b.type AS event_type, count(*) AS cnt FROM gs_asp a LEFT JOIN dbe_perf.wait_events b ON a.event = b.event WHERE sample_time > '$ash_b' AND sample_time <= '$ash_e' AND a.state = 'active' AND a.event IS NOT NULL AND a.event NOT IN ('none', 'wait cmd') GROUP BY sample_time::timestamp(0), a.event, b.type) SELECT 'g' AS src, DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min' AS bucket, event_type, event, max(cnt) AS max_cnt, round(avg(cnt)) AS avg_cnt FROM per_sec GROUP BY DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min', event_type, event UNION ALL SELECT * FROM (WITH per_sec AS (SELECT sample_time::timestamp(0) AS sec, a.cur_event AS event, b.type AS event_type, count(*) AS cnt FROM dbe_perf.local_active_session a LEFT JOIN dbe_perf.wait_events b ON a.cur_event = b.event WHERE sample_time > '$ash_b' AND sample_time <= '$ash_e' AND a.state = 'active' AND a.cur_event IS NOT NULL AND a.cur_event NOT IN ('none', 'wait cmd') GROUP BY sample_time::timestamp(0), a.cur_event, b.type) SELECT 'l' AS src, DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min' AS bucket, event_type, event, max(cnt) AS max_cnt, round(avg(cnt)) AS avg_cnt FROM per_sec GROUP BY DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min', event_type, event) x) u ORDER BY bucket, max_cnt DESC LIMIT 800) TO '$dbd/ash_event.csv' WITH CSV HEADER
-\copy (SELECT * FROM (WITH per_sec AS (SELECT sample_time::timestamp(0) AS sec, unique_query_id, substr(REGEXP_REPLACE(REGEXP_REPLACE(unique_query, '(\r|\n)+', ' '), ' {2,}', ' '), 1, 50) AS uq, count(*) AS cnt FROM gs_asp WHERE sample_time > '$ash_b' AND sample_time <= '$ash_e' AND state = 'active' AND unique_query_id > 0 GROUP BY sample_time::timestamp(0), unique_query_id, substr(REGEXP_REPLACE(REGEXP_REPLACE(unique_query, '(\r|\n)+', ' '), ' {2,}', ' '), 1, 50)) SELECT * FROM (SELECT 'g' AS src, DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min' AS bucket, unique_query_id, uq AS unique_query, max(cnt) AS max_cnt, round(avg(cnt)) AS avg_cnt, ROW_NUMBER() OVER (PARTITION BY DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min' ORDER BY max(cnt) DESC) AS rn FROM per_sec GROUP BY DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min', unique_query_id, uq) t WHERE rn <= 5 UNION ALL SELECT * FROM (WITH per_sec AS (SELECT sample_time::timestamp(0) AS sec, unique_query_id, substr(REGEXP_REPLACE(REGEXP_REPLACE(unique_query, '(\r|\n)+', ' '), ' {2,}', ' '), 1, 50) AS uq, count(*) AS cnt FROM dbe_perf.local_active_session WHERE sample_time > '$ash_b' AND sample_time <= '$ash_e' AND state = 'active' AND unique_query_id > 0 GROUP BY sample_time::timestamp(0), unique_query_id, substr(REGEXP_REPLACE(REGEXP_REPLACE(unique_query, '(\r|\n)+', ' '), ' {2,}', ' '), 1, 50)) SELECT * FROM (SELECT 'l' AS src, DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min' AS bucket, unique_query_id, uq AS unique_query, max(cnt) AS max_cnt, round(avg(cnt)) AS avg_cnt, ROW_NUMBER() OVER (PARTITION BY DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min' ORDER BY max(cnt) DESC) AS rn FROM per_sec GROUP BY DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min', unique_query_id, uq) t2 WHERE rn <= 5) x) u ORDER BY bucket, max_cnt DESC) TO '$dbd/ash_sql.csv' WITH CSV HEADER
+\copy (SELECT * FROM (WITH per_sec AS (SELECT sample_time::timestamp(0) AS sec, count(*) AS cnt, sum(CASE WHEN a.state = 'active' THEN 1 ELSE 0 END) AS active_cnt, sum(CASE WHEN b.type = 'LOCK_EVENT' THEN 1 ELSE 0 END) AS wlock, sum(CASE WHEN b.type = 'LWLOCK_EVENT' THEN 1 ELSE 0 END) AS wlw, sum(CASE WHEN b.type = 'IO_EVENT' THEN 1 ELSE 0 END) AS wio, sum(CASE WHEN a.event = 'wait wal sync' THEN 1 ELSE 0 END) AS wwal, sum(CASE WHEN a.event = 'wait transaction sync' THEN 1 ELSE 0 END) AS wtrans FROM gs_asp a LEFT JOIN dbe_perf.wait_events b ON a.event = b.event WHERE sample_time > '$ash_b' AND sample_time <= '$ash_e' GROUP BY sample_time::timestamp(0)) SELECT 'g' AS src, DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min' AS bucket, max(cnt) AS max_sess, round(avg(cnt)) AS avg_sess, max(active_cnt) AS max_active_sess, max(wlock) AS wait_lock, max(wlw) AS wait_lwlock, max(wio) AS wait_io, max(wwal) AS wait_wal_sync, max(wtrans) AS wait_trans_sync FROM per_sec GROUP BY DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min' UNION ALL SELECT * FROM (WITH per_sec AS (SELECT sample_time::timestamp(0) AS sec, count(*) AS cnt, sum(CASE WHEN a.state = 'active' THEN 1 ELSE 0 END) AS active_cnt, sum(CASE WHEN b.type = 'LOCK_EVENT' THEN 1 ELSE 0 END) AS wlock, sum(CASE WHEN b.type = 'LWLOCK_EVENT' THEN 1 ELSE 0 END) AS wlw, sum(CASE WHEN b.type = 'IO_EVENT' THEN 1 ELSE 0 END) AS wio, sum(CASE WHEN a.cur_event = 'wait wal sync' THEN 1 ELSE 0 END) AS wwal, sum(CASE WHEN a.cur_event = 'wait transaction sync' THEN 1 ELSE 0 END) AS wtrans FROM get_local_active_session() a LEFT JOIN dbe_perf.wait_events b ON a.cur_event = b.event WHERE sample_time > '$ash_b' AND sample_time <= '$ash_e' GROUP BY sample_time::timestamp(0)) SELECT 'l' AS src, DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min' AS bucket, max(cnt) AS max_sess, round(avg(cnt)) AS avg_sess, max(active_cnt) AS max_active_sess, max(wlock) AS wait_lock, max(wlw) AS wait_lwlock, max(wio) AS wait_io, max(wwal) AS wait_wal_sync, max(wtrans) AS wait_trans_sync FROM per_sec GROUP BY DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min') x) u ORDER BY bucket, src) TO '$dbd/ash_cnt.csv' WITH CSV HEADER
+\copy (SELECT * FROM (WITH per_sec AS (SELECT sample_time::timestamp(0) AS sec, a.event AS event, b.type AS event_type, count(*) AS cnt FROM gs_asp a LEFT JOIN dbe_perf.wait_events b ON a.event = b.event WHERE sample_time > '$ash_b' AND sample_time <= '$ash_e' AND a.state = 'active' AND a.event IS NOT NULL AND a.event NOT IN ('none', 'wait cmd') GROUP BY sample_time::timestamp(0), a.event, b.type) SELECT 'g' AS src, DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min' AS bucket, event_type, event, max(cnt) AS max_cnt, round(avg(cnt)) AS avg_cnt FROM per_sec GROUP BY DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min', event_type, event UNION ALL SELECT * FROM (WITH per_sec AS (SELECT sample_time::timestamp(0) AS sec, a.cur_event AS event, b.type AS event_type, count(*) AS cnt FROM get_local_active_session() a LEFT JOIN dbe_perf.wait_events b ON a.cur_event = b.event WHERE sample_time > '$ash_b' AND sample_time <= '$ash_e' AND a.state = 'active' AND a.cur_event IS NOT NULL AND a.cur_event NOT IN ('none', 'wait cmd') GROUP BY sample_time::timestamp(0), a.cur_event, b.type) SELECT 'l' AS src, DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min' AS bucket, event_type, event, max(cnt) AS max_cnt, round(avg(cnt)) AS avg_cnt FROM per_sec GROUP BY DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min', event_type, event) x) u ORDER BY bucket, max_cnt DESC LIMIT 800) TO '$dbd/ash_event.csv' WITH CSV HEADER
+\copy (SELECT * FROM (WITH per_sec AS (SELECT sample_time::timestamp(0) AS sec, unique_query_id, substr(REGEXP_REPLACE(REGEXP_REPLACE(unique_query, '(\r|\n)+', ' '), ' {2,}', ' '), 1, 50) AS uq, count(*) AS cnt FROM gs_asp WHERE sample_time > '$ash_b' AND sample_time <= '$ash_e' AND state = 'active' AND unique_query_id > 0 GROUP BY sample_time::timestamp(0), unique_query_id, substr(REGEXP_REPLACE(REGEXP_REPLACE(unique_query, '(\r|\n)+', ' '), ' {2,}', ' '), 1, 50)) SELECT * FROM (SELECT 'g' AS src, DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min' AS bucket, unique_query_id, uq AS unique_query, max(cnt) AS max_cnt, round(avg(cnt)) AS avg_cnt, ROW_NUMBER() OVER (PARTITION BY DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min' ORDER BY max(cnt) DESC) AS rn FROM per_sec GROUP BY DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min', unique_query_id, uq) t WHERE rn <= 5 UNION ALL SELECT * FROM (WITH per_sec AS (SELECT sample_time::timestamp(0) AS sec, unique_query_id, substr(REGEXP_REPLACE(REGEXP_REPLACE(unique_query, '(\r|\n)+', ' '), ' {2,}', ' '), 1, 50) AS uq, count(*) AS cnt FROM get_local_active_session() WHERE sample_time > '$ash_b' AND sample_time <= '$ash_e' AND state = 'active' AND unique_query_id > 0 GROUP BY sample_time::timestamp(0), unique_query_id, substr(REGEXP_REPLACE(REGEXP_REPLACE(unique_query, '(\r|\n)+', ' '), ' {2,}', ' '), 1, 50)) SELECT * FROM (SELECT 'l' AS src, DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min' AS bucket, unique_query_id, uq AS unique_query, max(cnt) AS max_cnt, round(avg(cnt)) AS avg_cnt, ROW_NUMBER() OVER (PARTITION BY DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min' ORDER BY max(cnt) DESC) AS rn FROM per_sec GROUP BY DATE_TRUNC('hour', sec) + FLOOR(EXTRACT(MINUTE FROM sec) / 5) * INTERVAL '5 min', unique_query_id, uq) t2 WHERE rn <= 5) x) u ORDER BY bucket, max_cnt DESC) TO '$dbd/ash_sql.csv' WITH CSV HEADER
 PSQL
     fi
     # ---- ASH waitchain (recursive blocker-chain analysis, `vb_tool asp
@@ -23923,20 +23951,20 @@ PSQL
         # the missing csv hides the section in the report.
         if [ "$ash_las_flag" != "0" ]; then
             PGCONNECT_TIMEOUT=$_ct PGOPTIONS="$_st" psql -d postgres 2>&1 <<PSQL2 | grep -v '^$' >&2 || true
-\copy (WITH RECURSIVE blocked_sessions AS (SELECT sampleid, sample_time::timestamp(0) AS sample_time, final_block_sessionid, wait_status, max(sessionid) AS w_sessionid, count(*) AS cnt FROM dbe_perf.local_active_session WHERE sample_time > '$ash_b' AND sample_time <= '$ash_e' AND $ash_c1 AND final_block_sessionid IS NOT NULL GROUP BY sampleid, sample_time::timestamp(0), final_block_sessionid, wait_status), local_part AS (SELECT DATE_TRUNC('hour', a.sample_time) + FLOOR(EXTRACT(MINUTE FROM a.sample_time) / 5) * INTERVAL '5 min' AS interval_start, CONCAT(b.final_block_sessionid::text, '(', case when $ash_c6 then 'a' else 'iit' end, '(', $ash_c8::text, ')') AS root_block_sessid, b.cnt AS b_cnt, substr(a.unique_query, 1, 50) AS h_sql, substr(c.unique_query, 1, 50) AS w_sql FROM dbe_perf.local_active_session a, blocked_sessions b, dbe_perf.local_active_session c WHERE a.sampleid = b.sampleid AND b.final_block_sessionid = a.sessionid AND b.sampleid = c.sampleid AND b.w_sessionid = c.sessionid), bucketed AS (SELECT p.*, row_number() OVER (PARTITION BY p.interval_start, p.root_block_sessid ORDER BY p.b_cnt DESC) AS rn FROM local_part p) SELECT '[local_active_session] ' || to_char(interval_start, 'YYYY-MM-DD HH24:MI:SS') || '-' || to_char(interval_start + INTERVAL '5 minutes', 'HH24:MI:SS') AS date_time, root_block_sessid, b_cnt AS max_b_cnt, h_sql, w_sql FROM bucketed WHERE rn = 1 ORDER BY interval_start, max_b_cnt DESC LIMIT 1000) TO '$dbd/ash_waitchain.csv' WITH CSV HEADER
+\copy (WITH RECURSIVE lasg AS (SELECT * FROM get_local_active_session() WHERE sample_time > '$ash_b' AND sample_time <= '$ash_e'), blocking_chain AS (SELECT sampleid, sessionid AS blocked_sessionid, block_sessionid AS blocker_sessionid, 1 AS level, ARRAY[sessionid] AS path FROM lasg WHERE block_sessionid IS NOT NULL AND block_sessionid <> 0 AND sessionid <> block_sessionid AND $ash_c1 UNION ALL SELECT bc.sampleid, bc.blocked_sessionid, a.block_sessionid, bc.level + 1, bc.path || a.sessionid FROM blocking_chain bc JOIN lasg a ON bc.sampleid = a.sampleid AND bc.blocker_sessionid = a.sessionid WHERE a.block_sessionid IS NOT NULL AND a.block_sessionid <> 0 AND NOT a.sessionid = ANY(bc.path)), root_blockers AS (SELECT sampleid, blocked_sessionid, blocker_sessionid AS root_blocker FROM blocking_chain WHERE NOT EXISTS (SELECT 1 FROM lasg a WHERE a.sampleid = blocking_chain.sampleid AND a.sessionid = blocking_chain.blocker_sessionid AND a.block_sessionid IS NOT NULL)), blocker_stats AS (SELECT sampleid, root_blocker, count(blocked_sessionid) AS blocked_count, min(blocked_sessionid) AS example_blocked_sessionid FROM root_blockers GROUP BY sampleid, root_blocker), raw AS (SELECT DATE_TRUNC('hour', las.sample_time) + FLOOR(EXTRACT(MINUTE FROM las.sample_time) / 5) * INTERVAL '5 min' AS interval_start, CONCAT(las.sessionid::text, '(', case when $ash_c7 then 'a' else 'iit' end, '(', $ash_c9::text, '))') AS root_block_sessid, bs.blocked_count AS b_cnt, substr(las.unique_query, 1, 50) AS h_sql, substr(blocked_las.unique_query, 1, 50) AS w_sql FROM blocker_stats bs JOIN lasg las ON bs.sampleid = las.sampleid AND bs.root_blocker = las.sessionid JOIN lasg blocked_las ON bs.sampleid = blocked_las.sampleid AND bs.example_blocked_sessionid = blocked_las.sessionid), bucketed AS (SELECT p.*, row_number() OVER (PARTITION BY p.interval_start, p.root_block_sessid ORDER BY p.b_cnt DESC) AS rn FROM raw p) SELECT '[local_active_session] ' || to_char(interval_start, 'YYYY-MM-DD HH24:MI:SS') || '-' || to_char(interval_start + INTERVAL '5 minutes', 'HH24:MI:SS') AS date_time, root_block_sessid, b_cnt AS max_b_cnt, h_sql, w_sql FROM bucketed WHERE rn = 1 ORDER BY interval_start, max_b_cnt DESC LIMIT 1000) TO '$dbd/ash_waitchain.csv' WITH CSV HEADER
 PSQL2
         fi
     elif [ "$ash_las_flag" = "0" ]; then
         PGCONNECT_TIMEOUT=$_ct PGOPTIONS="$_st" psql -d postgres 2>&1 <<PSQL2 | grep -v '^$' >&2 || true
-\copy (WITH RECURSIVE g AS (SELECT * FROM gs_asp WHERE sample_time > '$ash_b' AND sample_time <= '$ash_e'), blocking_chain AS (SELECT sampleid, sessionid AS blocked_sessionid, block_sessionid AS blocker_sessionid, 1 AS level, ARRAY[sessionid] AS path FROM g WHERE block_sessionid IS NOT NULL UNION ALL SELECT bc.sampleid, bc.blocked_sessionid, a.block_sessionid, bc.level + 1, bc.path || a.sessionid FROM blocking_chain bc JOIN g a ON bc.sampleid = a.sampleid AND bc.blocker_sessionid = a.sessionid WHERE a.block_sessionid IS NOT NULL AND NOT a.sessionid = ANY(bc.path)), root_blockers AS (SELECT sampleid, blocked_sessionid, blocker_sessionid AS root_blocker FROM blocking_chain WHERE NOT EXISTS (SELECT 1 FROM g a WHERE a.sampleid = blocking_chain.sampleid AND a.sessionid = blocking_chain.blocker_sessionid AND a.block_sessionid IS NOT NULL)), blocker_stats AS (SELECT sampleid, root_blocker, count(blocked_sessionid) AS blocked_count, min(blocked_sessionid) AS example_blocked_sessionid FROM root_blockers GROUP BY sampleid, root_blocker), raw AS (SELECT DATE_TRUNC('hour', las.sample_time) + FLOOR(EXTRACT(MINUTE FROM las.sample_time) / 5) * INTERVAL '5 min' AS interval_start, CONCAT(las.sessionid::text, '(', case when $ash_c7 then 'a' else 'iit' end, '(', $ash_c9::text, ')') AS root_block_sessid, bs.blocked_count AS b_cnt, substr(las.unique_query, 1, 50) AS h_sql, substr(blocked_las.unique_query, 1, 50) AS w_sql FROM blocker_stats bs JOIN g las ON bs.sampleid = las.sampleid AND bs.root_blocker = las.sessionid JOIN g blocked_las ON bs.sampleid = blocked_las.sampleid AND bs.example_blocked_sessionid = blocked_las.sessionid), bucketed AS (SELECT r.*, row_number() OVER (PARTITION BY interval_start, root_block_sessid ORDER BY b_cnt DESC) AS rn FROM raw r) SELECT '[gs_asp] ' || to_char(interval_start, 'YYYY-MM-DD HH24:MI:SS') || '-' || to_char(interval_start + INTERVAL '5 minutes', 'HH24:MI:SS') AS date_time, root_block_sessid, b_cnt AS max_b_cnt, h_sql, w_sql FROM bucketed WHERE rn = 1 ORDER BY interval_start, max_b_cnt DESC LIMIT 1000) TO '$dbd/ash_waitchain.csv' WITH CSV HEADER
+\copy (WITH RECURSIVE g AS (SELECT * FROM gs_asp WHERE sample_time > '$ash_b' AND sample_time <= '$ash_e'), blocking_chain AS (SELECT sampleid, sessionid AS blocked_sessionid, block_sessionid AS blocker_sessionid, 1 AS level, ARRAY[sessionid] AS path FROM g WHERE block_sessionid IS NOT NULL UNION ALL SELECT bc.sampleid, bc.blocked_sessionid, a.block_sessionid, bc.level + 1, bc.path || a.sessionid FROM blocking_chain bc JOIN g a ON bc.sampleid = a.sampleid AND bc.blocker_sessionid = a.sessionid WHERE a.block_sessionid IS NOT NULL AND NOT a.sessionid = ANY(bc.path)), root_blockers AS (SELECT sampleid, blocked_sessionid, blocker_sessionid AS root_blocker FROM blocking_chain WHERE NOT EXISTS (SELECT 1 FROM g a WHERE a.sampleid = blocking_chain.sampleid AND a.sessionid = blocking_chain.blocker_sessionid AND a.block_sessionid IS NOT NULL)), blocker_stats AS (SELECT sampleid, root_blocker, count(blocked_sessionid) AS blocked_count, min(blocked_sessionid) AS example_blocked_sessionid FROM root_blockers GROUP BY sampleid, root_blocker), raw AS (SELECT DATE_TRUNC('hour', las.sample_time) + FLOOR(EXTRACT(MINUTE FROM las.sample_time) / 5) * INTERVAL '5 min' AS interval_start, CONCAT(las.sessionid::text, '(', case when $ash_c7 then 'a' else 'iit' end, '(', $ash_c9::text, '))') AS root_block_sessid, bs.blocked_count AS b_cnt, substr(las.unique_query, 1, 50) AS h_sql, substr(blocked_las.unique_query, 1, 50) AS w_sql FROM blocker_stats bs JOIN g las ON bs.sampleid = las.sampleid AND bs.root_blocker = las.sessionid JOIN g blocked_las ON bs.sampleid = blocked_las.sampleid AND bs.example_blocked_sessionid = blocked_las.sessionid), bucketed AS (SELECT r.*, row_number() OVER (PARTITION BY interval_start, root_block_sessid ORDER BY b_cnt DESC) AS rn FROM raw r) SELECT '[gs_asp] ' || to_char(interval_start, 'YYYY-MM-DD HH24:MI:SS') || '-' || to_char(interval_start + INTERVAL '5 minutes', 'HH24:MI:SS') AS date_time, root_block_sessid, b_cnt AS max_b_cnt, h_sql, w_sql FROM bucketed WHERE rn = 1 ORDER BY interval_start, max_b_cnt DESC LIMIT 1000) TO '$dbd/ash_waitchain.csv' WITH CSV HEADER
 PSQL2
     else
         PGCONNECT_TIMEOUT=$_ct PGOPTIONS="$_st" psql -d postgres 2>&1 <<PSQL2 | grep -v '^$' >&2 || true
-\copy (WITH RECURSIVE blocked_sessions AS (SELECT sampleid, sample_time::timestamp(0) AS sample_time, final_block_sessionid, wait_status, max(sessionid) AS w_sessionid, count(*) AS cnt FROM dbe_perf.local_active_session WHERE sample_time > '$ash_b' AND sample_time <= '$ash_e' AND $ash_c1 AND final_block_sessionid IS NOT NULL GROUP BY sampleid, sample_time::timestamp(0), final_block_sessionid, wait_status), gs_asp_1 AS (SELECT gs.* FROM gs_asp gs WHERE gs.sample_time > '$ash_b' AND gs.sample_time <= '$ash_e' AND NOT EXISTS (SELECT 1 FROM dbe_perf.local_active_session l WHERE l.sample_time::timestamp(0) = gs.sample_time::timestamp(0))), blocking_chain AS (SELECT sampleid, sessionid AS blocked_sessionid, block_sessionid AS blocker_sessionid, 1 AS level, ARRAY[sessionid] AS path FROM gs_asp_1 WHERE block_sessionid IS NOT NULL UNION ALL SELECT bc.sampleid, bc.blocked_sessionid, a.block_sessionid, bc.level + 1, bc.path || a.sessionid FROM blocking_chain bc JOIN gs_asp_1 a ON bc.sampleid = a.sampleid AND bc.blocker_sessionid = a.sessionid WHERE a.block_sessionid IS NOT NULL AND NOT a.sessionid = ANY(bc.path)), root_blockers AS (SELECT sampleid, blocked_sessionid, blocker_sessionid AS root_blocker FROM blocking_chain WHERE NOT EXISTS (SELECT 1 FROM gs_asp_1 a WHERE a.sampleid = blocking_chain.sampleid AND a.sessionid = blocking_chain.blocker_sessionid AND a.block_sessionid IS NOT NULL)), blocker_stats AS (SELECT sampleid, root_blocker, count(blocked_sessionid) AS blocked_count, min(blocked_sessionid) AS example_blocked_sessionid FROM root_blockers GROUP BY sampleid, root_blocker), local_part AS (SELECT DATE_TRUNC('hour', a.sample_time) + FLOOR(EXTRACT(MINUTE FROM a.sample_time) / 5) * INTERVAL '5 min' AS interval_start, CONCAT(b.final_block_sessionid::text, '(', case when $ash_c6 then 'a' else 'iit' end, '(', $ash_c8::text, ')') AS root_block_sessid, b.cnt AS b_cnt, substr(a.unique_query, 1, 50) AS h_sql, substr(c.unique_query, 1, 50) AS w_sql FROM dbe_perf.local_active_session a, blocked_sessions b, dbe_perf.local_active_session c WHERE a.sampleid = b.sampleid AND b.final_block_sessionid = a.sessionid AND b.sampleid = c.sampleid AND b.w_sessionid = c.sessionid), gs_part AS (SELECT DATE_TRUNC('hour', las.sample_time) + FLOOR(EXTRACT(MINUTE FROM las.sample_time) / 5) * INTERVAL '5 min' AS interval_start, CONCAT(las.sessionid::text, '(', case when $ash_c7 then 'a' else 'iit' end, '(', $ash_c9::text, ')') AS root_block_sessid, bs.blocked_count AS b_cnt, substr(las.unique_query, 1, 50) AS h_sql, substr(blocked_las.unique_query, 1, 50) AS w_sql FROM blocker_stats bs JOIN gs_asp_1 las ON bs.sampleid = las.sampleid AND bs.root_blocker = las.sessionid JOIN gs_asp_1 blocked_las ON bs.sampleid = blocked_las.sampleid AND bs.example_blocked_sessionid = blocked_las.sessionid), merged AS (SELECT '[local_active_session]' AS src, interval_start, root_block_sessid, b_cnt, h_sql, w_sql FROM local_part UNION ALL SELECT '[gs_asp]' AS src, interval_start, root_block_sessid, b_cnt, h_sql, w_sql FROM gs_part), picked AS (SELECT m.* FROM merged m WHERE m.src = '[gs_asp]' OR NOT EXISTS (SELECT 1 FROM merged m2 WHERE m2.src = '[gs_asp]' AND m2.interval_start = m.interval_start)), bucketed AS (SELECT p.*, row_number() OVER (PARTITION BY p.src, p.interval_start, p.root_block_sessid ORDER BY p.b_cnt DESC) AS rn FROM picked p) SELECT src || ' ' || to_char(interval_start, 'YYYY-MM-DD HH24:MI:SS') || '-' || to_char(interval_start + INTERVAL '5 minutes', 'HH24:MI:SS') AS date_time, root_block_sessid, b_cnt AS max_b_cnt, h_sql, w_sql FROM bucketed WHERE rn = 1 ORDER BY interval_start, max_b_cnt DESC LIMIT 1000) TO '$dbd/ash_waitchain.csv' WITH CSV HEADER
+\copy (WITH RECURSIVE lasg AS (SELECT * FROM get_local_active_session() WHERE sample_time > '$ash_b' AND sample_time <= '$ash_e'), lchain AS (SELECT sampleid, sessionid AS blocked_sessionid, block_sessionid AS blocker_sessionid, 1 AS level, ARRAY[sessionid] AS path FROM lasg WHERE block_sessionid IS NOT NULL AND block_sessionid <> 0 AND sessionid <> block_sessionid AND $ash_c1 UNION ALL SELECT bc.sampleid, bc.blocked_sessionid, a.block_sessionid, bc.level + 1, bc.path || a.sessionid FROM lchain bc JOIN lasg a ON bc.sampleid = a.sampleid AND bc.blocker_sessionid = a.sessionid WHERE a.block_sessionid IS NOT NULL AND a.block_sessionid <> 0 AND NOT a.sessionid = ANY(bc.path)), lroot AS (SELECT sampleid, blocked_sessionid, blocker_sessionid AS root_blocker FROM lchain WHERE NOT EXISTS (SELECT 1 FROM lasg a WHERE a.sampleid = lchain.sampleid AND a.sessionid = lchain.blocker_sessionid AND a.block_sessionid IS NOT NULL)), lstats AS (SELECT sampleid, root_blocker, count(blocked_sessionid) AS blocked_count, min(blocked_sessionid) AS example_blocked_sessionid FROM lroot GROUP BY sampleid, root_blocker), local_part AS (SELECT DATE_TRUNC('hour', las.sample_time) + FLOOR(EXTRACT(MINUTE FROM las.sample_time) / 5) * INTERVAL '5 min' AS interval_start, CONCAT(las.sessionid::text, '(', case when $ash_c7 then 'a' else 'iit' end, '(', $ash_c9::text, '))') AS root_block_sessid, bs.blocked_count AS b_cnt, substr(las.unique_query, 1, 50) AS h_sql, substr(blocked_las.unique_query, 1, 50) AS w_sql FROM lstats bs JOIN lasg las ON bs.sampleid = las.sampleid AND bs.root_blocker = las.sessionid JOIN lasg blocked_las ON bs.sampleid = blocked_las.sampleid AND bs.example_blocked_sessionid = blocked_las.sessionid), gs_asp_1 AS (SELECT gs.* FROM gs_asp gs WHERE gs.sample_time > '$ash_b' AND gs.sample_time <= '$ash_e' AND NOT EXISTS (SELECT 1 FROM lasg l WHERE l.sample_time::timestamp(0) = gs.sample_time::timestamp(0))), blocking_chain AS (SELECT sampleid, sessionid AS blocked_sessionid, block_sessionid AS blocker_sessionid, 1 AS level, ARRAY[sessionid] AS path FROM gs_asp_1 WHERE block_sessionid IS NOT NULL UNION ALL SELECT bc.sampleid, bc.blocked_sessionid, a.block_sessionid, bc.level + 1, bc.path || a.sessionid FROM blocking_chain bc JOIN gs_asp_1 a ON bc.sampleid = a.sampleid AND bc.blocker_sessionid = a.sessionid WHERE a.block_sessionid IS NOT NULL AND NOT a.sessionid = ANY(bc.path)), root_blockers AS (SELECT sampleid, blocked_sessionid, blocker_sessionid AS root_blocker FROM blocking_chain WHERE NOT EXISTS (SELECT 1 FROM gs_asp_1 a WHERE a.sampleid = blocking_chain.sampleid AND a.sessionid = blocking_chain.blocker_sessionid AND a.block_sessionid IS NOT NULL)), blocker_stats AS (SELECT sampleid, root_blocker, count(blocked_sessionid) AS blocked_count, min(blocked_sessionid) AS example_blocked_sessionid FROM root_blockers GROUP BY sampleid, root_blocker), gs_part AS (SELECT DATE_TRUNC('hour', las.sample_time) + FLOOR(EXTRACT(MINUTE FROM las.sample_time) / 5) * INTERVAL '5 min' AS interval_start, CONCAT(las.sessionid::text, '(', case when $ash_c7 then 'a' else 'iit' end, '(', $ash_c9::text, '))') AS root_block_sessid, bs.blocked_count AS b_cnt, substr(las.unique_query, 1, 50) AS h_sql, substr(blocked_las.unique_query, 1, 50) AS w_sql FROM blocker_stats bs JOIN gs_asp_1 las ON bs.sampleid = las.sampleid AND bs.root_blocker = las.sessionid JOIN gs_asp_1 blocked_las ON bs.sampleid = blocked_las.sampleid AND bs.example_blocked_sessionid = blocked_las.sessionid), merged AS (SELECT '[local_active_session]' AS src, interval_start, root_block_sessid, b_cnt, h_sql, w_sql FROM local_part UNION ALL SELECT '[gs_asp]' AS src, interval_start, root_block_sessid, b_cnt, h_sql, w_sql FROM gs_part), picked AS (SELECT m.* FROM merged m WHERE m.src = '[gs_asp]' OR NOT EXISTS (SELECT 1 FROM merged m2 WHERE m2.src = '[gs_asp]' AND m2.interval_start = m.interval_start)), bucketed AS (SELECT p.*, row_number() OVER (PARTITION BY p.src, p.interval_start, p.root_block_sessid ORDER BY p.b_cnt DESC) AS rn FROM picked p) SELECT src || ' ' || to_char(interval_start, 'YYYY-MM-DD HH24:MI:SS') || '-' || to_char(interval_start + INTERVAL '5 minutes', 'HH24:MI:SS') AS date_time, root_block_sessid, b_cnt AS max_b_cnt, h_sql, w_sql FROM bucketed WHERE rn = 1 ORDER BY interval_start, max_b_cnt DESC LIMIT 1000) TO '$dbd/ash_waitchain.csv' WITH CSV HEADER
 PSQL2
     fi
     local t
-    for t in statement wait_events instance_time database pagewriter memory_node_detail shared_memory session_memory session_by_sess pg_settings; do
+    for t in statement wait_events instance_time database pagewriter memory_node_detail shared_memory session_memory session_by_sess pg_settings file_iostat file_redo_iostat; do
         [ -s "$dbd/$t.csv" ] || echo "  [WARN] db/$t.csv missing/empty (view unavailable or DB error)" >&2
     done
     # ---- replication single-point: normalize empty states ----
@@ -24283,7 +24311,8 @@ def load_snap(d):
     for t in ("statement", "wait_events", "instance_time", "database", "pagewriter",
               "memory_node_detail", "shared_memory", "session_memory", "session_by_sess",
               "pg_settings",
-              "object_tables", "object_indexes", "object_dead", "walreceiver"):
+              "object_tables", "object_indexes", "object_dead", "walreceiver",
+              "file_iostat", "file_redo_iostat"):
         s["db"][t] = read_csv_rows(os.path.join(d, "db", t + ".csv"))
     return s
 
@@ -24376,7 +24405,8 @@ def build_window_from_snaps(begin_dir, end_dir):
     for t in ("statement", "wait_events", "instance_time", "database", "pagewriter",
               "memory_node_detail", "shared_memory", "session_memory", "session_by_sess",
               "pg_settings",
-              "object_tables", "object_indexes", "object_dead", "walreceiver"):
+              "object_tables", "object_indexes", "object_dead", "walreceiver",
+              "file_iostat", "file_redo_iostat"):
         win["db"][("begin", t)] = b["db"].get(t, [])
         win["db"][("end", t)] = e["db"].get(t, [])
     bm, em = b["meta"], e["meta"]
@@ -28466,13 +28496,312 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         sys.stdout.write(htmls)
 
 
+# =============================================================================
+# text (screen) reports -- awr topsql/event/summary/tabstat
+# Screen variants of the wdr_* commands, computed from LOCAL awr snapshots
+# (begin/end snap pair) instead of in-DB WDR tables. Each text_* returns
+# (rc, text); the --text main() branch prints it. No files are written.
+# =============================================================================
+
+def _text_banner(title, win, extra=""):
+    """Report header: title bar + one window line (db / window / snap ids)."""
+    m = win["meta"]
+    def _short(ts):
+        # '2026-09-07 10:00:03' -> '0907 10:00'
+        return ts[5:10].replace("-", "") + " " + ts[11:16] if len(ts) >= 16 else ts
+    beg_ts, end_ts = str(m.get("begin_ts", "")), str(m.get("end_ts", ""))
+    beg = _short(beg_ts)
+    # same date -> end shows time only (design: 'window: 0907 10:00-10:10')
+    end = end_ts[11:16] if (len(end_ts) >= 16 and len(beg_ts) >= 16
+                            and end_ts[5:10] == beg_ts[5:10]) else _short(end_ts)
+    bar = "=" * max(20, len(title) + 2)
+    dur = to_num(m.get("duration"))
+    line = "  db: %s   window: %s-%s (%ds)   snap %s -> %s" % (
+        m.get("db_name", "?"), beg, end, int(dur),
+        m.get("snap_id_begin", "?"), m.get("snap_id_end", "?"))
+    if extra:
+        line += "   " + extra
+    return [bar, " " + title, bar, line, ""]
+
+def _text_table(headers, rows, align=None):
+    """psql-style aligned table; align = per-column 'l'/'r' (default all 'l')."""
+    align = align or "l" * len(headers)
+    n = len(headers)
+    widths = [len(str(h)) for h in headers]
+    for r in rows:
+        for i in range(n):
+            widths[i] = max(widths[i], len(str(r[i])))
+    out = [" | ".join(str(h).ljust(widths[i]) for i, h in enumerate(headers))]
+    out.append("-+-".join("-" * w for w in widths))
+    for r in rows:
+        out.append(" | ".join(
+            (str(r[i]).rjust(widths[i]) if align[i] == "r" else str(r[i]).ljust(widths[i]))
+            for i in range(n)))
+    return "\n".join(out)
+
+# topsql ranking dimensions; values are statement.csv delta column names
+# (preads is computed: fetched - hit)
+DIM_COLUMNS = {
+    "dbtime": "db_time",
+    "cpu":    "cpu_time",
+    "io":     "data_io_time",
+    "calls":  "n_calls",
+    "lreads": "n_blocks_fetched",
+    "preads": None,
+    "rows":   "n_returned_rows",
+}
+
+def _dim_value(metric, d):
+    """Dimension value of one statement delta row; None = off this board
+    (negative delta -- wdr semantics NULLs the row)."""
+    if metric == "preads":
+        v = to_num(d.get("n_blocks_fetched", 0)) - to_num(d.get("n_blocks_hit", 0))
+    else:
+        v = to_num(d.get(DIM_COLUMNS[metric], 0))
+    return v if v >= 0 else None
+
+def text_topsql(win, metric, top_n):
+    """wdr_topsql screen equivalent for one awr window. avg_tt uses db_time
+    (same source as the awrrpt Top SQL by DB Time section)."""
+    lines = _text_banner("awr topsql summary", win, extra="dim: %s" % metric)
+    ST = delta_rows(win, "statement", "unique_sql_id",
+                    ["n_calls", "db_time", "cpu_time", "data_io_time",
+                     "execution_time", "n_blocks_fetched", "n_blocks_hit",
+                     "n_returned_rows"])
+    board = []
+    for k, d in ST.items():
+        if to_num(d.get("n_calls", 0)) <= 0:
+            continue
+        v = _dim_value(metric, d)
+        if v is None:
+            continue
+        board.append((v, k, d))
+    if not board:
+        lines.append("(no rows: window has no statement deltas on dimension '%s')" % metric)
+        return 0, "\n".join(lines)
+    board.sort(key=lambda t: t[0], reverse=True)
+    total = sum(t[0] for t in board)
+    headers = ["uname", "sql_id", "calls", "total_pr", "avg_tt", "avg_et",
+               "avg_cpu", "avg_io", "avg_cr", "avg_pr", "pct%"]
+    rows = []
+    for v, k, d in board[:top_n]:
+        row = d.get("__row") or {}
+        calls = to_num(d.get("n_calls", 0))
+        def per(col):
+            x = to_num(d.get(col, 0))
+            return "%.1f" % (x / 1000.0 / calls) if (calls > 0 and x >= 0) else "-"
+        fetched = to_num(d.get("n_blocks_fetched", 0))
+        hit = to_num(d.get("n_blocks_hit", 0))
+        pr = fetched - hit
+        cr_per = fetched / calls if (calls > 0 and fetched >= 0) else None
+        pr_per = pr / calls if (calls > 0 and pr >= 0) else None
+        pct = 100.0 * v / total if total > 0 else None
+        rows.append([row.get("user_name", ""), str(k), "%d" % calls,
+                     "%d" % pr if pr >= 0 else "-",
+                     per("db_time"), per("execution_time"), per("cpu_time"),
+                     per("data_io_time"),
+                     "%.1f" % cr_per if cr_per is not None else "-",
+                     "%.1f" % pr_per if pr_per is not None else "-",
+                     "%.1f" % pct if pct is not None else "-"])
+    lines.append(_text_table(headers, rows, align="lrrrrrrrrrr"))
+    return 0, "\n".join(lines)
+
+def text_event(win, event_filter=None):
+    """wdr_event screen equivalent: 'CPU time' pseudo-row + wait events ranked
+    by total wait time, top 5 total rows (wdr rn<=5). -E prints only that one
+    event (case-insensitive), no CPU row, no top-N cap."""
+    lines = _text_banner("awr topevent summary", win,
+                         extra=("event: %s" % event_filter) if event_filter else "")
+    IT = delta_rows(win, "instance_time", "stat_name", ["value"])
+    def inst(name):
+        v = to_num(IT.get(name, {}).get("value", 0))
+        return v if v >= 0 else None
+    db_time, cpu_time = inst("DB_TIME"), inst("CPU_TIME")
+    WE = delta_rows(win, "wait_events", "event", ["wait", "total_wait_time"])
+    entries = []
+    if event_filter is None and cpu_time is not None:
+        entries.append(("CPU time", "", cpu_time, None))
+    for k, d in WE.items():
+        if k in ("none", "wait cmd"):
+            continue
+        waits = to_num(d.get("wait", 0))
+        t = to_num(d.get("total_wait_time", 0))
+        if waits < 0 or t < 0:
+            continue
+        if event_filter is not None and k.lower() != event_filter.lower():
+            continue
+        if event_filter is None and waits == 0:
+            continue                      # wdr: where waits > 0
+        entries.append((k, (d.get("__row") or {}).get("type", ""), t, waits))
+    if not entries:
+        lines.append("(no events with waits>0 in this window)" if event_filter is None
+                     else "(event '%s' not seen in this window)" % event_filter)
+        return 0, "\n".join(lines)
+    entries.sort(key=lambda e: e[2], reverse=True)
+    if event_filter is None:
+        entries = entries[:5]
+    headers = ["db_time_s", "event", "event_type", "wait_time_s", "waits",
+               "avg_wait_ms", "db_time_pct"]
+    rows = []
+    for ev, etype, t, waits in entries:
+        avg = t / 1000.0 / waits if (waits is not None and waits > 0) else None
+        pct = 100.0 * t / db_time if (db_time and db_time > 0) else None
+        rows.append(["%.1f" % (db_time / 1e6) if db_time is not None else "-",
+                     ev, etype,
+                     "%.1f" % (t / 1e6),
+                     "%d" % waits if waits is not None else "-",
+                     "%.1f" % avg if avg is not None else "-",
+                     ("%.1f%%" % pct) if pct is not None else "-"])
+    lines.append(_text_table(headers, rows, align="rllrrrr"))
+    return 0, "\n".join(lines)
+
+def text_summary(win):
+    """wdr_summary screen equivalent: one row for the whole window."""
+    lines = _text_banner("awr workload summary", win)
+    el = to_num(win["meta"].get("duration"))
+    IT = delta_rows(win, "instance_time", "stat_name", ["value"])
+    def inst(name):
+        v = to_num(IT.get(name, {}).get("value", 0))
+        return v if v >= 0 else None
+    db_time, cpu_time, io_time = inst("DB_TIME"), inst("CPU_TIME"), inst("DATA_IO_TIME")
+    db = delta_rows(win, "database", "datname", ["xact_commit", "xact_rollback", "blks_read"])
+    for _tpl in ("template0", "template1"):
+        db.pop(_tpl, None)
+    def agg(col):
+        vals = [to_num(v.get(col, 0)) for v in db.values()]
+        if any(v < 0 for v in vals):
+            return None
+        return sum(vals)
+    commits, rollbacks, cr = agg("xact_commit"), agg("xact_rollback"), agg("blks_read")
+    txns = None if (commits is None or rollbacks is None) else commits + rollbacks
+    ST = delta_rows(win, "statement", "unique_sql_id",
+                    ["n_calls", "n_soft_parse", "n_hard_parse"])
+    def sagg(col):
+        vals = [to_num(d.get(col, 0)) for d in ST.values()]
+        if any(v < 0 for v in vals):
+            return None
+        return sum(vals)
+    calls, soft, hard = sagg("n_calls"), sagg("n_soft_parse"), sagg("n_hard_parse")
+    parse = None if (soft is None or hard is None) else soft + hard
+    def _io_delta(table, cols):
+        b, e = win["db"][("begin", table)], win["db"][("end", table)]
+        if not b or not e:
+            return [None] * len(cols)
+        out = []
+        for c in cols:
+            bv = sum(to_num(r.get(c, 0)) for r in b)
+            ev = sum(to_num(r.get(c, 0)) for r in e)
+            out.append(ev - bv if ev - bv >= 0 else None)
+        return out
+    # file_iostat rows are PER FILE (filenum/dbid/spcid); the membership drifts
+    # between snaps (temp/log files come and go), so the delta of the row-SUM
+    # goes negative on a healthy window (observed on the test cluster). Diff
+    # per file key instead: dropped files excluded, new files fully counted.
+    def _io_delta_keyed(table, cols):
+        b_rows = win["db"][("begin", table)]
+        e_rows = win["db"][("end", table)]
+        def _has_keys(rows):
+            return any(str(r.get("filenum", "")).strip() for r in rows)
+        # missing csv / empty / pre-keyed aggregate rows (older captures) ->
+        # no per-file data -> caller shows '-'
+        if not b_rows or not e_rows or not _has_keys(b_rows) or not _has_keys(e_rows):
+            return [None] * len(cols)
+        def _sums(rows):
+            out = {}
+            for r in rows:
+                k = (r.get("filenum", ""), r.get("dbid", ""), r.get("spcid", ""))
+                s = out.setdefault(k, [0.0] * len(cols))
+                for i, c in enumerate(cols):
+                    s[i] += to_num(r.get(c, 0))
+            return out
+        b = _sums(b_rows)
+        e = _sums(e_rows)
+        tot = [0.0] * len(cols)
+        zero = [0.0] * len(cols)
+        for k in set(b) | set(e):
+            for i in range(len(cols)):
+                d = e.get(k, zero)[i] - b.get(k, zero)[i]
+                if d > 0:
+                    tot[i] += d
+        return tot
+    phyrds, phywrts, phyblkrd, phyblkwrt = _io_delta_keyed(
+        "file_iostat", ["phyrds", "phywrts", "phyblkrd", "phyblkwrt"])
+    # file_redo_iostat is a global aggregate (no per-file key): plain row-sum
+    redo_blkwrt = _io_delta("file_redo_iostat", ["phywrts", "phyblkwrt"])[-1]
+    def rate(num):
+        return None if (num is None or not el or el <= 0) else num / el
+    def f1(x):
+        return "-" if x is None else "%.1f" % x
+    def minutes(us):
+        return None if us is None else us / 60.0 / 1e6
+    iops = rate(phyrds + phywrts if (phyrds is not None and phywrts is not None) else None)
+    mbps = rate((phyblkrd + phyblkwrt) * 8.0 / 1024
+                if (phyblkrd is not None and phyblkwrt is not None) else None)
+    wal = rate(redo_blkwrt * 8.0 / 1024 if redo_blkwrt is not None else None)
+    headers = ["dbtime", "aas", "cputime", "iotime", "tps", "cr/s", "iops",
+               "mbps", "wal_mb/s", "call/s", "parse/s", "hard/s"]
+    row = [f1(minutes(db_time)),
+           f1(rate(db_time / 1e6 if db_time is not None else None)),
+           f1(minutes(cpu_time)), f1(minutes(io_time)),
+           f1(rate(txns)), f1(rate(cr)), f1(iops), f1(mbps), f1(wal),
+           f1(rate(calls)), f1(rate(parse)), f1(rate(hard))]
+    lines.append(_text_table(headers, [row], align="r" * 12))
+    if iops is None and mbps is None and wal is None:
+        lines.append("")
+        lines.append("note: iops/mbps/wal_mb/s = '-' -- snaps lack db/file_iostat*.csv "
+                     "(captured only by vb_tool versions with the iostat capture)")
+    return 0, "\n".join(lines)
+
+def text_tabstat(win, dbname, schema, table):
+    """wdr_tabstat screen equivalent for one table (any database; the capture
+    loops all datallowconn databases). Counters = window delta (negative ->
+    '-'), alive/dead = END snap gauges."""
+    lines = _text_banner("awr tabstat summary", win,
+                         extra="db: %s  schema: %s  table: %s" % (dbname, schema, table))
+    def _index(rows):
+        idx = {}
+        for r in rows:
+            idx.setdefault((r.get("dbname", ""), r.get("schema", ""),
+                            r.get("object", "")), []).append(r)
+        return idx
+    b = _index(win["db"][("begin", "object_tables")])
+    e = _index(win["db"][("end", "object_tables")])
+    key = (dbname, schema, table)
+    if key not in b and key not in e:
+        lines.append("(table '%s.%s.%s' not found in either snapshot's "
+                     "object_tables capture)" % (dbname, schema, table))
+        return 1, "\n".join(lines)
+    def d(col):
+        bv = sum(to_num(r.get(col, 0)) for r in b.get(key, []))
+        ev = sum(to_num(r.get(col, 0)) for r in e.get(key, []))
+        dv = ev - bv
+        return dv if dv >= 0 else None
+    def endv(col):
+        rows = e.get(key, [])
+        return sum(to_num(r.get(col, 0)) for r in rows) if rows else None
+    def i(x):
+        return "-" if x is None else "%d" % int(x)
+    headers = ["seqscan", "idxscan", "ins", "upd", "del", "hotupd", "alive", "dead"]
+    row = [i(d("seq_scan")), i(d("idx_scan")), i(d("n_tup_ins")), i(d("n_tup_upd")),
+           i(d("n_tup_del")), i(d("n_tup_hot_upd")),
+           i(endv("n_live_tup")), i(endv("n_dead_tup"))]
+    lines.append(_text_table(headers, [row], align="r" * 8))
+    if key not in b:
+        lines.append("")
+        lines.append("note: table absent in BEGIN snap -- deltas count from zero")
+    return 0, "\n".join(lines)
+
+
 def main():
     argv = sys.argv[1:]
     awr_dir = current_dir = single_dir = begin_dir = end_dir = out_html = ""
     awrdiff_dirs = []
     repl_dir = None
+    text_section = None
+    text_db = text_schema = text_table = text_event_name = None
     metric = "dbtime"
     top_n = 30
+    n_given = False
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -28497,9 +28826,28 @@ def main():
         elif a == "-n" and i + 1 < len(argv):
             try:
                 top_n = int(argv[i + 1])
+                n_given = True
             except ValueError:
                 sys.stderr.write("Error: -n expects an integer, got %r\n" % argv[i + 1]); return 2
             i += 2
+        elif a == "--text" and i + 1 < len(argv):
+            text_section = argv[i + 1]; i += 2
+        elif a == "--event" or (a == "-E" and i + 1 < len(argv)):
+            if i + 1 >= len(argv):
+                sys.stderr.write("Error: %s requires a value\n" % a); return 2
+            text_event_name = argv[i + 1]; i += 2
+        elif a == "--db" or (a == "-d" and i + 1 < len(argv)):
+            if i + 1 >= len(argv):
+                sys.stderr.write("Error: %s requires a value\n" % a); return 2
+            text_db = argv[i + 1]; i += 2
+        elif a == "--schema" or (a == "-s" and i + 1 < len(argv)):
+            if i + 1 >= len(argv):
+                sys.stderr.write("Error: %s requires a value\n" % a); return 2
+            text_schema = argv[i + 1]; i += 2
+        elif a == "--table" or (a == "-t" and i + 1 < len(argv)):
+            if i + 1 >= len(argv):
+                sys.stderr.write("Error: %s requires a value\n" % a); return 2
+            text_table = argv[i + 1]; i += 2
         else:
             i += 1
 
@@ -28523,6 +28871,29 @@ def main():
                                     "awr_reports")
         return os.path.join(_reports_dir, "awrdiff_%s_%s_%s.html" % (_dn, _p1, _p2))
 
+    if text_section:
+        if not (begin_dir and end_dir):
+            sys.stderr.write("Error: --text needs --begin DIR and --end DIR\n"); return 2
+        if text_section not in ("topsql", "event", "summary", "tabstat"):
+            sys.stderr.write("Error: --text expects topsql|event|summary|tabstat\n"); return 2
+        win = build_window_from_snaps(begin_dir, end_dir)
+        if text_section == "topsql":
+            if not n_given:
+                top_n = 10        # awr topsql default differs from awrrpt's 30
+            if metric not in DIM_COLUMNS:
+                sys.stderr.write("Error: -m expects one of %s, got %r\n"
+                                 % ("|".join(DIM_COLUMNS), metric)); return 2
+            rc, out = text_topsql(win, metric, top_n)
+        elif text_section == "event":
+            rc, out = text_event(win, text_event_name)
+        elif text_section == "summary":
+            rc, out = text_summary(win)
+        else:
+            if not (text_db and text_schema and text_table):
+                sys.stderr.write("Error: --text tabstat needs --db NAME --schema NAME --table NAME\n"); return 2
+            rc, out = text_tabstat(win, text_db, text_schema, text_table)
+        sys.stdout.write(out + "\n")
+        return rc
     if awrdiff_dirs:
         if len(awrdiff_dirs) != 4:
             sys.stderr.write("Error: --awrdiff needs 4 snap dirs: p1_begin p1_end p2_begin p2_end\n")
@@ -28558,7 +28929,7 @@ def main():
     render(awr_dir, current_dir, metric, top_n, out_html)
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
 VB_BL_COMPARE_PY
     python3 "$tmp" "$@"
     local rc=$?
@@ -28921,6 +29292,375 @@ _awr_check_uptime() {
         return 1
     fi
     return 0
+}
+
+# awr summary|event|topsql|tabstat -- wdr-style SCREEN analytics from existing
+# snap CSVs (no html, no DB connection). One row per consecutive snapshot pair
+# inside the window; defaults to the latest two snaps.
+_awr_text() {
+    local mode="$1"; shift
+    local begin_id="" end_id="" top_n=10 order="elapsed" db="" schema="" table=""
+    local OPTIND=1
+    while getopts ":b:e:n:t:d:s:" opt; do
+        case $opt in
+            b) begin_id="$OPTARG" ;;
+            e) end_id="$OPTARG" ;;
+            n) top_n="$OPTARG" ;;
+            t) if [ "$mode" = "tabstat" ]; then table="$OPTARG"; else order="$OPTARG"; fi ;;
+            d) db="$OPTARG" ;;
+            s) schema="$OPTARG" ;;
+            \?) echo "Error: invalid option -$OPTARG for 'awr $mode'" >&2; return 2 ;;
+            :)  echo "Error: option -$OPTARG requires an argument" >&2; return 2 ;;
+        esac
+    done
+    if [ "$mode" = "tabstat" ]; then
+        if [ -z "$db" ] || [ -z "$schema" ] || [ -z "$table" ]; then
+            echo "Error: 'awr tabstat' requires -d <db> -s <schema> -t <table>" >&2
+            return 2
+        fi
+    else
+        table=""
+    fi
+    if ! [[ "$top_n" =~ ^[0-9]+$ ]] || [ "$top_n" -lt 1 ] || [ "$top_n" -gt 100 ]; then
+        echo "Error: -n must be an integer between 1 and 100" >&2; return 2
+    fi
+    if [ "$mode" = "topsql" ]; then
+        case "$order" in elapsed|cpu|io) ;; *) echo "Error: -t must be elapsed|cpu|io" >&2; return 2;; esac
+    fi
+    local root; root=$(_awr_root)
+    local tmp; tmp=$(mktemp /tmp/vb_tool_awr_text.XXXXXX.py) 2>/dev/null
+    if [ -z "$tmp" ]; then echo "  [ERROR] mktemp failed" >&2; return 1; fi
+    cat > "$tmp" <<'VB_AWR_TEXT_PY'
+#!/usr/bin/env python3
+"""awr screen analytics: summary / event / topsql / tabstat.
+
+Reads snap dirs under <root>/snap_<id>/ (meta.json + db/*.csv[.gz]), computes
+per-consecutive-pair counter deltas and prints wdr-style text tables.
+Dependency-free stdlib only; embedded as heredoc in vb_tool."""
+import csv, gzip, json, os, sys, glob, time, datetime
+
+def read_csv_rows(path):
+    for fn, opener in ((path + ".gz", gzip.open), (path, open)):
+        if os.path.isfile(fn):
+            try:
+                with opener(fn, "rt", errors="replace", newline="") as f:
+                    return list(csv.DictReader(f))
+            except Exception:
+                return []
+    return []
+
+def to_num(v):
+    if v is None or v == "":
+        return None
+    try:
+        return float(str(v).strip())
+    except Exception:
+        return None
+
+def load_snap(d):
+    meta = {}
+    mp = os.path.join(d, "meta.json")
+    if os.path.isfile(mp):
+        try: meta = json.load(open(mp))
+        except Exception: meta = {}
+    return meta
+
+def snap_list(root, begin_id, end_id):
+    out = []
+    for d in sorted(glob.glob(os.path.join(root, "snap_*")), key=lambda p: _sid(p)):
+        m = load_snap(d)
+        sid = m.get("snap_id")
+        if sid is None:
+            continue
+        out.append((int(sid), m, d))
+    if not out:
+        return []
+    lo = int(begin_id) if begin_id else None
+    hi = int(end_id) if end_id else None
+    sel = [t for t in out if (lo is None or t[0] >= lo) and (hi is None or t[0] <= hi)]
+    if not sel:
+        return []
+    if len(sel) == 1 and (lo is None or hi is None):
+        # only one snap in window: fall back to the pair around it if possible
+        i = out.index(sel[0])
+        if i + 1 < len(out):
+            sel = out[i:i + 2]
+        elif i > 0:
+            sel = out[i - 1:i + 1]
+    return sel
+
+def _sid(p):
+    try: return int(p.rsplit("_", 1)[1])
+    except Exception: return 0
+
+def db_rows(d, name):
+    return read_csv_rows(os.path.join(d, "db", name + ".csv"))
+
+def _sum(rows, col):
+    t = 0.0
+    any_v = False
+    for r in rows:
+        v = to_num(r.get(col))
+        if v is not None:
+            t += v; any_v = True
+    return t if any_v else None
+
+def _row_by(rows, keycol, key):
+    for r in rows:
+        if str(r.get(keycol, "")) == key:
+            return r
+    return None
+
+def _delta(a, b):
+    if a is None or b is None:
+        return None
+    d = b - a
+    return d if d >= 0 else None   # negative = counter reset/rewind -> blank
+
+def _ts(meta):
+    ep = to_num(meta.get("ts_epoch"))
+    if ep:
+        return datetime.datetime.fromtimestamp(ep)
+    try:
+        return datetime.datetime.strptime(str(meta.get("ts", ""))[:19], "%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return None
+
+def time_range(m1, m2):
+    t1, t2 = _ts(m1), _ts(m2)
+    if not t1 or not t2:
+        return "?"
+    if t1.date() == t2.date():
+        return "%s %s-%s" % (t1.strftime("%m%d"), t1.strftime("%H:%M"), t2.strftime("%H:%M"))
+    return "%s %s-%s %s" % (t1.strftime("%m%d"), t1.strftime("%H:%M"), t2.strftime("%m%d"), t2.strftime("%H:%M"))
+
+def _it(d, stat):
+    r = _row_by(db_rows(d, "instance_time"), "stat_name", stat)
+    return to_num(r.get("value")) if r else None
+
+def _pairs(snaps):
+    return [(snaps[i], snaps[i + 1]) for i in range(len(snaps) - 1)]
+
+# ---- wdr-style table renderer (psql aligned look) ----
+def psql_table(headers, rows, num_cols):
+    cells = []
+    for r in rows:
+        cells.append(["" if v is None else str(v) for v in r])
+    widths = [len(h) for h in headers]
+    for c in cells:
+        for i, v in enumerate(c):
+            widths[i] = max(widths[i], len(v))
+    sep = "-+-".join("-" * w for w in widths)
+    out = [" | ".join((h.rjust(widths[i]) if i in num_cols else h.ljust(widths[i])) for i, h in enumerate(headers)),
+           sep]
+    for c in cells:
+        out.append(" | ".join((v.rjust(widths[i]) if i in num_cols else v.ljust(widths[i])) for i, v in enumerate(c)))
+    return "\n".join(out)
+
+def _fmt(v, nd=1):
+    if v is None:
+        return ""
+    if nd == 0:
+        return "%d" % round(v)
+    return "%.1f" % v
+
+# ---- modes ----
+def do_summary(snaps):
+    rows = []
+    for (i1, m1, d1), (i2, m2, d2) in _pairs(snaps):
+        t1, t2 = to_num(m1.get("ts_epoch")), to_num(m2.get("ts_epoch"))
+        el = (t2 - t1) if (t1 and t2 and t2 > t1) else None
+        dbt = _delta(_it(d1, "DB_TIME"), _it(d2, "DB_TIME"))
+        cpu = _delta(_it(d1, "CPU_TIME"), _it(d2, "CPU_TIME"))
+        iot = _delta(_it(d1, "DATA_IO_TIME"), _it(d2, "DATA_IO_TIME"))
+        da, db_ = db_rows(d1, "database"), db_rows(d2, "database")
+        xact = _delta(_sum(da, "xact_commit") + _sum(da, "xact_rollback"),
+                      _sum(db_, "xact_commit") + _sum(db_, "xact_rollback"))
+        cr = _delta(_sum(da, "blks_read") + _sum(da, "blks_hit"),
+                    _sum(db_, "blks_read") + _sum(db_, "blks_hit"))
+        sa, sb = db_rows(d1, "statement"), db_rows(d2, "statement")
+        calls = _delta(_sum(sa, "n_calls"), _sum(sb, "n_calls"))
+        parse = _delta(_sum(sa, "n_soft_parse"), _sum(sb, "n_soft_parse"))
+        hard = _delta(_sum(sa, "n_hard_parse"), _sum(sb, "n_hard_parse"))
+        def rate(v):
+            return (v / el) if (v is not None and el) else None
+        rows.append([time_range(m1, m2),
+                     _fmt(dbt / 60e6 if dbt is not None else None),
+                     _fmt(dbt / 1e6 / el if (dbt is not None and el) else None),
+                     _fmt(cpu / 60e6 if cpu is not None else None),
+                     _fmt(iot / 60e6 if iot is not None else None),
+                     _fmt(rate(xact)), _fmt(rate(cr)),
+                     _fmt(rate(calls)), _fmt(rate(parse)), _fmt(rate(hard))])
+    rows.reverse()
+    print("====================")
+    print("awr workload summary")
+    print("====================")
+    print(psql_table(["time_range", "dbtime", "aas", "cputime", "iotime", "tps",
+                     "cr/s", "call/s", "parse/s", "hard/s"], rows,
+                    set(range(1, 10))))
+
+def do_event(snaps, top_n):
+    rows = []
+    for (i1, m1, d1), (i2, m2, d2) in _pairs(snaps):
+        dbt = _delta(_it(d1, "DB_TIME"), _it(d2, "DB_TIME"))
+        cpu = _delta(_it(d1, "CPU_TIME"), _it(d2, "CPU_TIME"))
+        we1 = {(r.get("event") or ""): r for r in db_rows(d1, "wait_events")}
+        we2 = {(r.get("event") or ""): r for r in db_rows(d2, "wait_events")}
+        evs = []
+        for ev, r2 in we2.items():
+            if not ev or ev in ("none", "wait cmd"):
+                continue
+            r1 = we1.get(ev)
+            w1 = to_num(r1.get("total_wait_time")) if r1 else None
+            w2 = to_num(r2.get("total_wait_time"))
+            c1 = to_num(r1.get("wait")) if r1 else None
+            c2 = to_num(r2.get("wait"))
+            wt = _delta(w1, w2)
+            wc = _delta(c1, c2)
+            if wt is None or wt <= 0:
+                continue
+            evs.append([ev, r2.get("type") or "", wc, wt])
+        if cpu is not None and cpu > 0:
+            evs.append(["CPU time", "", None, cpu])
+        evs.sort(key=lambda e: -e[3])
+        for ev, ty, wc, wt in evs[:top_n]:
+            avg = (wt / wc / 1e3) if (wc is not None and wc > 0) else None
+            pct = (100.0 * wt / dbt) if (dbt is not None and dbt > 0) else None
+            rows.append([time_range(m1, m2),
+                         _fmt(dbt / 1e6 if dbt is not None else None),
+                         ev, ty,
+                         _fmt(wc, 0) if wc is not None else "",
+                         _fmt(wt / 1e6), _fmt(avg),
+                         ("%s%%" % _fmt(pct)) if pct is not None else ""])
+        rows.append(["", "", "", "", "", "", "", ""])
+    rows.reverse()
+    print("====================")
+    print("awr topevent summary")
+    print("====================")
+    print(psql_table(["time_range", "db_time_s", "event", "type", "waits",
+                     "wait_s", "avg_wait_ms", "db_time_pct"], rows,
+                    {1, 4, 5, 6, 7}))
+
+def _sql_key(r):
+    return (r.get("user_name") or "", str(r.get("unique_sql_id") or ""))
+
+def do_topsql(snaps, top_n, order):
+    rows = []
+    texts = {}
+    shown = {}
+    oi = {"elapsed": 3, "cpu": 4, "io": 5}[order]
+    for (i1, m1, d1), (i2, m2, d2) in _pairs(snaps):
+        s1 = {}
+        for r in db_rows(d1, "statement"):
+            s1[_sql_key(r)] = r
+        agg = []
+        denom = 0.0
+        for r2 in db_rows(d2, "statement"):
+            k = _sql_key(r2)
+            r1 = s1.get(k)
+            g = lambda c: _delta((to_num(r1.get(c)) if r1 else None), to_num(r2.get(c)))
+            calls = g("n_calls")
+            tt = g("total_elapse_time")
+            if calls is None or calls <= 0 or tt is None:
+                continue
+            q = r2.get("query") or ""
+            texts.setdefault(k[1], " ".join(q.split())[:80])
+            et, cp, io = g("execution_time"), g("cpu_time"), g("data_io_time")
+            cr, pr = g("n_blocks_hit"), g("n_blocks_fetched")
+            vals = [tt / 1e3, et / 1e3 / calls if et is not None else None,
+                    cp / 1e3 / calls if cp is not None else None,
+                    io / 1e3 / calls if io is not None else None,
+                    cr / calls if cr is not None else None,
+                    pr / calls if pr is not None else None]
+            agg.append([k[0], k[1], calls, tt, cp, io, pr] + vals)
+            denom += tt
+        agg.sort(key=lambda a: -(a[oi] if a[oi] is not None else -1))
+        tr = time_range(m1, m2)
+        for a in agg[:top_n]:
+            pct = (100.0 * a[3] / denom) if denom > 0 else None
+            rows.append([tr, a[0], a[1], _fmt(a[2], 0), _fmt(a[6], 0),
+                         _fmt(a[7]), _fmt(a[8]), _fmt(a[9]), _fmt(a[10]),
+                         _fmt(a[11]), _fmt(a[12]),
+                         ("%s%%" % _fmt(pct)) if pct is not None else ""])
+            shown[a[1]] = texts.get(a[1], "")
+        rows.append([""] * 12)
+    rows.reverse()
+    print("====================")
+    print("   awr topsql    ")
+    print("====================")
+    print(psql_table(["time_range", "uname", "sql_id", "calls", "total_pr",
+                     "avg_tt_ms", "avg_et_ms", "avg_cpu_ms", "avg_io_ms",
+                     "avg_cr", "avg_pr", "pct%"], rows, set(range(3, 12))))
+    if shown:
+        print("")
+        print("top sql text (first 80 chars):")
+        for sid, q in shown.items():
+            print("  %s  %s" % (sid, q))
+
+def do_tabstat(snaps, db, schema, table):
+    rows = []
+    for (i1, m1, d1), (i2, m2, d2) in _pairs(snaps):
+        r1 = _row_by([r for r in db_rows(d1, "object_tables") if r.get("dbname") == db
+                      and r.get("schema") == schema and r.get("object") == table], "object", table) \
+             if False else None
+        o1 = [r for r in db_rows(d1, "object_tables") if r.get("dbname") == db
+              and r.get("schema") == schema and r.get("object") == table]
+        o2 = [r for r in db_rows(d2, "object_tables") if r.get("dbname") == db
+              and r.get("schema") == schema and r.get("object") == table]
+        if not o1 or not o2:
+            continue
+        a, b = o1[0], o2[0]
+        d = lambda c: _delta(to_num(a.get(c)), to_num(b.get(c)))
+        t2s = _ts(m2)
+        rows.append([(t2s.strftime("%Y-%m-%d %H:%M:%S") if t2s else "?"),
+                     _fmt(d("seq_scan"), 0), _fmt(d("idx_scan"), 0),
+                     _fmt(d("n_tup_ins"), 0), _fmt(d("n_tup_upd"), 0),
+                     _fmt(d("n_tup_del"), 0), _fmt(d("n_tup_hot_upd"), 0),
+                     _fmt(to_num(b.get("n_live_tup")), 0), _fmt(to_num(b.get("n_dead_tup")), 0)])
+    rows.reverse()
+    print("=========================")
+    print("   awr tabstat summary   ")
+    print("=========================")
+    print("  db: %s  schema: %s  table: %s" % (db, schema, table))
+    print("                         ")
+    if not rows:
+        print("(no snapshot saw this table -- check -d/-s/-t and 'awr list')")
+        return
+    print(psql_table(["start_ts", "seqscan", "idxscan", "ins", "upd", "del",
+                     "hotupd", "alive", "dead"], rows, set(range(1, 9))))
+
+def main():
+    if len(sys.argv) < 3:
+        print("internal error: awr_text argv", file=sys.stderr); sys.exit(2)
+    mode, root = sys.argv[1], sys.argv[2]
+    begin_id = sys.argv[3] or None
+    end_id = sys.argv[4] or None
+    top_n = int(sys.argv[5] or "10")
+    order = sys.argv[6] or "elapsed"
+    db, schema, table = sys.argv[7], sys.argv[8], sys.argv[9]
+    snaps = snap_list(root, begin_id, end_id)
+    if len(snaps) < 2:
+        print("Error: need at least 2 snapshots under %s (got %d); try 'awr create' first"
+              % (root, len(snaps)), file=sys.stderr)
+        sys.exit(1)
+    if mode == "summary":
+        do_summary(snaps)
+    elif mode == "event":
+        do_event(snaps, top_n)
+    elif mode == "topsql":
+        do_topsql(snaps, top_n, order)
+    elif mode == "tabstat":
+        do_tabstat(snaps, db, schema, table)
+    else:
+        print("internal error: mode %s" % mode, file=sys.stderr); sys.exit(2)
+
+if __name__ == "__main__":
+    main()
+VB_AWR_TEXT_PY
+    python3 "$tmp" "$mode" "$root" "$begin_id" "$end_id" "$top_n" "$order" "$db" "$schema" "$table"
+    local rc=$?
+    rm -f "$tmp"
+    return $rc
 }
 
 # awr awrrpt begin <id> end <id>  -- render diff html between two snaps.
@@ -29508,6 +30248,42 @@ _awr_config() {
     esac
 }
 
+# ---- screen (text) reports: awr topsql/event/summary/tabstat ----
+# wdr_* equivalents computed from LOCAL awr snapshots (a begin/end snap pair);
+# aligned text table on stdout, no files written. All four share this helper:
+# snap-id parsing/validation identical to awrrpt (incl. the restart guard).
+# Extra tokens (-n/-m/-E/-d/-s/-t) pass through to the renderer verbatim.
+_awr_text_report() {
+    local section="$1"; shift
+    local begin_id="" end_id="" pass=()
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            begin) [ $# -lt 2 ] && { echo "Error: 'begin' requires a snap_id" >&2; return 2; }
+                   begin_id="$2"; shift 2;;
+            end)   [ $# -lt 2 ] && { echo "Error: 'end' requires a snap_id" >&2; return 2; }
+                   end_id="$2"; shift 2;;
+            -h|--help) awr_help; return 0;;
+            *)     pass+=("$1"); shift;;
+        esac
+    done
+    if [ -z "$begin_id" ] || [ -z "$end_id" ]; then
+        echo "Error: usage 'awr $section begin <snap_id> end <snap_id>' [options]" >&2; return 2
+    fi
+    local root; root=$(_awr_root)
+    local bdir="$root/snap_$begin_id" edir="$root/snap_$end_id"
+    [ -d "$bdir" ] || { echo "Error: snap $begin_id not found ($bdir)" >&2; return 1; }
+    [ -d "$edir" ] || { echo "Error: snap $end_id not found ($edir)" >&2; return 1; }
+    [ "$begin_id" -gt "$end_id" ] 2>/dev/null && \
+        echo "  [WARN] begin snap ($begin_id) is newer than end snap ($end_id); counters may go negative" >&2
+    _awr_check_uptime "$begin_id" "$end_id" || return 1
+    _awr_render --begin "$bdir" --end "$edir" --text "$section" "${pass[@]}"
+}
+
+_awr_topsql()  { _awr_text_report topsql  "$@"; }
+_awr_event()   { _awr_text_report event   "$@"; }
+_awr_summary() { _awr_text_report summary "$@"; }
+_awr_tabstat() { _awr_text_report tabstat "$@"; }
+
 run_awr() {
     local sub="$1"
     if [ -z "$sub" ]; then awr_help; return 0; fi
@@ -29519,6 +30295,10 @@ run_awr() {
         disable)        _awr_disable;;
         awrrpt)         _awr_awrrpt "$@";;
         awrdiff)        _awr_awrdiff "$@";;
+        topsql)         _awr_topsql "$@";;
+        event)          _awr_event "$@";;
+        summary)        _awr_summary "$@";;
+        tabstat)        _awr_tabstat "$@";;
         list|ls)        _awr_list "$1";;
         show)           _awr_show "$@";;
         delete)         if [ "$1" = "until" ]; then _awr_delete_until "$2";
