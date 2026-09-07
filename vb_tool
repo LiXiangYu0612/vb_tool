@@ -53,6 +53,7 @@ show_help() {
     echo "  sqlstat         display sqlstat information"
     echo "  sqltext         display sqltext from postgresql slow log"
     echo "  ssh_setup       setup SSH connectivity between hosts"
+    echo "  stack           capture & aggregate thread stacks (pt-pmp style)"
     echo "  st              display dict table or view"
     echo "  tabsize         display top size of tables (including all indexes)"
     echo "  tabstat         display table statistics"
@@ -108,6 +109,7 @@ show_list() {
     echo "  sqlstat         display sqlstat information"
     echo "  sqltext         display sqltext from postgresql slow log"
     echo "  ssh_setup       setup SSH connectivity between hosts"
+    echo "  stack           capture & aggregate thread stacks (pt-pmp style)"
     echo "  st              display dict table or view"
     echo "  tabsize         display top size of tables (including all indexes)"
     echo "  tabstat         display table statistics"
@@ -208,6 +210,29 @@ collect_log_help() {
     echo ""
     echo "    # Run as root to include system logs (Cluster-wide):"
     echo "    vb_tool collect_log -b '2026-03-08 10:00:00' -e '2026-03-08 11:00:00' -u vastbase -g"
+    echo ""
+}
+
+stack_help() {
+    echo "Usage: vb_tool stack [-P <port>] [-n <samples>] [-d <interval_sec>] [-o <outfile>]"
+    echo ""
+    echo "Description:"
+    echo "    Capture N stack snapshots of the database instance via 'vb_ctl stack'"
+    echo "    and aggregate them Percona pt-pmp style: identical stack chains are"
+    echo "    counted together and listed by frequency (leaf frame first, so the"
+    echo "    innermost frame leads each chain). A quick 'what are the threads"
+    echo "    doing' profile without gdb/pstack."
+    echo ""
+    echo "Options:"
+    echo "    -P <port>   database port to trace (default: \$PGPORT, then 5432)"
+    echo "    -n <count>  number of samples (default: 3, max: 50)"
+    echo "    -d <sec>    seconds between samples (default: 3)"
+    echo "    -o <file>   output file: summary + raw samples (default: ./stack_\$(date +%Y%m%d).txt)"
+    echo ""
+    echo "Examples:"
+    echo "    vb_tool stack"
+    echo "    vb_tool stack -P 5432 -n 5 -d 2"
+    echo "    vb_tool stack -n 10 -d 1 -o /tmp/vdb1_stack.txt"
     echo ""
 }
 
@@ -11284,6 +11309,142 @@ run_collect_log_xlog() {
     rm -f "$temp_list"
 }
 # --- Collection Functions for collect_log ---End---
+
+# --- stack: capture & aggregate thread stacks (Percona pt-pmp style) ---
+# Core: vb_ctl stack -D <datadir> (one dump = all threads, leaf frame first).
+# Port -> datadir: the vastbase postmaster cmdline has -D but no -p, so resolve
+# the listener pid via ss -lntp and read -D from /proc/<pid>/cmdline.
+run_stack() {
+    local port="${PGPORT:-5432}"
+    local samples=3
+    local delay=3
+    local outfile="./stack_$(date +%Y%m%d).txt"
+    local OPTIND=1
+    while getopts ":P:n:d:o:" opt; do
+        case $opt in
+            P) port="$OPTARG" ;;
+            n) samples="$OPTARG" ;;
+            d) delay="$OPTARG" ;;
+            o) outfile="$OPTARG" ;;
+           \?) echo "Invalid option: -$OPTARG" >&2; return 1 ;;
+            :) echo "Option -$OPTARG requires an argument" >&2; return 1 ;;
+        esac
+    done
+    if ! [[ "$port" =~ ^[0-9]+$ ]] || [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
+        echo "Error: -P must be a valid port number (1-65535)" >&2
+        return 1
+    fi
+    if ! [[ "$samples" =~ ^[0-9]+$ ]] || [ "$samples" -lt 1 ] || [ "$samples" -gt 50 ]; then
+        echo "Error: -n (sample count) must be an integer between 1 and 50" >&2
+        return 1
+    fi
+    if ! [[ "$delay" =~ ^[0-9]+$ ]] || [ "$delay" -lt 1 ] || [ "$delay" -gt 3600 ]; then
+        echo "Error: -d (interval seconds) must be an integer between 1 and 3600" >&2
+        return 1
+    fi
+    command -v vb_ctl >/dev/null 2>&1 || { echo "Error: vb_ctl not found in PATH" >&2; return 1; }
+
+    # port -> postmaster pid -> datadir
+    local postmaster_pid=$(ss -lntp 2>/dev/null | grep -oP ":${port}\b.*pid=\K[0-9]+" | head -1)
+    local datadir=""
+    if [ -n "$postmaster_pid" ]; then
+        # cmdline args are NUL-separated: "-D\0/path\0"
+        datadir=$(tr '\0' '\n' < "/proc/${postmaster_pid}/cmdline" 2>/dev/null | grep -A1 '^-D$' | tail -1)
+    fi
+    if [ -z "$datadir" ] || [ ! -d "$datadir" ]; then
+        if [ -n "$PGDATA" ] && [ -d "$PGDATA" ]; then
+            datadir="$PGDATA"
+            echo "[WARN ] could not resolve port $port to a datadir; falling back to \$PGDATA=$PGDATA" >&2
+        else
+            echo "Error: no listening instance found on port $port and \$PGDATA is unset" >&2
+            return 1
+        fi
+    fi
+
+    local tmp_raw=$(mktemp /tmp/vb_stack_raw.XXXXXX)
+    local i=1 rc=0
+    echo "[INFO ] stack profiling port $port (datadir $datadir): $samples samples, ${delay}s interval"
+    while [ "$i" -le "$samples" ]; do
+        echo "[INFO ]   sample $i/$samples ..."
+        {
+            echo "===== sample $i  $(date '+%Y-%m-%d %H:%M:%S') ====="
+            vb_ctl stack -D "$datadir" 2>&1 || rc=1
+            echo ""
+        } >> "$tmp_raw"
+        [ "$i" -lt "$samples" ] && sleep "$delay"
+        i=$((i+1))
+    done
+    if [ "$rc" -ne 0 ] && [ ! -s "$tmp_raw" ]; then
+        echo "Error: vb_ctl stack failed and produced no output" >&2
+        rm -f "$tmp_raw"
+        return 1
+    fi
+
+    # Aggregate pt-pmp style: one chain per thread per sample, identical chains
+    # counted together. Symbol frames keep their names (offsets stripped),
+    # unresolved addresses normalize to 0x???? so they aggregate.
+    local chains_file=$(mktemp /tmp/vb_stack_chains.XXXXXX)
+    awk '
+        function flush_thread() {
+            if (in_thread && nframes > 0) {
+                chain = frames[1]
+                for (k = 2; k <= nframes; k++) chain = chain "," frames[k]
+                print chain
+            }
+            in_thread = 0; nframes = 0
+        }
+        /^Thread [0-9]+ tid</ { flush_thread(); in_thread = 1; next }
+        in_thread && (/^[ \t]*$/ || /^=====/ || /^\[/) { flush_thread(); next }
+        in_thread {
+            line = $0
+            sub(/[ \t]+$/, "", line)
+            sub(/ \+ 0x[0-9a-fA-F]+$/, "", line)
+            if (line ~ /^0x[0-9a-fA-F]+$/) line = "0x????"
+            if (line != "") { nframes++; frames[nframes] = line }
+        }
+        END { flush_thread() }
+    ' "$tmp_raw" > "$chains_file"
+
+    local total=$(wc -l < "$chains_file" | tr -d ' ')
+    if [ "$total" -eq 0 ]; then
+        echo "Error: no thread stacks parsed from vb_ctl output" >&2
+        rm -f "$tmp_raw" "$chains_file"
+        return 1
+    fi
+
+    local summary
+    summary=$(sort "$chains_file" | uniq -c | sort -k1,1nr -k2,2 | \
+        awk -v total="$total" '{
+            pct = $1 * 100.0 / total
+            chain = substr($0, index($0, $2))
+            printf "%6d  %5.1f%%  %s\n", $1, pct, chain
+        }')
+
+    {
+        echo "=============================================================="
+        echo " vb_tool stack  (aggregated, Percona pt-pmp style)"
+        echo " host        : $(hostname)"
+        echo " time        : $(date '+%Y-%m-%d %H:%M:%S')"
+        echo " port        : $port"
+        echo " datadir     : $datadir"
+        echo " samples     : $samples (interval ${delay}s)"
+        echo " stacks      : $total (threads x samples)"
+        echo "=============================================================="
+        echo "$summary"
+        echo ""
+        echo "=============================================================="
+        echo " RAW SAMPLES (vb_ctl stack -D $datadir)"
+        echo "=============================================================="
+        cat "$tmp_raw"
+    } > "$outfile" 2>/dev/null || { echo "Error: cannot write $outfile" >&2; rm -f "$tmp_raw" "$chains_file"; return 1; }
+    rm -f "$tmp_raw" "$chains_file"
+
+    echo "--------------------------------------------------------------"
+    echo "$summary"
+    echo "--------------------------------------------------------------"
+    echo "$total stacks aggregated from $samples samples; summary + raw written to $outfile"
+    return 0
+}
 
 run_analyze_log_v2() {
     # Check if python3 is available
@@ -29804,6 +29965,16 @@ case "$1" in
         fi
         if ! run_collect_log "${@:2}"; then
             collect_log_help
+            exit 1
+        fi
+        ;;
+    stack)
+        if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
+            stack_help
+            exit 0
+        fi
+        if ! run_stack "${@:2}"; then
+            stack_help
             exit 1
         fi
         ;;
