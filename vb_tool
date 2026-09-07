@@ -228,7 +228,7 @@ stack_help() {
     echo "    -P <port>   database port to trace (default: \$PGPORT, then 5432)"
     echo "    -n <count>  number of samples (default: 3, max: 50)"
     echo "    -d <sec>    seconds between samples (default: 3)"
-    echo "    -o <file>   output file: summary + raw samples (default: ./stack_\$(date +%Y%m%d).txt)"
+    echo "    -o <file>   output file: summary + raw samples (default: ./stack_\$(date +%Y%m%d_%H%M%S).txt)"
     echo ""
     echo "Examples:"
     echo "    vb_tool stack"
@@ -11358,7 +11358,7 @@ run_stack() {
     local port="${PGPORT:-5432}"
     local samples=3
     local delay=3
-    local outfile="./stack_$(date +%Y%m%d).txt"
+    local outfile="./stack_$(date +%Y%m%d_%H%M%S).txt"
     local OPTIND=1
     while getopts ":P:n:d:o:" opt; do
         case $opt in
