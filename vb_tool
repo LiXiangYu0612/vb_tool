@@ -217,9 +217,9 @@ stack_help() {
     echo "Usage: vb_tool stack [-P <port>] [-n <samples>] [-d <interval_sec>] [-o <outfile>]"
     echo ""
     echo "Description:"
-    echo "    Capture N stack snapshots of the database instance via 'vb_ctl stack'"
-    echo "    and aggregate them Percona pt-pmp style: identical stack chains are"
-    echo "    counted together and listed by frequency. Chain format:"
+    echo "    Capture N stack snapshots of the database instance via 'vb_ctl stack';"
+    echo "    each sample is aggregated separately, Percona pt-pmp style: identical"
+    echo "    stack chains are counted together and listed by frequency. Chain format:"
     echo "    leaf <- caller <- caller's caller ('<-' reads as 'called by'),"
     echo "    so the innermost frame leads each chain. A quick 'what are the"
     echo "    threads doing' profile without gdb/pstack."
@@ -11315,6 +11315,37 @@ run_collect_log_xlog() {
 # Core: vb_ctl stack -D <datadir> (one dump = all threads, leaf frame first).
 # Port -> datadir: the vastbase postmaster cmdline has -D but no -p, so resolve
 # the listener pid via ss -lntp and read -D from /proc/<pid>/cmdline.
+
+# stdin: one chain per line; $1: optional header label (printed only when the
+# input is non-empty). Prints the aggregated table sorted by frequency.
+_stack_print_aggregate() {
+    local _vb_label="$1"
+    local _vb_f=$(mktemp /tmp/vb_stack_slice.XXXXXX)
+    cat > "$_vb_f"
+    local _vb_t=$(wc -l < "$_vb_f" | tr -d ' ')
+    if [ "$_vb_t" -eq 0 ]; then rm -f "$_vb_f"; return 0; fi
+    [ -n "$_vb_label" ] && printf '%s\n' "$_vb_label"
+    sort "$_vb_f" | uniq -c | sort -k1,1nr -k2,2 | \
+        awk -v total="$_vb_t" -v width="${VB_STACK_WIDTH:-120}" '
+        {
+            pct = $1 * 100.0 / total
+            chain = substr($0, index($0, $2))
+            n = split(chain, fr, " <- ")
+            line = sprintf("%6d  %5.1f%%  %s", $1, pct, fr[1])
+            indent = sprintf("%*s", 16, "")
+            for (i = 2; i <= n; i++) {
+                if (length(line) + length(" <- " fr[i]) > width) {
+                    print line
+                    line = indent "<- " fr[i]
+                } else {
+                    line = line " <- " fr[i]
+                }
+            }
+            print line
+        }'
+    rm -f "$_vb_f"
+}
+
 run_stack() {
     local port="${PGPORT:-5432}"
     local samples=3
@@ -11381,26 +11412,31 @@ run_stack() {
         return 1
     fi
 
-    # Aggregate pt-pmp style: one chain per thread per sample, identical chains
-    # counted together. Symbol frames keep their names (offsets stripped),
-    # unresolved addresses normalize to 0x???? so they aggregate.
+    # Aggregate pt-pmp style: one chain per thread per sample (prefixed with
+    # the sample number so each sample can be aggregated separately).
+    # Symbol frames keep their names (offsets stripped), unresolved addresses
+    # normalize to 0x???? so they aggregate.
     local chains_file=$(mktemp /tmp/vb_stack_chains.XXXXXX)
     awk '
         function flush_thread() {
             if (in_thread && nframes > 0) {
                 chain = frames[1]
                 for (k = 2; k <= nframes; k++) chain = chain " <- " frames[k]
-                print chain
+                print sample_no "\t" chain
             }
             in_thread = 0; nframes = 0
         }
+        /^===== sample / { flush_thread(); sample_no++; next }
         /^Thread [0-9]+ tid</ { flush_thread(); in_thread = 1; next }
-        in_thread && (/^[ \t]*$/ || /^=====/ || /^\[/) { flush_thread(); next }
+        in_thread && (/^[ \t]*$/ || /^\[/) { flush_thread(); next }
         in_thread {
             line = $0
             sub(/[ \t]+$/, "", line)
             sub(/ \+ 0x[0-9a-fA-F]+$/, "", line)
             if (line ~ /^0x[0-9a-fA-F]+$/) line = "0x????"
+            # vb_ctl emits "thread <tid> not available" when a thread cannot be
+            # sampled; normalize to a constant so these aggregate per sample
+            if (line ~ /not available/) { nframes = 1; frames[1] = "thread <not available>"; next }
             if (line != "") { nframes++; frames[nframes] = line }
         }
         END { flush_thread() }
@@ -11413,28 +11449,14 @@ run_stack() {
         return 1
     fi
 
-    # Wrap long chains: continuation lines align under the chain column and
-    # lead with "<- " so the call chain reads across lines (leaf first).
-    # Override width via VB_STACK_WIDTH env (default 120).
-    local summary
-    summary=$(sort "$chains_file" | uniq -c | sort -k1,1nr -k2,2 | \
-        awk -v total="$total" -v width="${VB_STACK_WIDTH:-120}" '
-        {
-            pct = $1 * 100.0 / total
-            chain = substr($0, index($0, $2))
-            n = split(chain, fr, " <- ")
-            line = sprintf("%6d  %5.1f%%  %s", $1, pct, fr[1])
-            indent = sprintf("%*s", 16, "")
-            for (i = 2; i <= n; i++) {
-                if (length(line) + length(" <- " fr[i]) > width) {
-                    print line
-                    line = indent "<- " fr[i]
-                } else {
-                    line = line " <- " fr[i]
-                }
-            }
-            print line
-        }')
+    # Per-sample tables (pct = share of that sample's threads). Long chains
+    # wrap at width (VB_STACK_WIDTH, default 120); continuation lines align
+    # under the chain column.
+    local summary="" i
+    for i in $(seq 1 "$samples"); do
+        summary+=$(awk -F'\t' -v s="$i" '$1 == s {print $2}' "$chains_file" | \
+            _stack_print_aggregate "----- sample $i/$samples -----")$'\n'
+    done
 
     {
         echo "=============================================================="
