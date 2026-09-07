@@ -219,9 +219,10 @@ stack_help() {
     echo "Description:"
     echo "    Capture N stack snapshots of the database instance via 'vb_ctl stack'"
     echo "    and aggregate them Percona pt-pmp style: identical stack chains are"
-    echo "    counted together and listed by frequency (leaf frame first, so the"
-    echo "    innermost frame leads each chain). A quick 'what are the threads"
-    echo "    doing' profile without gdb/pstack."
+    echo "    counted together and listed by frequency. Chain format:"
+    echo "    leaf <- caller <- caller's caller ('<-' reads as 'called by'),"
+    echo "    so the innermost frame leads each chain. A quick 'what are the"
+    echo "    threads doing' profile without gdb/pstack."
     echo ""
     echo "Options:"
     echo "    -P <port>   database port to trace (default: \$PGPORT, then 5432)"
@@ -11388,7 +11389,7 @@ run_stack() {
         function flush_thread() {
             if (in_thread && nframes > 0) {
                 chain = frames[1]
-                for (k = 2; k <= nframes; k++) chain = chain "," frames[k]
+                for (k = 2; k <= nframes; k++) chain = chain " <- " frames[k]
                 print chain
             }
             in_thread = 0; nframes = 0
@@ -11412,17 +11413,32 @@ run_stack() {
         return 1
     fi
 
+    # Wrap long chains: continuation lines align under the chain column and
+    # lead with "<- " so the call chain reads across lines (leaf first).
+    # Override width via VB_STACK_WIDTH env (default 120).
     local summary
     summary=$(sort "$chains_file" | uniq -c | sort -k1,1nr -k2,2 | \
-        awk -v total="$total" '{
+        awk -v total="$total" -v width="${VB_STACK_WIDTH:-120}" '
+        {
             pct = $1 * 100.0 / total
             chain = substr($0, index($0, $2))
-            printf "%6d  %5.1f%%  %s\n", $1, pct, chain
+            n = split(chain, fr, " <- ")
+            line = sprintf("%6d  %5.1f%%  %s", $1, pct, fr[1])
+            indent = sprintf("%*s", 16, "")
+            for (i = 2; i <= n; i++) {
+                if (length(line) + length(" <- " fr[i]) > width) {
+                    print line
+                    line = indent "<- " fr[i]
+                } else {
+                    line = line " <- " fr[i]
+                }
+            }
+            print line
         }')
 
     {
         echo "=============================================================="
-        echo " vb_tool stack  (aggregated, Percona pt-pmp style)"
+        echo " vb_tool stack"
         echo " host        : $(hostname)"
         echo " time        : $(date '+%Y-%m-%d %H:%M:%S')"
         echo " port        : $port"
