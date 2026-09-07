@@ -10234,7 +10234,7 @@ run_collect_log_all() {
 
         if [ "$host_count" -gt 1 ]; then
             echo "[INFO ] Multi-node cluster detected ($host_count nodes: $host_list)."
-			mkdir -p "$output_dir"
+			mkdir -p "$output_dir/dbconf"
             cm_ctl list --param --agent > "$output_dir/dbconf/cm_agent.conf" 2>/dev/null
             cm_ctl list --param --server > "$output_dir/dbconf/cm_server.conf" 2>/dev/null
         else
@@ -10319,6 +10319,12 @@ run_collect_log_nodes_info() {
         [ -f ~/.profile ] && . ~/.profile;
         [ -f ~/.bashrc ] && . ~/.bashrc;
         [ -f ~/.Vastbase ] && . ~/.Vastbase;
+        # context inject: shipped function bodies reference \$begin_time/\$end_time
+        # dynamically (run_wdr_*/run_memhist/run_asp_* via safe_exec); remote nodes
+        # run this script standalone, so define them HERE as literals expanded at
+        # heredoc build time (local node eval sees the caller's locals anyway)
+        begin_time='$begin_time'
+        end_time='$end_time'
 	    mkdir -p $nd/{osinfo,dbinfo,pglog,cmlog,dbconf,ffic_log}
 
         # 1. OSWatcher Collection
@@ -10365,7 +10371,11 @@ run_collect_log_nodes_info() {
                 run_collect_log_asp      > "$nd/dbinfo/asp_${node}.txt"
                 run_collect_log_mem      > "$nd/dbinfo/mem_${node}.txt"
                 run_collect_log_wdr      > "$nd/dbinfo/wdr_${node}.txt"
-				safe_exec "Show Backup" "vb_probackup show -B '$backup_path' >> $nd/dbinfo/dbinfo_${node}.txt "
+				if [ -d "$backup_path" ]; then
+					safe_exec "Show Backup" "vb_probackup show -B '$backup_path' >> $nd/dbinfo/dbinfo_${node}.txt "
+				else
+					echo "[SKIP] Backup dir '$backup_path' not present; skip vb_probackup show." >&2
+				fi
             elif [[ "\$primary_status" == "t" ]]; then
                 echo "[INFO ] Standby node detected. Collecting MEM/ASP (standby view: current memory + local_active_session only)."
                 run_collect_log_mem standby > "$nd/dbinfo/mem_${node}.txt"
