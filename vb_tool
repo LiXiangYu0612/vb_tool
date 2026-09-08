@@ -23699,8 +23699,9 @@ counter delta between two snapshots (end - begin).
                             written to awrdiff_{db}_{p1_begin}_{p2_begin}.html
   topsql  begin <id> end <id> [-n N] [-m dbtime|cpu|io|calls|lreads|preads|rows]
                             print the window's Top SQL to the SCREEN (no html);
-                            ranking dimension via -m (default dbtime), the pct%
-                            column follows it; -n top N (default 10)
+                            ranking dimension via -m (default dbtime); the pct%
+                            and total columns follow it (e.g. -m cpu prints
+                            total_cputime); -n top N (default 10)
   event   begin <id> end <id> [-E <event>]
                             print top wait events to the screen (CPU time +
                             events by total wait time, 5 rows, wdr_event style);
@@ -28628,11 +28629,16 @@ def text_topsql(win, metric, top_n):
         return 0, "\n".join(lines)
     board.sort(key=lambda t: t[0], reverse=True)
     total = sum(t[0] for t in board)
-    # total_dbtime (window total, seconds) and avg_rows (rows/call) are
-    # dimension-independent: printed under EVERY -m dimension
-    headers = ["uname", "sql_id", "calls", "total_dbtime", "total_pr",
-               "avg_dbtime", "avg_et", "avg_cpu", "avg_io", "avg_cr",
-               "avg_pr", "avg_rows", "pct%"]
+    # the total column FOLLOWS the -m dimension (total_cputime under -m cpu,
+    # ...); time dimensions print seconds, count dimensions print integers.
+    # avg_dbtime / avg_rows stay dimension-independent.
+    dim_total_headers = {"dbtime": "total_dbtime", "cpu": "total_cputime",
+                         "io": "total_iotime", "calls": "total_calls",
+                         "lreads": "total_lreads", "preads": "total_preads",
+                         "rows": "total_rows"}
+    headers = ["uname", "sql_id", "calls", dim_total_headers[metric],
+               "total_pr", "avg_dbtime", "avg_et", "avg_cpu", "avg_io",
+               "avg_cr", "avg_pr", "avg_rows", "pct%"]
     rows = []
     for v, k, d in board[:top_n]:
         row = d.get("__row") or {}
@@ -28640,9 +28646,6 @@ def text_topsql(win, metric, top_n):
         def per(col):
             x = to_num(d.get(col, 0))
             return "%.1f" % (x / 1000.0 / calls) if (calls > 0 and x >= 0) else "-"
-        def per_total(col):
-            x = to_num(d.get(col, 0))
-            return "%.1f" % (x / 1e6) if x >= 0 else "-"
         fetched = to_num(d.get("n_blocks_fetched", 0))
         hit = to_num(d.get("n_blocks_hit", 0))
         pr = fetched - hit
@@ -28651,8 +28654,9 @@ def text_topsql(win, metric, top_n):
         pct = 100.0 * v / total if total > 0 else None
         rows_delta = to_num(d.get("n_returned_rows", 0))
         rows_per = rows_delta / calls if (calls > 0 and rows_delta >= 0) else None
+        total_cell = ("%.1f" % (v / 1e6)) if metric in ("dbtime", "cpu", "io") else ("%d" % v)
         rows.append([row.get("user_name", ""), str(k), "%d" % calls,
-                     per_total("db_time"),                     # total_dbtime (s)
+                     total_cell,                               # total of the -m dimension
                      "%d" % pr if pr >= 0 else "-",
                      per("db_time"), per("execution_time"), per("cpu_time"),
                      per("data_io_time"),
