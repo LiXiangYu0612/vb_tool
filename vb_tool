@@ -7904,7 +7904,7 @@ WITH time_counts AS (
         sum(case when $condition2 then 1 else 0 end) wait_wal_sync_cnt,
         sum(case when $condition3 then 1 else 0 end) wait_trans_sync_cnt
     FROM 
-        dbe_perf.local_active_session a  left join dbe_perf.wait_events b on $condition4
+        get_local_active_session() a  left join dbe_perf.wait_events b on $condition4
     WHERE 
         sample_time BETWEEN '$begin_time' AND '$end_time' 
     GROUP BY 
@@ -8127,7 +8127,7 @@ WITH time_counts AS (
         substr(REGEXP_REPLACE(REGEXP_REPLACE(unique_query, '(\r|\n)+', ' '),' {2,}', ' '),1,50) unique_query,
         COUNT(*) AS cnt        
     FROM 
-        dbe_perf.local_active_session a left join dbe_perf.wait_events b on $condition4
+        get_local_active_session() a left join dbe_perf.wait_events b on $condition4
     WHERE 
         sample_time BETWEEN '$begin_time' AND '$end_time' and $condition1 and $condition5 not in ('none') and unique_query_id>0
     GROUP BY 
@@ -8331,7 +8331,7 @@ WITH time_counts AS (
         $condition5 as event,
         COUNT(*) AS cnt        
     FROM 
-        dbe_perf.local_active_session a left join dbe_perf.wait_events b on $condition4
+        get_local_active_session() a left join dbe_perf.wait_events b on $condition4
     WHERE 
         sample_time BETWEEN '$begin_time' AND '$end_time' and $condition1 and $condition5 not in ('none')
     GROUP BY 
@@ -8445,7 +8445,7 @@ run_asp_waitchain_query() {
 gs_asp_1 AS (
     SELECT gs.* FROM gs_asp gs
     WHERE gs.sample_time::timestamp(0) without time zone BETWEEN '$begin_time' AND '$end_time'
-      AND NOT EXISTS (SELECT 1 FROM dbe_perf.local_active_session l
+      AND NOT EXISTS (SELECT 1 FROM get_local_active_session() l
                       WHERE l.sample_time::timestamp(0) without time zone
                             = gs.sample_time::timestamp(0) without time zone)
 ),
@@ -8499,7 +8499,7 @@ blocker_stats AS (
            las.sample_time::timestamp(0) without time zone AS sample_time,
            DATE_TRUNC('hour', las.sample_time::timestamp(0) without time zone)
              + FLOOR(EXTRACT(MINUTE FROM las.sample_time::timestamp(0) without time zone) / 5) * INTERVAL '5 min' AS interval_start,
-           CONCAT(las.sessionid::text, '(', case when $condition7 then 'a' else 'iit' end, '(', $condition9::text, ')') root_block_sessid,
+           CONCAT(las.sessionid::text, '(', case when $condition7 then 'a' else 'iit' end, '(', $condition9::text, '))') root_block_sessid,
            bs.blocked_count as b_cnt,
            substr(las.unique_query,1,50) h_sql,
            substr(blocked_las.unique_query,1,50) w_sql
@@ -8586,7 +8586,7 @@ blocker_stats AS (
 )
 SELECT /*+set(enable_mergejoin off) set(enable_nestloop off) set(enable_index_nestloop off)*/ 
     las.sample_time::timestamp(0) without time zone sample_time,
-    CONCAT(las.sessionid::text, '(', case when $condition7 then 'a' else 'iit' end, '(', $condition9::text, ')') root_block_sessid,
+    CONCAT(las.sessionid::text, '(', case when $condition7 then 'a' else 'iit' end, '(', $condition9::text, '))') root_block_sessid,
     bs.blocked_count as b_cnt,
     substr(las.unique_query,1,50) h_sql,
     substr(blocked_las.unique_query,1,50) w_sql
@@ -8604,35 +8604,82 @@ EOF
 \echo ' active session history waitchain '
 \echo '=================================='
 WITH RECURSIVE
-blocked_sessions AS (
-    SELECT 
+/* local source = get_local_active_session() (NOT the local_active_session
+   view: its final_block_sessionid WITH RECURSIVE walks every row, 3.5x cost
+   per query -- awr flushes switched 2026-09-08, asp follows, same rewrite).
+   Chain grows from blocked sessions ONLY; grouping keeps the old exact
+   semantics: per sampleid+root+wait_status subgroup count (b_cnt) and
+   MAX(sessionid) as the example waiter. */
+lasg AS (
+    SELECT * FROM get_local_active_session()
+    WHERE sample_time::timestamp(0) without time zone BETWEEN '$begin_time' AND '$end_time'
+),
+lchain AS (
+    SELECT
         sampleid,
-        sample_time::timestamp(0) without time zone AS sample_time,
-        final_block_sessionid,
-        wait_status,
-        max(sessionid) w_sessionid,
-        count(*) cnt
-    FROM 
-        dbe_perf.local_active_session
-    WHERE 
-        sample_time::timestamp(0) without time zone BETWEEN '$begin_time' AND '$end_time'
-        AND $condition1
-        AND final_block_sessionid IS NOT NULL 
-    group by sampleid,sample_time::timestamp(0) without time zone,final_block_sessionid,wait_status
+        sessionid AS blocked_sessionid,
+        block_sessionid AS blocker_sessionid,
+        1 AS level,
+        ARRAY[sessionid] AS path
+    FROM lasg
+    WHERE block_sessionid IS NOT NULL
+      AND block_sessionid <> 0
+      AND sessionid <> block_sessionid
+      AND $condition1
+    UNION ALL
+     SELECT
+        bc.sampleid,
+        bc.blocked_sessionid,
+        a.block_sessionid AS blocker_sessionid,
+        bc.level + 1,
+        bc.path || a.sessionid
+    FROM lchain bc
+    JOIN lasg a ON bc.sampleid = a.sampleid
+                  AND bc.blocker_sessionid = a.sessionid
+    WHERE a.block_sessionid IS NOT NULL
+      AND a.block_sessionid <> 0
+      AND NOT a.sessionid = ANY(bc.path)
+),
+lroot AS (
+    SELECT
+        sampleid,
+        blocked_sessionid,
+        blocker_sessionid AS root_blocker
+    FROM lchain
+    WHERE NOT EXISTS (
+        SELECT 1 FROM lasg a
+        WHERE a.sampleid = lchain.sampleid
+          AND a.sessionid = lchain.blocker_sessionid
+          AND a.block_sessionid IS NOT NULL
+    )
+),
+lstats AS (
+    SELECT
+        lc.sampleid,
+        lc.root_blocker,
+        w.wait_status,
+        COUNT(lc.blocked_sessionid) AS blocked_count,
+        MAX(lc.blocked_sessionid) AS example_blocked_sessionid
+    FROM lroot lc
+    JOIN lasg w ON lc.sampleid = w.sampleid
+                  AND lc.blocked_sessionid = w.sessionid
+    GROUP BY lc.sampleid, lc.root_blocker, w.wait_status
 ),
 ${_vb_gs_ctes}
 local_part AS (
     SELECT 'a' src,
-           a.sample_time::timestamp(0) without time zone AS sample_time,
-           DATE_TRUNC('hour', a.sample_time::timestamp(0) without time zone)
-             + FLOOR(EXTRACT(MINUTE FROM a.sample_time::timestamp(0) without time zone) / 5) * INTERVAL '5 min' AS interval_start,
-           CONCAT(b.final_block_sessionid::text, '(', case when $condition6 then 'a' else 'iit' end, '(', $condition8::text, ')') root_block_sessid,
-           b.cnt as b_cnt,
-           substr(a.unique_query,1,50) h_sql,
-           substr(c.unique_query,1,50) w_sql
-    FROM 
-        dbe_perf.local_active_session a,blocked_sessions b,dbe_perf.local_active_session c
-    WHERE a.sampleid=b.sampleid and b.final_block_sessionid=a.sessionid and b.sampleid=c.sampleid and b.w_sessionid=c.sessionid
+           las.sample_time::timestamp(0) without time zone AS sample_time,
+           DATE_TRUNC('hour', las.sample_time::timestamp(0) without time zone)
+             + FLOOR(EXTRACT(MINUTE FROM las.sample_time::timestamp(0) without time zone) / 5) * INTERVAL '5 min' AS interval_start,
+           CONCAT(las.sessionid::text, '(', case when $condition7 then 'a' else 'iit' end, '(', $condition9::text, '))') root_block_sessid,
+           bs.blocked_count as b_cnt,
+           substr(las.unique_query,1,50) h_sql,
+           substr(blocked_las.unique_query,1,50) w_sql
+    FROM lstats bs
+    JOIN lasg las ON bs.sampleid = las.sampleid
+                                      AND bs.root_blocker = las.sessionid
+    JOIN lasg blocked_las ON bs.sampleid = blocked_las.sampleid
+                                              AND bs.example_blocked_sessionid = blocked_las.sessionid
 ),
 ${_vb_gs_tail}
 bucketed AS (
