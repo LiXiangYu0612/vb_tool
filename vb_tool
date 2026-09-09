@@ -7,7 +7,7 @@
 #-- Author:      MVS & Second-line Team 
 #--------------------------------------------------------------------------------
 set -o pipefail
-export VB_TOOL_VERSION="v2.3.2"
+export VB_TOOL_VERSION="v2.3.3"
 show_help() {
     echo "Vastbase Script Tool (vb_tool)"
     echo ""
@@ -24205,6 +24205,7 @@ import csv, gzip, io, os, subprocess, sys
 
 dbd, store_gz = sys.argv[1], sys.argv[2]
 store_plain = store_gz[:-3]           # legacy pre-gz store, read-only
+keys_path = store_gz + ".keys"        # fast key sidecar (user,uid only)
 tmp_new = os.path.join(dbd, "statement_text_new.csv")
 NORM = ("btrim(REGEXP_REPLACE(REGEXP_REPLACE(query, '(\r|\n|\t)+', ' '), "
         "' {2,}', ' '), ' ')")
@@ -24212,22 +24213,43 @@ NORM = ("btrim(REGEXP_REPLACE(REGEXP_REPLACE(query, '(\r|\n|\t)+', ' '), "
 def esc(s):
     return str(s).replace("'", "''")
 
-# existing keys: multi-member gz store first, plain legacy fallback
+def keys_from_store():
+    """Slow fallback: full-scan the text store for its key set."""
+    ks = set()
+    for path, opener in ((store_gz, gzip.open), (store_plain, open)):
+        if os.path.isfile(path):
+            try:
+                with opener(path, "rt", newline="") as f:
+                    for r in csv.DictReader(f):
+                        k = (r.get("user_name", ""), r.get("unique_sql_id", ""))
+                        if k != ("", ""):
+                            ks.add(k)
+            except (csv.Error, OSError, EOFError):
+                pass
+            break
+    return ks
+
+# key set: sidecar first -- O(number of keys), independent of text volume;
+# rebuilt once from the store when missing/empty (upgrade / deleted sidecar)
 seen = set()
-if os.path.isfile(store_gz):
+if os.path.isfile(keys_path) and os.path.getsize(keys_path) > 0:
     try:
-        with gzip.open(store_gz, "rt", newline="") as f:
-            for r in csv.DictReader(f):
-                seen.add((r.get("user_name", ""), r.get("unique_sql_id", "")))
-    except (csv.Error, OSError, EOFError):
-        pass
-elif os.path.isfile(store_plain):
-    try:
-        with open(store_plain, newline="") as f:
-            for r in csv.DictReader(f):
-                seen.add((r.get("user_name", ""), r.get("unique_sql_id", "")))
+        with open(keys_path, newline="") as f:
+            for r in csv.reader(f):
+                if len(r) >= 2 and (r[0], r[1]) != ("", ""):
+                    seen.add((r[0], r[1]))
     except (csv.Error, OSError):
-        pass
+        seen = set()
+if not seen:
+    seen = keys_from_store()
+    if seen:
+        try:
+            with open(keys_path, "w", newline="") as kf:
+                w = csv.writer(kf)
+                for k in sorted(seen):
+                    w.writerow([k[0], k[1]])
+        except OSError:
+            pass
 stored = len(seen)
 
 # key universe = the numbers-only statement.csv collected seconds ago
@@ -24264,6 +24286,7 @@ w = csv.writer(buf)
 if not (os.path.isfile(store_gz) or os.path.isfile(store_plain)):
     w.writerow(["user_name", "unique_sql_id", "query"])
 new = 0
+appended = []
 try:
     with open(tmp_new, newline="") as f:
         for r in csv.DictReader(f):
@@ -24272,11 +24295,19 @@ try:
                 continue
             miss.discard(k)
             w.writerow([k[0], k[1], r.get("query", "")])
+            appended.append(k)
             new += 1
     data = buf.getvalue().encode()
     if data:
         with open(store_gz, "ab") as out:
             out.write(gzip.compress(data, 6))    # one new gzip member, append-only
+    # sidecar AFTER the store append: a crash in between only causes a harmless
+    # duplicate fetch+append next snapshot (same key, same deterministic text)
+    if appended:
+        with open(keys_path, "a", newline="") as kf:
+            kw = csv.writer(kf)
+            for k in appended:
+                kw.writerow([k[0], k[1]])
     print("  [awr] sql_text store: appended %d, now %d keys" % (new, stored + new))
 except Exception as e:
     print("  [WARN] sql_text merge failed: %s" % e)
@@ -24761,6 +24792,7 @@ def build_window_from_snaps(begin_dir, end_dir):
     # member, existing bytes are never rewritten. Plain csv accepted too
     # (legacy pre-gz stores).
     win["_sqltext"] = {}
+    win["_sqltext_missing"] = True
     for _d in (end_dir, begin_dir):
         _root = os.path.dirname(os.path.abspath(_d))
         _spgz = os.path.join(_root, "sql_text.csv.gz")
@@ -24770,14 +24802,17 @@ def build_window_from_snaps(begin_dir, end_dir):
                 with gzip.open(_spgz, "rt", newline="") as f:
                     win["_sqltext"] = {(r.get("user_name", ""), r.get("unique_sql_id", "")):
                                        r.get("query", "") for r in csv.DictReader(f)}
+                win["_sqltext_missing"] = False
                 break
             if os.path.isfile(_sp):
                 with open(_sp, newline="") as f:
                     win["_sqltext"] = {(r.get("user_name", ""), r.get("unique_sql_id", "")):
                                        r.get("query", "") for r in csv.DictReader(f)}
+                win["_sqltext_missing"] = False
                 break
         except (csv.Error, OSError, EOFError):
             win["_sqltext"] = {}
+            win["_sqltext_missing"] = False   # exists but unreadable -- not "missing"
             break
     return win
 
@@ -27997,13 +28032,21 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         parts.append('<div class="note">no data</div>')
     else:
         parts.append('<table class="t"><tr><th>SQL Id</th><th>SQL Text</th></tr>')
+        _any_missing = False
         for uid in sorted(shown_sql.keys()):
             row = shown_sql[uid] or {}
+            _q = sql_text_of(win, row, uid)
+            if _q is None:
+                _any_missing = True
             parts.append('<tr id="sql-%(u)s"><td class="sqlid">%(u)s</td>'
                          '<td><pre class="sqlfull">%(q)s</pre></td></tr>'
                          % {"u": esc(uid), "q": esc(normalize_sql(
-                             sql_text_of(win, row, uid)
-                             or "(text not collected: absent from sql_text store)"))})
+                             _q or "(text not collected: absent from sql_text store)"))})
+        if _any_missing and win.get("_sqltext_missing"):
+            parts.append('</table><div class="note">WARNING: shared sql_text store '
+                         '(sql_text.csv.gz) not found next to the snapshots -- texts above are '
+                         'unavailable. Restore the store file, or take a new snapshot to '
+                         're-collect texts for still-running SQL. Numbers are unaffected.</div>')
         parts.append('</table>')
 
     # ================= Database Parameters (pg_settings, live query) =================
@@ -28771,14 +28814,21 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         parts.append('<div class="note">no data</div>')
     else:
         parts.append('<table class="t"><tr><th>SQL Id</th><th>SQL Text</th></tr>')
+        _any_missing = False
         for uid in sorted(shown_sql):
             row = shown_sql[uid] or {}
+            _q = sql_text_of(win2, row, uid) or sql_text_of(win1, row, uid)
+            if _q is None:
+                _any_missing = True
             parts.append('<tr id="sql-%(u)s"><td class="sqlid">%(u)s</td>'
                          '<td><pre class="sqlfull">%(q)s</pre></td></tr>'
                          % {"u": esc(uid), "q": esc(normalize_sql(
-                             sql_text_of(win2, row, uid)
-                             or sql_text_of(win1, row, uid)
-                             or "(text not collected: absent from sql_text store)"))})
+                             _q or "(text not collected: absent from sql_text store)"))})
+        if _any_missing and (win1.get("_sqltext_missing") and win2.get("_sqltext_missing")):
+            parts.append('</table><div class="note">WARNING: shared sql_text store '
+                         '(sql_text.csv.gz) not found next to the snapshots -- texts above are '
+                         'unavailable. Restore the store file, or take a new snapshot to '
+                         're-collect texts for still-running SQL. Numbers are unaffected.</div>')
         parts.append('</table>')
 
     # ================= Database Parameters (CHANGED between period1 and period2) =================
