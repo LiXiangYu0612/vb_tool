@@ -1,13 +1,13 @@
 #!/bin/bash
 #--------------------------------------------------------------------------------
 #-- File name:   vb_tool
-#-- Version  ：  v2.1.0
-#-- Commit at：  2026-09-08 08:10:00
+#-- Version  ：  v2.2.0
+#-- Commit at：  2026-09-08 14:05:00
 #-- Purpose:     Vastbase Script Tool
 #-- Author:      MVS & Second-line Team 
 #--------------------------------------------------------------------------------
 set -o pipefail
-export VB_TOOL_VERSION="v2.1.0"
+export VB_TOOL_VERSION="v2.2.0"
 show_help() {
     echo "Vastbase Script Tool (vb_tool)"
     echo ""
@@ -23671,7 +23671,7 @@ unset _vb_port_args
 
 awr_help() {
     cat <<'EOF'
-Usage: vb_tool awr <create|enable|disable|awrrpt|awrdiff|topsql|event|summary|tabstat|list|show|delete|config> [options]
+Usage: vb_tool awr <create|enable|disable|awrrpt|awrdiff|topsql|event|summary|tabstat|cpu|io|page|replstat|replslot|replay|list|show|delete|config> [options]
 
 Single-point performance snapshots (Oracle AWR style). Each snapshot is an
 instantaneous OS+DB sample assigned a monotonic snap_id. An AWR report is the
@@ -23715,6 +23715,43 @@ counter delta between two snapshots (end - begin).
                             print one table's window scan/DML deltas plus
                             live/dead tuple counts (wdr_tabstat style); works
                             for tables of ANY database (all-db capture)
+  cpu     begin <id> end <id>
+                            print the window's PER-MINUTE CPU utilization to
+                            the screen (busy/user/nice/system/iowait/irq/
+                            softirq/steal/idle + run/block procs -- awrrpt CPU
+                            per-minute detail fields; needs 'awr enable')
+  io      begin <id> end <id>
+                            print the window's PER-MINUTE per-device IO to the
+                            screen (r/s w/s rB/s wB/s + separate r/w await ms
+                            per minute -- awrrpt 'Disk I/O' per-minute detail
+                            fields; idle device-minutes hidden; needs 'awr
+                            enable')
+  page    begin <id> end <id>
+                            print the window's PER-MINUTE paging series to the
+                            screen (pgpgin/pgpgout/pswpin/pswpout/pgfault/
+                            pgmajfault per sec + MemUsed/MemAvail + zone
+                            watermarks -- awrrpt 'Memory / Paging' per-minute
+                            detail fields; needs 'awr enable' sampler logs)
+  replstat begin <id> end <id>
+                            print the window's PER-MINUTE pg_stat_replication
+                            samples (standby/addr/state/sync + sent/write/
+                            flush/replay LSNs + net/fsync/apply/total byte
+                            lags; all-zero-lag healthy minutes hidden -- awrrpt
+                            'Replication Stat' fields; needs 'awr enable')
+  replslot begin <id> end <id>
+                            print the window's PER-MINUTE pg_replication_slots
+                            samples (slot/type/plugin/db/active/restart_lsn/
+                            xmin/catalog_xmin/dummy_stby/confirmed_flush --
+                            awrrpt 'Replication Slots' fields; needs 'awr
+                            enable')
+  replay  begin <id> end <id>
+                            print the window's PER-MINUTE walreceiver samples
+                            to the screen (STANDBY side: state/peer + sent/
+                            received/flush/replay LSNs + net/fsync/apply/total
+                            byte lags + sync%/channel -- awrrpt 'Wal Receiver'
+                            fields; every minute shown, no hiding; on the
+                            primary there is no walreceiver; needs 'awr
+                            enable')
   list    [YYYY-MM-DD]     list stored snapshots (snap_id / ts / host / db),
                             newest first; default latest 30, a date lists
                             that whole day
@@ -23955,7 +23992,11 @@ _awr_collect() {
     # unquoted heredoc so $dbd expands; no other $ in the SQL. psql continues
     # past a missing view (no ON_ERROR_STOP) -> we warn about empty CSVs below.
     PGCONNECT_TIMEOUT=$_ct PGOPTIONS="$_st" psql -d postgres 2>&1 <<PSQL | grep -v '^$' >&2 || true
-\copy (SELECT * FROM dbe_perf.statement)                TO '$dbd/statement.csv'     WITH CSV HEADER
+-- statement: explicit column list = everything the renderer reads by name
+-- (the other ~46 columns are never used); query is flattened AT CAPTURE
+-- (blank lines + runs of spaces/tabs -> single space, leading/trailing
+-- trimmed) -- same normalization the SQL Text section applies when rendering.
+\copy (SELECT user_name, unique_sql_id, btrim(REGEXP_REPLACE(REGEXP_REPLACE(query, '(\r|\n|\t)+', ' '), ' {2,}', ' '), ' ') AS query, n_calls, n_blocks_fetched, n_blocks_hit, n_soft_parse, n_hard_parse, db_time, cpu_time, execution_time, plan_time, data_io_time, n_returned_rows FROM dbe_perf.statement) TO '$dbd/statement.csv' WITH CSV HEADER
 \copy (SELECT * FROM dbe_perf.wait_events)              TO '$dbd/wait_events.csv'   WITH CSV HEADER
 \copy (SELECT * FROM gs_instance_time)                  TO '$dbd/instance_time.csv' WITH CSV HEADER
 \copy (SELECT * FROM pg_stat_database)                  TO '$dbd/database.csv'      WITH CSV HEADER
@@ -24360,6 +24401,7 @@ def load_snap(d):
               "memory_node_detail", "shared_memory", "session_memory", "session_by_sess",
               "pg_settings",
               "object_tables", "object_indexes", "object_dead", "walreceiver",
+              "replication", "replication_slots",
               "file_iostat", "file_redo_iostat"):
         s["db"][t] = read_csv_rows(os.path.join(d, "db", t + ".csv"))
     return s
@@ -24454,6 +24496,7 @@ def build_window_from_snaps(begin_dir, end_dir):
               "memory_node_detail", "shared_memory", "session_memory", "session_by_sess",
               "pg_settings",
               "object_tables", "object_indexes", "object_dead", "walreceiver",
+              "replication", "replication_slots",
               "file_iostat", "file_redo_iostat"):
         win["db"][("begin", t)] = b["db"].get(t, [])
         win["db"][("end", t)] = e["db"].get(t, [])
@@ -28813,6 +28856,240 @@ def text_summary(win):
                      "(captured only by vb_tool versions with the iostat capture)")
     return 0, "\n".join(lines)
 
+def _f1(x):
+    return "-" if x is None else "%.1f" % x
+
+def text_cpu(win, repl_dir=None):
+    """awrrpt CPU 'Per-minute detail' as a screen table: per-minute CPU
+    percent breakdown (busy..idle) + run/block procs from the per-minute os
+    sampler logs -- same source and columns as the html report's folded
+    detail table. The sampler runs while 'awr enable' is on."""
+    lines = _text_banner("awr cpu detail", win)
+    m = win["meta"]
+    samples = (load_os_samples(repl_dir, m.get("begin_ts", ""), m.get("end_ts", ""))
+               if repl_dir else {"files": []})
+    if not samples.get("files"):
+        lines.append("(no per-minute OS samples in this period -- the sampler runs")
+        lines.append(" while 'awr enable' is on; manual snapshots alone carry no series)")
+        return 0, "\n".join(lines)
+    bts = str(m.get("begin_ts", ""))
+    series = [r for r in os_minute_cpu_series(samples) if (not bts or r[0] >= bts)]
+    if not series:
+        lines.append("(no usable per-minute samples in this period)")
+        return 0, "\n".join(lines)
+    headers = ["time"] + list(_CPUF) + ["r", "b"]
+    rows = [[ts] + ["%.1f" % d[f] for f in _CPUF] + ["%d" % r, "%d" % b]
+            for ts, d, r, b in series]
+    lines.append(_text_table(headers, rows, align="l" + "r" * (len(headers) - 1)))
+    return 0, "\n".join(lines)
+
+def text_io(win, repl_dir=None):
+    """awrrpt 'Disk I/O per device' PER-MINUTE detail as a screen table:
+    per-minute per-device rates + separate r/w await from the per-minute os
+    sampler logs -- same source and columns as the html report's folded
+    detail table (idle device-minutes skipped; discard/flush columns appear
+    when the kernel counts them)."""
+    lines = _text_banner("awr io detail", win)
+    m = win["meta"]
+    samples = (load_os_samples(repl_dir, m.get("begin_ts", ""), m.get("end_ts", ""))
+               if repl_dir else {"files": []})
+    if not samples.get("files"):
+        lines.append("(no per-minute OS samples in this period -- the sampler runs")
+        lines.append(" while 'awr enable' is on; manual snapshots alone carry no series)")
+        return 0, "\n".join(lines)
+    bts = str(m.get("begin_ts", ""))
+    per, dsup = os_minute_disk_series(samples)
+    rows = sorted((ts, dev, rt, ra, wa)
+                  for dev, lst in per.items() for ts, rt, ra, wa in lst
+                  if (not bts or ts >= bts))
+    if not rows:
+        lines.append("(no active disk device-minutes in this period)")
+        return 0, "\n".join(lines)
+    headers = ["time", "dev", "r/s", "w/s", "rB/s", "wB/s"]
+    align = "ll" + "r" * 4
+    if dsup:
+        headers += ["dc/s", "flush/s"]
+        align += "rr"
+    headers += ["r_await (ms)", "w_await (ms)"]
+    align += "rr"
+    out = []
+    for ts, dev, rt, ra, wa in rows:
+        row = [ts, dev, "%.1f" % rt["read_iops"], "%.1f" % rt["write_iops"],
+               fmt_bytes(rt["read_bytes_s"]), fmt_bytes(rt["write_bytes_s"])]
+        if dsup:
+            row += [("%.1f" % rt["discard_iops"]) if rt["discard_iops"] is not None else "-",
+                    ("%.1f" % rt["flush_iops"]) if rt["flush_iops"] is not None else "-"]
+        row += [("%.1f" % ra) if ra is not None else "-",
+                ("%.1f" % wa) if wa is not None else "-"]
+        out.append(row)
+    lines.append(_text_table(headers, out, align=align))
+    return 0, "\n".join(lines)
+
+def text_page(win, repl_dir=None):
+    """awrrpt 'Memory / Paging' PER-MINUTE detail as a screen table:
+    per-minute paging rates + meminfo gauges + summed-zone watermarks from
+    the per-minute os sampler logs -- same source and columns as the html
+    report's folded 'Per-minute detail' table. The sampler runs while
+    'awr enable' is on; manual snapshots alone carry no series."""
+    lines = _text_banner("awr page detail", win)
+    m = win["meta"]
+    samples = (load_os_samples(repl_dir, m.get("begin_ts", ""), m.get("end_ts", ""))
+               if repl_dir else {"files": []})
+    if not samples.get("files"):
+        lines.append("(no per-minute OS samples in this period -- the sampler runs")
+        lines.append(" while 'awr enable' is on; manual snapshots alone carry no series)")
+        return 0, "\n".join(lines)
+    bts = str(m.get("begin_ts", ""))
+    series = {ts: d for ts, d in os_minute_pg_series(samples)
+              if (not bts or ts >= bts)}
+    gauges = {ts: g for ts, g in os_minute_mem_gauges(samples).items()
+              if (not bts or ts >= bts)}
+    if not series and not gauges:
+        lines.append("(no usable per-minute samples in this period)")
+        return 0, "\n".join(lines)
+    has_wm = any(g[2] is not None for g in gauges.values())
+    headers = ["time", "pgpgin/s", "pgpgout/s", "pswpin/s", "pswpout/s",
+               "pgfault/s", "pgmajfault/s", "memused_mb", "memavail_mb"]
+    if has_wm:
+        # text-only: min/low/high merged into one field (awrrpt keeps 3 cols)
+        headers += ["wm_free_mb", "wm_min/low/high_mb"]
+    rows = []
+    for ts in sorted(set(series) | set(gauges)):
+        d = series.get(ts)
+        g = gauges.get(ts)
+        row = [ts] + [fmt_num(d[k]) if d else "-" for k in _PGK]
+        row += ["%.0f" % g[0] if g else "-", "%.0f" % g[1] if g else "-"]
+        if has_wm:
+            row += ["%.0f" % g[2][0] if (g and g[2]) else "-",
+                    "/".join("%.0f" % x for x in g[2][1:]) if (g and g[2]) else "-"]
+        rows.append(row)
+    lines.append(_text_table(headers, rows, align="l" + "r" * (len(headers) - 1)))
+    return 0, "\n".join(lines)
+
+def text_replstat(win, repl_dir=None):
+    """awrrpt 'Replication Stat' table as a screen report: per-minute
+    pg_stat_replication samples with computed byte lags -- same source,
+    fields and healthy-minute hiding as the html Replication section
+    (zero-lag minutes are hidden with a count; null/error sampler minutes
+    render as gap rows)."""
+    lines = _text_banner("awr replstat detail", win)
+    m = win["meta"]
+    repl = load_repl_samples(repl_dir, m.get("begin_ts", ""), m.get("end_ts", ""))
+    if not repl["files"]:
+        lines.append("(no replication samples in this period -- the sampler runs")
+        lines.append(" while 'awr enable' is on)")
+        return 0, "\n".join(lines)
+    rows = sorted(repl["rows"], key=lambda r: r[0])   # stable: same-minute standbys keep order
+    if repl["n_data"] == 0:
+        lines.append("(no standby connected at any sample in this period")
+        lines.append(" (%d samples: %d null, %d error))"
+                     % (len(rows), repl["n_null"], repl["n_error"]))
+        return 0, "\n".join(lines)
+    headers = ["time", "standby", "addr", "state", "sync", "sent_lsn", "write_lsn",
+               "flush_lsn", "replay_lsn", "net_lag", "fsync_lag", "apply_lag", "total_lag"]
+    out = []
+    zhidden = 0
+    for ts, kind, f in rows:
+        if kind != "data":
+            msg = "(no standby connected)" if kind == "null" else "(sample error)"
+            out.append([ts, msg] + [""] * 11)
+            continue
+        sent, write, flush, replay = f[4], f[5], f[6], f[7]
+        L = [_lsn64(x) for x in (sent, write, flush, replay)]
+        def _seg(i, j):
+            a, b = L[i], L[j]
+            return fmt_bytes(a - b) if (a is not None and b is not None and a >= b) else "n/a"
+        # healthy minute: sent==write==flush==replay => all four lags 0 => noise row, hidden
+        if all(L[i] is not None and L[i] == L[j] for (i, j) in ((0, 1), (1, 2), (2, 3))):
+            zhidden += 1
+            continue
+        out.append([ts, f[0], f[1], f[2], f[3], sent, write, flush, replay,
+                    _seg(0, 1), _seg(1, 2), _seg(2, 3), _seg(0, 3)])
+    if zhidden == repl["n_data"] and repl["n_null"] == 0 and repl["n_error"] == 0:
+        lines.append("(replication healthy the whole window: all %d samples had zero lag" % zhidden)
+        lines.append(" (net / fsync / apply / total) -- healthy minutes not shown)")
+        return 0, "\n".join(lines)
+    lines.append(_text_table(headers, out, align="l" * 9 + "rrrr"))
+    if zhidden:
+        lines.append("")
+        lines.append("  %d minute(s) with all lags 0 hidden -- healthy minutes." % zhidden)
+    return 0, "\n".join(lines)
+
+def text_replslot(win, repl_dir=None):
+    """awrrpt 'Replication Slots' table as a screen report: per-minute
+    pg_replication_slots samples -- same source, fields and order as the
+    html sub-table; null/error sampler minutes render as gap rows."""
+    lines = _text_banner("awr replslot detail", win)
+    m = win["meta"]
+    slots = load_slot_samples(repl_dir, m.get("begin_ts", ""), m.get("end_ts", ""))
+    if not slots["files"]:
+        lines.append("(no slot samples in this period -- the sampler runs")
+        lines.append(" while 'awr enable' is on)")
+        return 0, "\n".join(lines)
+    rows = sorted(slots["rows"], key=lambda r: r[0])   # stable: same-minute slots keep order
+    if slots["n_data"] == 0:
+        lines.append("(no replication slots at any sample in this period")
+        lines.append(" (%d samples: %d null, %d error))"
+                     % (len(rows), slots["n_null"], slots["n_error"]))
+        return 0, "\n".join(lines)
+    headers = ["time", "slot", "type", "plugin", "db", "active", "restart_lsn",
+               "xmin", "catalog_xmin", "dummy_stby", "confirmed_flush"]
+    out = []
+    for ts, kind, f in rows:
+        if kind != "data":
+            msg = "(no replication slots)" if kind == "null" else "(sample error)"
+            out.append([ts, msg] + [""] * 9)
+            continue
+        out.append([ts, f[0], f[2], f[1], f[3], f[4], f[7], f[5], f[6], f[8], f[9]])
+    lines.append(_text_table(headers, out, align="l" * 11))
+    return 0, "\n".join(lines)
+
+def text_replay(win, repl_dir=None):
+    """awrrpt 'Wal Receiver' table as a screen report (standby role):
+    per-minute pg_stat_get_wal_receiver samples -- same source, fields and
+    order as the html Replication sub-table. Every minute is shown (the html
+    walrcv table has no healthy-minute hiding, unlike repl stat); null/error
+    sampler minutes render as gap rows. lag = LSN byte distance: Net =
+    sender_sent-received, Fsync = received-flush, Apply = flush-replay,
+    Total = sender_sent-replay."""
+    lines = _text_banner("awr replay detail", win)
+    m = win["meta"]
+    wr = load_walrcv_samples(repl_dir, m.get("begin_ts", ""), m.get("end_ts", ""))
+    if not wr["files"]:
+        lines.append("(no walreceiver samples in this period -- the sampler runs")
+        lines.append(" while 'awr enable' is on)")
+        return 0, "\n".join(lines)
+    rows = sorted(wr["rows"], key=lambda r: r[0])   # stable: same-minute rows keep order
+    if wr["n_data"] == 0:
+        lines.append("(no walreceiver at any sample in this period")
+        lines.append(" (%d samples: %d null, %d error))"
+                     % (len(rows), wr["n_null"], wr["n_error"]))
+        return 0, "\n".join(lines)
+    headers = ["time", "state", "peer", "sent_lsn", "received_lsn", "flush_lsn",
+               "replay_lsn", "net_lag", "fsync_lag", "apply_lag", "total_lag",
+               "sync%", "channel"]
+    out = []
+    for ts, kind, f in rows:
+        if kind != "data":
+            msg = ("(no walreceiver -- primary role or disconnected)" if kind == "null"
+                   else "(sample error)")
+            out.append([ts, msg] + [""] * 11)
+            continue
+        # f: 0 pid, 1 local_role, 2 peer_role, 3 peer_state, 4 state, 5 sent,
+        #    6 sender_write, 7 sender_flush, 8 sender_replay, 9 received,
+        #    10 receiver_write, 11 receiver_flush, 12 receiver_replay,
+        #    13 sync_percent, 14 channel
+        sent, received, flush, replay = f[5], f[9], f[11], f[12]
+        L = [_lsn64(x) for x in (sent, received, flush, replay)]
+        def _seg(i, j):
+            a, b = L[i], L[j]
+            return fmt_bytes(a - b) if (a is not None and b is not None and a >= b) else "n/a"
+        out.append([ts, f[4], "%s/%s" % (f[2], f[3]), sent, received, flush, replay,
+                    _seg(0, 1), _seg(1, 2), _seg(2, 3), _seg(0, 3), f[13], f[14]])
+    lines.append(_text_table(headers, out,
+                             align="l" * 7 + "r" * 4 + "r" + "l"))
+    return 0, "\n".join(lines)
+
 def text_tabstat(win, dbname, schema, table):
     """wdr_tabstat screen equivalent for one table (any database; the capture
     loops all datallowconn databases). Counters = window delta (negative ->
@@ -28935,8 +29212,15 @@ def main():
     if text_section:
         if not (begin_dir and end_dir):
             sys.stderr.write("Error: --text needs --begin DIR and --end DIR\n"); return 2
-        if text_section not in ("topsql", "event", "summary", "tabstat"):
-            sys.stderr.write("Error: --text expects topsql|event|summary|tabstat\n"); return 2
+        if text_section not in ("topsql", "event", "summary", "tabstat",
+                                "cpu", "io", "page", "replstat", "replslot",
+                                "replay"):
+            sys.stderr.write("Error: --text expects topsql|event|summary|tabstat"
+                             "|cpu|io|page|replstat|replslot|replay\n"); return 2
+        if not repl_dir:
+            # per-minute series (os_*.log) live in the snapshot root,
+            # next to the snap_<id> dirs the text reports are given
+            repl_dir = os.path.dirname(os.path.abspath(begin_dir))
         win = build_window_from_snaps(begin_dir, end_dir)
         if text_section == "topsql":
             if not n_given:
@@ -28949,6 +29233,18 @@ def main():
             rc, out = text_event(win, text_event_name)
         elif text_section == "summary":
             rc, out = text_summary(win)
+        elif text_section == "cpu":
+            rc, out = text_cpu(win, repl_dir)
+        elif text_section == "io":
+            rc, out = text_io(win, repl_dir)
+        elif text_section == "page":
+            rc, out = text_page(win, repl_dir)
+        elif text_section == "replstat":
+            rc, out = text_replstat(win, repl_dir)
+        elif text_section == "replslot":
+            rc, out = text_replslot(win, repl_dir)
+        elif text_section == "replay":
+            rc, out = text_replay(win, repl_dir)
         else:
             if not (text_db and text_schema and text_table):
                 sys.stderr.write("Error: --text tabstat needs --db NAME --schema NAME --table NAME\n"); return 2
@@ -30344,6 +30640,12 @@ _awr_topsql()  { _awr_text_report topsql  "$@"; }
 _awr_event()   { _awr_text_report event   "$@"; }
 _awr_summary() { _awr_text_report summary "$@"; }
 _awr_tabstat() { _awr_text_report tabstat "$@"; }
+_awr_cpu()     { _awr_text_report cpu     "$@"; }
+_awr_io()      { _awr_text_report io      "$@"; }
+_awr_page()    { _awr_text_report page    "$@"; }
+_awr_replstat() { _awr_text_report replstat "$@"; }
+_awr_replslot() { _awr_text_report replslot "$@"; }
+_awr_replay()   { _awr_text_report replay   "$@"; }
 
 run_awr() {
     local sub="$1"
@@ -30360,6 +30662,12 @@ run_awr() {
         event)          _awr_event "$@";;
         summary)        _awr_summary "$@";;
         tabstat)        _awr_tabstat "$@";;
+        cpu)            _awr_cpu "$@";;
+        io)             _awr_io "$@";;
+        page)           _awr_page "$@";;
+        replstat)       _awr_replstat "$@";;
+        replslot)       _awr_replslot "$@";;
+        replay)         _awr_replay "$@";;
         list|ls)        _awr_list "$1";;
         show)           _awr_show "$@";;
         delete)         if [ "$1" = "until" ]; then _awr_delete_until "$2";
