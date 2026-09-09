@@ -7,7 +7,7 @@
 #-- Author:      MVS & Second-line Team 
 #--------------------------------------------------------------------------------
 set -o pipefail
-export VB_TOOL_VERSION="v2.3.1"
+export VB_TOOL_VERSION="v2.3.2"
 show_help() {
     echo "Vastbase Script Tool (vb_tool)"
     echo ""
@@ -24122,11 +24122,12 @@ _awr_collect() {
     # unquoted heredoc so $dbd expands; no other $ in the SQL. psql continues
     # past a missing view (no ON_ERROR_STOP) -> we warn about empty CSVs below.
     PGCONNECT_TIMEOUT=$_ct PGOPTIONS="$_st" psql -d postgres 2>&1 <<PSQL | grep -v '^$' >&2 || true
--- statement: explicit column list = everything the renderer reads by name
--- (the other ~46 columns are never used); query is flattened AT CAPTURE
--- (blank lines + runs of spaces/tabs -> single space, leading/trailing
--- trimmed) -- same normalization the SQL Text section applies when rendering.
-\copy (SELECT user_name, unique_sql_id, btrim(REGEXP_REPLACE(REGEXP_REPLACE(query, '(\r|\n|\t)+', ' '), ' {2,}', ' '), ' ') AS query, n_calls, n_blocks_fetched, n_blocks_hit, n_soft_parse, n_hard_parse, db_time, cpu_time, execution_time, plan_time, data_io_time, n_returned_rows FROM dbe_perf.statement) TO '$dbd/statement.csv' WITH CSV HEADER
+-- statement: FULL numeric detail, query column dropped -- text lives in the
+-- shared per-root sql_text.csv (filled by the merge step below, driven by the
+-- keys in this file -- ALL texts, no top-N filter). 95% of the old file was
+-- text; numbers-only keeps every row so sum-of-delta stays the exact pct base
+-- (2026-09-09-awr-statement-slim-design.md).
+\copy (SELECT user_name, unique_sql_id, n_calls, n_blocks_fetched, n_blocks_hit, n_soft_parse, n_hard_parse, db_time, cpu_time, execution_time, plan_time, data_io_time, n_returned_rows FROM dbe_perf.statement) TO '$dbd/statement.csv' WITH CSV HEADER
 \copy (SELECT * FROM dbe_perf.wait_events)              TO '$dbd/wait_events.csv'   WITH CSV HEADER
 \copy (SELECT * FROM gs_instance_time)                  TO '$dbd/instance_time.csv' WITH CSV HEADER
 \copy (SELECT * FROM pg_stat_database)                  TO '$dbd/database.csv'      WITH CSV HEADER
@@ -24186,6 +24187,104 @@ PSQL2
     for t in statement wait_events instance_time database pagewriter memory_node_detail shared_memory session_memory session_by_sess pg_settings file_iostat file_redo_iostat; do
         [ -s "$dbd/$t.csv" ] || echo "  [WARN] db/$t.csv missing/empty (view unavailable or DB error)" >&2
     done
+    # ---- shared sql_text store: append texts for statement keys not yet in
+    # ---- the store (ALL texts, no top-N filter; key = user_name+unique_sql_id
+    # ---- -- uid is user-scoped in VB). The numbers-only statement.csv just
+    # ---- collected IS the key universe: steady state diffs against the store
+    # ---- and fetches only the missing texts with a small IN-list \copy (KBs);
+    # ---- a huge gap (first run / store lost) falls back to ONE full-text
+    # ---- export via a temp file. Store = MULTI-MEMBER GZIP: each collection
+    # ---- appends one compressed member to sql_text.csv.gz -- existing bytes
+    # ---- are NEVER rewritten (true append), readers get the whole history
+    # ---- transparently (gzip multi-member). Runs under the snap-create root
+    # ---- flock; auto-created. Temp file (if any) removed BEFORE the gzip pass.
+    if [ -s "$dbd/statement.csv" ]; then
+        local _store; _store="$(dirname "$target")/sql_text.csv.gz"
+        python3 - "$dbd" "$_store" <<'PYTEXT' >&2 || true
+import csv, gzip, io, os, subprocess, sys
+
+dbd, store_gz = sys.argv[1], sys.argv[2]
+store_plain = store_gz[:-3]           # legacy pre-gz store, read-only
+tmp_new = os.path.join(dbd, "statement_text_new.csv")
+NORM = ("btrim(REGEXP_REPLACE(REGEXP_REPLACE(query, '(\r|\n|\t)+', ' '), "
+        "' {2,}', ' '), ' ')")
+
+def esc(s):
+    return str(s).replace("'", "''")
+
+# existing keys: multi-member gz store first, plain legacy fallback
+seen = set()
+if os.path.isfile(store_gz):
+    try:
+        with gzip.open(store_gz, "rt", newline="") as f:
+            for r in csv.DictReader(f):
+                seen.add((r.get("user_name", ""), r.get("unique_sql_id", "")))
+    except (csv.Error, OSError, EOFError):
+        pass
+elif os.path.isfile(store_plain):
+    try:
+        with open(store_plain, newline="") as f:
+            for r in csv.DictReader(f):
+                seen.add((r.get("user_name", ""), r.get("unique_sql_id", "")))
+    except (csv.Error, OSError):
+        pass
+stored = len(seen)
+
+# key universe = the numbers-only statement.csv collected seconds ago
+miss = set()
+with open(os.path.join(dbd, "statement.csv"), newline="") as f:
+    for r in csv.DictReader(f):
+        k = (r.get("user_name", ""), r.get("unique_sql_id", ""))
+        if k != ("", "") and k not in seen:
+            seen.add(k)
+            miss.add(k)
+print("  [awr] sql_text store: %d stored, %d missing texts" % (stored, len(miss)))
+if not miss:
+    sys.exit(0)
+
+env = dict(os.environ, PGCONNECT_TIMEOUT="15", PGOPTIONS="-c statement_timeout=60000")
+if len(miss) > 2000:
+    # first run / store lost: one full-text export to a temp file, streamed in
+    sql = ("SELECT user_name, unique_sql_id, %s AS query FROM dbe_perf.statement"
+           % NORM)
+    subprocess.run(["psql", "-d", "postgres", "-qAtX", "-c",
+                    "\\copy (%s) TO '%s' WITH CSV HEADER" % (sql, tmp_new)],
+                   env=env, stdout=subprocess.DEVNULL, check=False)
+else:
+    pairs = ",".join("('%s','%s')" % (esc(u), esc(i)) for u, i in sorted(miss))
+    sql = ("SELECT user_name, unique_sql_id, %s AS query FROM dbe_perf.statement "
+           "WHERE (user_name, unique_sql_id) IN (%s)" % (NORM, pairs))
+    p = subprocess.run(["psql", "-d", "postgres", "-qAtX", "-c",
+                        "\\copy (%s) TO STDOUT WITH CSV HEADER" % sql],
+                       env=env, stdout=subprocess.PIPE, check=False)
+    open(tmp_new, "wb").write(p.stdout)
+
+buf = io.StringIO()
+w = csv.writer(buf)
+if not (os.path.isfile(store_gz) or os.path.isfile(store_plain)):
+    w.writerow(["user_name", "unique_sql_id", "query"])
+new = 0
+try:
+    with open(tmp_new, newline="") as f:
+        for r in csv.DictReader(f):
+            k = (r.get("user_name", ""), r.get("unique_sql_id", ""))
+            if k not in miss or k == ("", ""):
+                continue
+            miss.discard(k)
+            w.writerow([k[0], k[1], r.get("query", "")])
+            new += 1
+    data = buf.getvalue().encode()
+    if data:
+        with open(store_gz, "ab") as out:
+            out.write(gzip.compress(data, 6))    # one new gzip member, append-only
+    print("  [awr] sql_text store: appended %d, now %d keys" % (new, stored + new))
+except Exception as e:
+    print("  [WARN] sql_text merge failed: %s" % e)
+finally:
+    if os.path.isfile(tmp_new):
+        os.remove(tmp_new)
+PYTEXT
+    fi
     # ---- replication single-point: normalize empty states ----
     # \copy ok + 0 rows      -> header-only csv  -> append literal "null" row (no standby)
     # view missing/DB error  -> no csv at all    -> write header + "error" row + WARN
@@ -24656,6 +24755,30 @@ def build_window_from_snaps(begin_dir, end_dir):
         "db_start_time": em.get("db_start_time", ""),
         "port": em.get("port", ""),
     }
+    # shared sql_text store (statement slim): sibling file of the snap dirs;
+    # end snap's root preferred, begin's as fallback (--root relocation).
+    # Store format: multi-member gzip -- each collection appends one compressed
+    # member, existing bytes are never rewritten. Plain csv accepted too
+    # (legacy pre-gz stores).
+    win["_sqltext"] = {}
+    for _d in (end_dir, begin_dir):
+        _root = os.path.dirname(os.path.abspath(_d))
+        _spgz = os.path.join(_root, "sql_text.csv.gz")
+        _sp = os.path.join(_root, "sql_text.csv")
+        try:
+            if os.path.isfile(_spgz):
+                with gzip.open(_spgz, "rt", newline="") as f:
+                    win["_sqltext"] = {(r.get("user_name", ""), r.get("unique_sql_id", "")):
+                                       r.get("query", "") for r in csv.DictReader(f)}
+                break
+            if os.path.isfile(_sp):
+                with open(_sp, newline="") as f:
+                    win["_sqltext"] = {(r.get("user_name", ""), r.get("unique_sql_id", "")):
+                                       r.get("query", "") for r in csv.DictReader(f)}
+                break
+        except (csv.Error, OSError, EOFError):
+            win["_sqltext"] = {}
+            break
     return win
 
 def _os_version():
@@ -25470,6 +25593,15 @@ def delta_rows(win, table, key, num_cols):
         d["__present_end"] = k in end
         out[k] = d
     return out
+
+
+def sql_text_of(win, row, uid):
+    """SQL text for one statement row: inline 'query' column first (legacy full
+    snapshots), then the shared per-root sql_text store; None = not collected."""
+    q = (row or {}).get("query")
+    if q:
+        return q
+    return (win.get("_sqltext") or {}).get(((row or {}).get("user_name", ""), str(uid)))
 
 # -----------------------------------------------------------------------------
 # /proc parsing (window delta inside one window, then we diff the two windows)
@@ -27869,7 +28001,9 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             row = shown_sql[uid] or {}
             parts.append('<tr id="sql-%(u)s"><td class="sqlid">%(u)s</td>'
                          '<td><pre class="sqlfull">%(q)s</pre></td></tr>'
-                         % {"u": esc(uid), "q": esc(normalize_sql(row.get("query", uid)))})
+                         % {"u": esc(uid), "q": esc(normalize_sql(
+                             sql_text_of(win, row, uid)
+                             or "(text not collected: absent from sql_text store)"))})
         parts.append('</table>')
 
     # ================= Database Parameters (pg_settings, live query) =================
@@ -28641,7 +28775,10 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             row = shown_sql[uid] or {}
             parts.append('<tr id="sql-%(u)s"><td class="sqlid">%(u)s</td>'
                          '<td><pre class="sqlfull">%(q)s</pre></td></tr>'
-                         % {"u": esc(uid), "q": esc(normalize_sql(row.get("query", uid)))})
+                         % {"u": esc(uid), "q": esc(normalize_sql(
+                             sql_text_of(win2, row, uid)
+                             or sql_text_of(win1, row, uid)
+                             or "(text not collected: absent from sql_text store)"))})
         parts.append('</table>')
 
     # ================= Database Parameters (CHANGED between period1 and period2) =================
