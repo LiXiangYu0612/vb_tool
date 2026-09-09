@@ -7,7 +7,7 @@
 #-- Author:      MVS & Second-line Team 
 #--------------------------------------------------------------------------------
 set -o pipefail
-export VB_TOOL_VERSION="v2.3.3"
+export VB_TOOL_VERSION="v2.3.4"
 show_help() {
     echo "Vastbase Script Tool (vb_tool)"
     echo ""
@@ -24260,13 +24260,15 @@ with open(os.path.join(dbd, "statement.csv"), newline="") as f:
         if k != ("", "") and k not in seen:
             seen.add(k)
             miss.add(k)
-print("  [awr] sql_text store: %d stored, %d missing texts" % (stored, len(miss)))
 if not miss:
     sys.exit(0)
 
 env = dict(os.environ, PGCONNECT_TIMEOUT="15", PGOPTIONS="-c statement_timeout=60000")
 if len(miss) > 2000:
-    # first run / store lost: one full-text export to a temp file, streamed in
+    # first run / store lost: one full-text export to a temp file, streamed in.
+    # The only routine-visible line: this path takes tens of seconds at
+    # production scale and would look like a hang without a notice.
+    print("  [awr] sql_text store: full (re)build, fetching %d texts" % len(miss))
     sql = ("SELECT user_name, unique_sql_id, %s AS query FROM dbe_perf.statement"
            % NORM)
     subprocess.run(["psql", "-d", "postgres", "-qAtX", "-c",
@@ -24308,7 +24310,6 @@ try:
             kw = csv.writer(kf)
             for k in appended:
                 kw.writerow([k[0], k[1]])
-    print("  [awr] sql_text store: appended %d, now %d keys" % (new, stored + new))
 except Exception as e:
     print("  [WARN] sql_text merge failed: %s" % e)
 finally:
