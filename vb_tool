@@ -7,7 +7,7 @@
 #-- Author:      MVS & Second-line Team 
 #--------------------------------------------------------------------------------
 set -o pipefail
-export VB_TOOL_VERSION="v2.3.4"
+export VB_TOOL_VERSION="v2.4.0"
 show_help() {
     echo "Vastbase Script Tool (vb_tool)"
     echo ""
@@ -23801,7 +23801,7 @@ _se_kb_dump() {
 
 awr_help() {
     cat <<'EOF'
-Usage: vb_tool awr <create|enable|disable|awrrpt|awrdiff|topsql|event|summary|tabstat|cpu|io|page|replstat|replslot|replay|list|show|delete|config> [options]
+Usage: vb_tool awr <create|enable|disable|awrrpt|awrdiff|baseline|topsql|event|summary|tabstat|cpu|io|page|replstat|replslot|replay|list|show|delete|config> [options]
 
 Single-point performance snapshots (Oracle AWR style). Each snapshot is an
 instantaneous OS+DB sample assigned a monotonic snap_id. An AWR report is the
@@ -23827,6 +23827,21 @@ counter delta between two snapshots (end - begin).
                             durations within 10 min) -- Δ columns are raw
                             window deltas;
                             written to awrdiff_{db}_{p1_begin}_{p2_begin}.html
+  awrdiff begin <x> end <y> baseline <id>
+                            diff the CURRENT window (x->y) against a registered
+                            baseline: Period1 = baseline (reference), Period2 =
+                            x->y, Delta = P2-P1 = current - baseline
+  baseline begin <id> end <id>
+                            register a BASELINE: self-contained copy (both
+                            endpoint snaps + the window's per-minute logs)
+                            under awrs/<port>/baselines/<id>/ -- immune to auto
+                            purge and 'awr delete until' (the main library
+                            keeps purging normally). Requires begin < end and
+                            the same DB uptime at both endpoints
+  baseline info            list registered baselines (id, endpoints, window)
+  baseline report <id>     render the baseline window's html report (same
+                            chain as awrrpt; default baseline_{db}_{b}_{e}.html)
+  baseline delete <id>     drop the baseline copy dir (main library untouched)
   topsql  begin <id> end <id> [-n N] [-m dbtime|cpu|io|calls|lreads|preads|rows]
                             print the window's Top SQL to the SCREEN (no html);
                             ranking dimension via -m (default dbtime); the pct%
@@ -24095,16 +24110,19 @@ _awr_collect() {
     # snap self-contained and bounds query cost to one interval. Neither
     # table available (PG / enable_asp off) -> \copy errors swallowed ->
     # no ash_*.csv -> renderer still shows the section with a no-data note.
-    local ash_b ash_e _ash_prev="" _id _best=-1 _d
+    local ash_b ash_e _ash_prev="" _ts _d
     ash_e=$(date '+%F %T')
+    # previous snap = the one with the LATEST ts, not the highest snap_id: ids
+    # are usually monotonic with time, but manual --root mixes and guard
+    # discards (id allocated then thrown away) can break that assumption.
+    # '%F %T' strings compare chronologically as plain strings.
     for _d in "${target%/*}"/snap_*; do
         [ -f "$_d/meta.json" ] || continue
         [ "$_d" = "$target" ] && continue
-        _id=${_d##*snap_}
-        case "$_id" in ''|*[!0-9]*) continue;; esac
-        if [ "$_id" -gt "$_best" ]; then
-            _best=$_id
-            _ash_prev=$(sed -n 's/.*"ts" *: *"\([^"]*\)".*/\1/p' "$_d/meta.json" 2>/dev/null | head -1)
+        _ts=$(sed -n 's/.*"ts" *: *"\([^"]*\)".*/\1/p' "$_d/meta.json" 2>/dev/null | head -1)
+        [ -z "$_ts" ] && continue
+        if [ -z "$_ash_prev" ] || [[ "$_ts" > "$_ash_prev" ]]; then
+            _ash_prev="$_ts"
         fi
     done
     if [ -n "$_ash_prev" ]; then ash_b="$_ash_prev"; else ash_b=$(date -d '-60 minutes' '+%F %T'); fi
@@ -24187,6 +24205,20 @@ PSQL2
     for t in statement wait_events instance_time database pagewriter memory_node_detail shared_memory session_memory session_by_sess pg_settings file_iostat file_redo_iostat; do
         [ -s "$dbd/$t.csv" ] || echo "  [WARN] db/$t.csv missing/empty (view unavailable or DB error)" >&2
     done
+    # ---- core-data guard (user 2026-09-09): the connect probe can pass and the
+    # DB still die seconds later (or lose its perf-view rights) -- then every
+    # \copy above failed silently (|| true) and the snap's DB side is empty,
+    # which would poison awr list/reports. Detected by BOTH core files
+    # (statement + instance_time) being dead: a \copy that ran always leaves at
+    # least its header row, even for an empty view / a standby with no tracked
+    # SQL, so missing/empty means the copy itself never succeeded. One core
+    # file alive keeps the snap (the remaining sections still have value).
+    # REPL and OS files are deliberately NOT part of this: OS data is always
+    # there, and a missing repl section must not kill the snap (user 2026-09-09).
+    if [ ! -s "$dbd/statement.csv" ] && [ ! -s "$dbd/instance_time.csv" ]; then
+        echo "  [ERROR] core DB data not collected (statement.csv AND instance_time.csv both missing/empty) -- snapshot data unavailable, failing this snap" >&2
+        return 1
+    fi
     # ---- shared sql_text store: append texts for statement keys not yet in
     # ---- the store (ALL texts, no top-N filter; key = user_name+unique_sql_id
     # ---- -- uid is user-scoped in VB). The numbers-only statement.csv just
@@ -24743,7 +24775,7 @@ def load_ash_flushes(repl_dir, begin_ts, end_ts):
         v[2] = _mx(v[2], to_num(r.get("avg_cnt", 0) or 0))
     return out
 
-def build_window_from_snaps(begin_dir, end_dir):
+def build_window_from_snaps(begin_dir, end_dir, sqltext_root=None):
     """Compose a load_window-shaped `win` from two single-point snapshots.
     win["os"/"db"] keyed by (phase, name); meta synthesized for the awrrpt header
     (hostname/db_name/db_version from END snap; begin_ts/end_ts/duration from the pair)."""
@@ -24787,15 +24819,20 @@ def build_window_from_snaps(begin_dir, end_dir):
         "db_start_time": em.get("db_start_time", ""),
         "port": em.get("port", ""),
     }
-    # shared sql_text store (statement slim): sibling file of the snap dirs;
-    # end snap's root preferred, begin's as fallback (--root relocation).
+    # shared sql_text store (statement slim): sibling file of the snap dirs.
     # Store format: multi-member gzip -- each collection appends one compressed
     # member, existing bytes are never rewritten. Plain csv accepted too
     # (legacy pre-gz stores).
     win["_sqltext"] = {}
     win["_sqltext_missing"] = True
-    for _d in (end_dir, begin_dir):
-        _root = os.path.dirname(os.path.abspath(_d))
+    # end snap's root preferred, begin's as fallback (--root relocation);
+    # third candidate = explicit --sqltext-root (baseline windows: the copy
+    # dir holds no store -- the MAIN root's store is permanent, use it)
+    _cand_roots = [os.path.dirname(os.path.abspath(end_dir)),
+                   os.path.dirname(os.path.abspath(begin_dir))]
+    if sqltext_root:
+        _cand_roots.append(sqltext_root)
+    for _root in _cand_roots:
         _spgz = os.path.join(_root, "sql_text.csv.gz")
         _sp = os.path.join(_root, "sql_text.csv")
         try:
@@ -24812,9 +24849,11 @@ def build_window_from_snaps(begin_dir, end_dir):
                 win["_sqltext_missing"] = False
                 break
         except (csv.Error, OSError, EOFError):
+            # this candidate is dead (e.g. half-appended gz from a full disk):
+            # drop any partial parse, try the next candidate; _sqltext_missing
+            # only clears when a candidate READS clean (all failed -> WARNING)
             win["_sqltext"] = {}
-            win["_sqltext_missing"] = False   # exists but unreadable -- not "missing"
-            break
+            continue
     return win
 
 def _os_version():
@@ -29453,6 +29492,8 @@ def main():
     awr_dir = current_dir = single_dir = begin_dir = end_dir = out_html = ""
     awrdiff_dirs = []
     repl_dir = None
+    sqltext_root = None
+    name_prefix = "awr"
     text_section = None
     text_db = text_schema = text_table = text_event_name = None
     metric = "dbtime"
@@ -29473,6 +29514,10 @@ def main():
             end_dir = argv[i + 1]; i += 2
         elif a == "--repl-dir" and i + 1 < len(argv):
             repl_dir = argv[i + 1] or None; i += 2   # empty string == not supplied
+        elif a == "--sqltext-root" and i + 1 < len(argv):
+            sqltext_root = argv[i + 1] or None; i += 2
+        elif a == "--name-prefix" and i + 1 < len(argv):
+            name_prefix = argv[i + 1] or "awr"; i += 2
         elif a == "--awrdiff" and i + 4 < len(argv):
             awrdiff_dirs = argv[i + 1:i + 5]; i += 5
         elif a == "-o" and i + 1 < len(argv):
@@ -29508,14 +29553,15 @@ def main():
             i += 1
 
     def _default_html(meta):
-        # default name: awr_{DB_NAME}_{BEGINTIME}_{ENDTIME}.html under awr_reports/
+        # default name: {prefix}_{DB_NAME}_{BEGINTIME}_{ENDTIME}.html under awr_reports/
+        # (prefix "awr" for awrrpt windows, "baseline" for baseline reports)
         _dn = meta.get("db_name") or meta.get("name") or "unknown"
         _dn = "".join(c for c in str(_dn) if c.isalnum() or c in "_-") or "unknown"
         _b = str(meta.get("begin_ts", "")).replace("-", "").replace(":", "").replace(" ", "")
         _e = str(meta.get("end_ts", "")).replace("-", "").replace(":", "").replace(" ", "")
         _reports_dir = os.path.join(os.path.expanduser(os.environ.get("VB_TOOL_HOME", "~/.vb_tool")),
                                     "awr_reports")
-        return os.path.join(_reports_dir, "awr_%s_%s_%s.html" % (_dn, _b, _e))
+        return os.path.join(_reports_dir, "%s_%s_%s_%s.html" % (name_prefix, _dn, _b, _e))
 
     def _default_awrdiff_html(meta1, meta2):
         # awrdiff_{DB}_{P1_begin}_{P2_begin}.html (each period identified by begin ts)
@@ -29539,7 +29585,7 @@ def main():
             # per-minute series (os_*.log) live in the snapshot root,
             # next to the snap_<id> dirs the text reports are given
             repl_dir = os.path.dirname(os.path.abspath(begin_dir))
-        win = build_window_from_snaps(begin_dir, end_dir)
+        win = build_window_from_snaps(begin_dir, end_dir, sqltext_root)
         if text_section == "topsql":
             if not n_given:
                 top_n = 10        # awr topsql default differs from awrrpt's 30
@@ -29573,14 +29619,14 @@ def main():
         if len(awrdiff_dirs) != 4:
             sys.stderr.write("Error: --awrdiff needs 4 snap dirs: p1_begin p1_end p2_begin p2_end\n")
             sys.exit(2)
-        w1 = build_window_from_snaps(awrdiff_dirs[0], awrdiff_dirs[1])
-        w2 = build_window_from_snaps(awrdiff_dirs[2], awrdiff_dirs[3])
+        w1 = build_window_from_snaps(awrdiff_dirs[0], awrdiff_dirs[1], sqltext_root)
+        w2 = build_window_from_snaps(awrdiff_dirs[2], awrdiff_dirs[3], sqltext_root)
         if not out_html:
             out_html = _default_awrdiff_html(w1["meta"], w2["meta"])
         render_awrdiff(w1, w2, metric, top_n, out_html)
         return
     if begin_dir and end_dir:
-        win = build_window_from_snaps(begin_dir, end_dir)
+        win = build_window_from_snaps(begin_dir, end_dir, sqltext_root)
         if not out_html:
             out_html = _default_html(win["meta"])
         render_single_awr(win, metric, top_n, out_html, repl_dir=repl_dir)
@@ -29949,24 +29995,234 @@ _awr_create() {
     _awr_snap ${root_override:+--root "$root_override"}
 }
 
-# _awr_check_uptime <id1> <id2>  -- error+return 1 if the two snaps span a DB
-# restart (cumulative counters reset; end-begin meaningless). db_start_time =
-# pg_postmaster_start_time(). Lenient: skipped if either snap lacks the field.
+# _awr_check_uptime <dir1> <dir2>  -- error+return 1 if the two snap DIRS span
+# a DB restart (cumulative counters reset; end-begin meaningless). db_start_time
+# = pg_postmaster_start_time(). Lenient: skipped if either snap lacks the field.
+# (Dirs, not ids: callers may pass snap dirs that live under a baseline copy
+# root, not only the main awrs root -- baseline support 2026-09-10.)
 _awr_check_uptime() {
-    local id1="$1" id2="$2"
-    local d1 d2 s1 s2
+    local d1="$1" d2="$2"
+    local s1 s2
     command -v python3 >/dev/null 2>&1 || { echo "Error: python3 required for restart guard (cannot read meta.json)" >&2; return 1; }
-    d1="$(_awr_root)/snap_$id1"; d2="$(_awr_root)/snap_$id2"
     s1=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('db_start_time',''))" "$d1/meta.json" 2>/dev/null)
     s2=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('db_start_time',''))" "$d2/meta.json" 2>/dev/null)
     if [ -n "$s1" ] && [ -n "$s2" ] && [ "$s1" != "$s2" ]; then
-        echo "Error: DB restarted between snap $id1 and snap $id2 -- cumulative counters reset, no valid diff." >&2
-        echo "       snap $id1 db_start_time: $s1" >&2
-        echo "       snap $id2 db_start_time: $s2" >&2
+        echo "Error: DB restarted between the two snaps -- cumulative counters reset, no valid diff." >&2
+        echo "       snap dir $d1 db_start_time: $s1" >&2
+        echo "       snap dir $d2 db_start_time: $s2" >&2
         echo "       (pick snaps within the same DB uptime, or recreate after the restart)" >&2
         return 1
     fi
     return 0
+}
+
+# _awr_snap_root <begin_id> <end_id>  -- echo the root that holds BOTH snaps:
+# the main awrs root if both are there, else the first baseline copy dir that
+# contains both. rc 1 + stderr when the pair cannot be served from one storage
+# area (one in main + one in a baseline is rejected: cross-root windows have
+# no shared per-minute logs). (baseline support 2026-09-10)
+_awr_snap_root() {
+    local b="$1" e="$2"
+    local root; root=$(_awr_root)
+    if [ -d "$root/snap_$b" ] && [ -d "$root/snap_$e" ]; then
+        echo "$root"; return 0
+    fi
+    local d found_b=""
+    for d in "$root"/baselines/*/; do
+        [ -d "$d" ] || continue
+        if [ -d "${d}snap_$b" ] && [ -d "${d}snap_$e" ]; then
+            echo "${d%/}"; return 0
+        fi
+        [ -d "${d}snap_$b" ] && found_b=1
+    done
+    if [ -n "$found_b" ] || [ -d "$root/snap_$b" ]; then
+        echo "Error: snaps $b and $e are not in the same storage area (main awrs root or one baseline) -- pick both ids from the main library or both from one baseline." >&2
+    else
+        echo "Error: snap $b not found (neither main root nor any baseline)" >&2
+    fi
+    return 1
+}
+
+# _awr_baseline_json_get <baseline_dir> <key>  -- read one key from baseline.json
+_awr_baseline_json_get() {
+    python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get(sys.argv[2],''))" "$1/baseline.json" "$2" 2>/dev/null
+}
+
+# awr baseline begin <id> end <id>  -- register a baseline: SELF-CONTAINED copy
+# (both endpoint snaps + the per-minute logs covering [begin-65s, end]) under
+# awrs/<port>/baselines/<id>/. The main library keeps purging normally --
+# baselines/ never matches the purge globs (top-level snap_*/repl_* etc only).
+_awr_baseline_begin() {
+    local begin_id="" end_id=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            begin)     [ $# -lt 2 ] && { echo "Error: 'begin' requires a snap_id" >&2; return 2; }
+                       begin_id="$2"; shift 2;;
+            end)       [ $# -lt 2 ] && { echo "Error: 'end' requires a snap_id" >&2; return 2; }
+                       end_id="$2"; shift 2;;
+            -h|--help) awr_help; return 0;;
+            *)         echo "Error: unknown token '$1' (usage: baseline begin <snap_id> end <snap_id>)" >&2; return 2;;
+        esac
+    done
+    if [ -z "$begin_id" ] || [ -z "$end_id" ]; then
+        echo "Error: usage 'awr baseline begin <snap_id> end <snap_id>'" >&2; return 2
+    fi
+    case "$begin_id$end_id" in ''|*[!0-9]*)
+        echo "Error: snap ids must be integers" >&2; return 2;; esac
+    if [ "$begin_id" -ge "$end_id" ]; then
+        echo "Error: begin snap ($begin_id) must be LOWER than end snap ($end_id)" >&2; return 2
+    fi
+    local root; root=$(_awr_root)
+    local bdir="$root/snap_$begin_id" edir="$root/snap_$end_id"
+    [ -d "$bdir" ] || { echo "Error: snap $begin_id not found in the MAIN library ($bdir) -- baselines register from the main library" >&2; return 1; }
+    [ -d "$edir" ] || { echo "Error: snap $end_id not found in the MAIN library ($edir)" >&2; return 1; }
+    _awr_check_uptime "$bdir" "$edir" || return 1
+    umask 077
+    # non-blocking mutual exclusion for the id scan+mkdir (same discipline as
+    # create.lock): two concurrent 'baseline begin' would race max+1
+    exec 8>"$root/baselines.lock"
+    if ! flock -n 8; then
+        echo "Error: another baseline operation is running -- try again" >&2
+        return 1
+    fi
+    mkdir -p "$root/baselines" 2>/dev/null
+    # next baseline id = max existing + 1
+    local newid=1 d n
+    for d in "$root"/baselines/*/; do
+        [ -d "$d" ] || continue
+        n=$(basename "$d")
+        case "$n" in ''|*[!0-9]*) continue;; esac
+        [ "$n" -ge "$newid" ] && newid=$((n+1))
+    done
+    local broot="$root/baselines/$newid"
+    rm -rf "$broot"
+    mkdir -p "$broot" || { echo "Error: cannot create $broot" >&2; return 1; }
+    # copy endpoints + covering logs; any failure drops the half-made dir
+    local f day
+    if ! cp -a "$bdir" "$edir" "$broot"/ 2>/dev/null; then
+        rm -rf "$broot"; echo "Error: copying snaps into $broot failed (disk full?)" >&2; return 1
+    fi
+    # day set = natural days spanned by [begin_ts - 65s, end_ts] (the renderers
+    # load window is [begin-65s, end]: the 65s pre-sample needs the prior day
+    # when the window starts just past midnight)
+    local days
+    days=$(python3 - "$bdir" "$edir" <<'PYBL'
+import datetime, json, sys
+tb = json.load(open(sys.argv[1] + "/meta.json"))["ts"]
+te = json.load(open(sys.argv[2] + "/meta.json"))["ts"]
+t0 = datetime.datetime.strptime(tb, "%Y-%m-%d %H:%M:%S") - datetime.timedelta(seconds=65)
+t1 = datetime.datetime.strptime(te, "%Y-%m-%d %H:%M:%S")
+d = t0.date()
+while d <= t1.date():
+    print(d.strftime("%Y%m%d")); d += datetime.timedelta(days=1)
+PYBL
+)
+    if [ -z "$days" ]; then
+        rm -rf "$broot"; echo "Error: cannot read snap timestamps for the log day set" >&2; return 1
+    fi
+    for day in $days; do
+        for f in os_ repl_ slot_ walrcv_; do
+            [ -f "$root/${f}${day}.log" ] && cp -p "$root/${f}${day}.log" "$broot/" 2>/dev/null
+            [ -f "$root/${f}${day}.log.gz" ] && cp -p "$root/${f}${day}.log.gz" "$broot/" 2>/dev/null
+        done
+    done
+    if ! python3 - "$broot" "$newid" "$begin_id" "$end_id" "$bdir" "$edir" <<'PYBJ' 2>/dev/null
+import datetime, json, sys
+broot, newid, b, e, bdir, edir = sys.argv[1:7]
+mb = json.load(open(bdir + "/meta.json")); me = json.load(open(edir + "/meta.json"))
+json.dump({"baseline_id": int(newid), "begin_id": int(b), "end_id": int(e),
+           "begin_ts": mb.get("ts", ""), "end_ts": me.get("ts", ""),
+           "db_start_time": me.get("db_start_time", mb.get("db_start_time", "")),
+           "created": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+          open(broot + "/baseline.json", "w"), indent=2)
+PYBJ
+    then
+        rm -rf "$broot"; echo "Error: writing baseline.json failed" >&2; return 1
+    fi
+    echo "==> baseline $newid created: snap $begin_id -> $end_id  ($broot)"
+}
+
+# awr baseline info  -- list registered baselines (dynamic column widths).
+_awr_baseline_info() {
+    [ $# -eq 0 ] || { echo "Error: unexpected argument '$1' (usage: awr baseline info)" >&2; return 2; }
+    local root; root=$(_awr_root)
+    [ -d "$root/baselines" ] || { echo "(no baselines at $root)"; return 0; }
+    python3 - "$root/baselines" <<'PYBI'
+import glob, json, os, sys
+rows = []
+def _dn(p):   # numeric dir names sort numerically (1,2,...,10,11); junk last
+    n = os.path.basename(p)
+    return (0, int(n)) if n.isdigit() else (1, 0)
+for d in sorted(glob.glob(os.path.join(sys.argv[1], "*")), key=_dn):
+    if not os.path.isdir(d): continue
+    try: m = json.load(open(os.path.join(d, "baseline.json")))
+    except Exception: continue
+    ok = (os.path.isdir(os.path.join(d, "snap_%s" % m.get("begin_id", ""))) and
+          os.path.isdir(os.path.join(d, "snap_%s" % m.get("end_id", ""))))
+    rows.append([str(m.get("baseline_id", "?")), str(m.get("begin_id", "?")),
+                 str(m.get("end_id", "?")), m.get("begin_ts", "?"),
+                 m.get("end_ts", "?"), m.get("db_start_time", "-"),
+                 m.get("created", "?"), "" if ok else "MISSING"])
+if not rows:
+    print("(no baselines at %s)" % sys.argv[1]); sys.exit(0)
+hdr = ["BASELINE_ID", "BEGIN", "END", "BEGIN_TS", "END_TS", "DB_START", "CREATED", "STATUS"]
+w = [max(len(str(r[i])) for r in rows + [hdr]) for i in range(len(hdr))]
+print(" ".join(h.ljust(w[i]) for i, h in enumerate(hdr)).rstrip())
+print(" ".join("-" * min(w[i], 24) for i in range(len(hdr))))
+for r in rows:
+    print(" ".join(str(c).ljust(w[i]) for i, c in enumerate(r)).rstrip())
+PYBI
+}
+
+# awr baseline delete <id>  -- drop the COPY dir only; the main library never
+# knew about it.
+_awr_baseline_delete() {
+    [ $# -eq 1 ] || { echo "Error: usage 'awr baseline delete <baseline_id>'" >&2; return 2; }
+    case "$1" in ''|*[!0-9]*) echo "Error: baseline id must be an integer" >&2; return 2;; esac
+    local root; root=$(_awr_root)
+    local broot="$root/baselines/$1"
+    [ -d "$broot" ] || { echo "Error: baseline $1 not found ($broot)" >&2; return 1; }
+    rm -rf "$broot"
+    echo "==> baseline $1 deleted ($broot)"
+}
+
+# awr baseline report <id>  -- html report for a registered baseline. Same
+# chain as awrrpt: root = the baseline copy dir (self-contained snaps + logs),
+# sql_text falls back to the MAIN store (never purged there).
+_awr_baseline_report() {
+    [ $# -eq 1 ] || { echo "Error: usage 'awr baseline report <baseline_id>'" >&2; return 2; }
+    case "$1" in ''|*[!0-9]*) echo "Error: baseline id must be an integer" >&2; return 2;; esac
+    local root; root=$(_awr_root)
+    local broot="$root/baselines/$1"
+    [ -f "$broot/baseline.json" ] || { echo "Error: baseline $1 not found ($broot)" >&2; return 1; }
+    local b e
+    b=$(_awr_baseline_json_get "$broot" begin_id)
+    e=$(_awr_baseline_json_get "$broot" end_id)
+    [ -n "$b" ] && [ -n "$e" ] || { echo "Error: baseline $1 has no usable begin/end ids" >&2; return 1; }
+    local bdir="$broot/snap_$b" edir="$broot/snap_$e"
+    [ -d "$bdir" ] && [ -d "$edir" ] || { echo "Error: baseline $1 endpoint snaps missing (copy incomplete?)" >&2; return 1; }
+    _awr_check_uptime "$bdir" "$edir" || return 1
+    echo "==> rendering baseline $1 report: snap $b -> snap $e"
+    # report name: baseline_{db}_{begin}_{end}.html (same default-naming rule as
+    # awrrpt, only the prefix differs -- user 2026-09-11)
+    _awr_render --begin "$bdir" --end "$edir" --repl-dir "$broot" --sqltext-root "$root" --name-prefix baseline -m dbtime -n 30
+}
+
+# awr baseline <begin|info|report|delete> -- dispatch
+_awr_baseline() {
+    local sub="$1"
+    if [ -z "$sub" ]; then
+        echo "Error: usage 'awr baseline <begin <id> end <id>|info|report <id>|delete <id>>'" >&2; return 2
+    fi
+    shift
+    case "$sub" in
+        begin)  _awr_baseline_begin begin "$@";;
+        info)   _awr_baseline_info "$@";;
+        report) _awr_baseline_report "$@";;
+        delete) _awr_baseline_delete "$@";;
+        -h|--help) awr_help; return 0;;
+        *) echo "Error: unknown baseline subcommand '$sub' (begin|info|report|delete)" >&2; return 2;;
+    esac
 }
 
 # awr summary|event|topsql|tabstat -- wdr-style SCREEN analytics from existing
@@ -30354,40 +30610,60 @@ _awr_awrrpt() {
     if [ -z "$begin_id" ] || [ -z "$end_id" ]; then
         echo "Error: usage 'awr awrrpt begin <snap_id> end <snap_id>'" >&2; return 2
     fi
-    local root; root=$(_awr_root)
+    local root; root=$(_awr_snap_root "$begin_id" "$end_id") || return 1
     local bdir edir
     bdir="$root/snap_$begin_id"; edir="$root/snap_$end_id"
-    if [ ! -d "$bdir" ]; then echo "Error: snap $begin_id not found ($bdir)" >&2; return 1; fi
-    if [ ! -d "$edir" ]; then echo "Error: snap $end_id not found ($edir)" >&2; return 1; fi
     if [ "$begin_id" -gt "$end_id" ] 2>/dev/null; then
         echo "  [WARN] begin snap ($begin_id) is newer than end snap ($end_id); counters may go negative" >&2
     fi
     # restart guard (shared helper)
-    _awr_check_uptime "$begin_id" "$end_id" || return 1
+    _awr_check_uptime "$bdir" "$edir" || return 1
     echo "==> rendering awrrpt: snap $begin_id -> snap $end_id"
-    _awr_render --begin "$bdir" --end "$edir" --repl-dir "$root" -m dbtime -n 30
+    _awr_render --begin "$bdir" --end "$edir" --repl-dir "$root" --sqltext-root "$(_awr_root)" -m dbtime -n 30
 }
 
 # awr awrdiff begin <a> end <b> begin <c> end <d>
 #   period1 = snap a->b, period2 = snap c->d. AWR-style 3-col diff report.
+# awr awrdiff begin <x> end <y> baseline <id>
+#   period1 = the registered baseline (reference), period2 = snap x->y.
 _awr_awrdiff() {
-    local ids=()
+    local ids=() base_ref=""
     while [ $# -gt 0 ]; do
         case "$1" in
-            begin|end) shift;;                      # delimiters; ids collected positionally
+            begin)     [ $# -lt 2 ] && { echo "Error: 'begin' requires a snap_id" >&2; return 2; }
+                       ids+=("$2"); shift 2;;
+            end)       [ $# -lt 2 ] && { echo "Error: 'end' requires a snap_id" >&2; return 2; }
+                       ids+=("$2"); shift 2;;
+            baseline)  [ $# -lt 2 ] && { echo "Error: 'baseline' requires a baseline id" >&2; return 2; }
+                       [ -n "$base_ref" ] && { echo "Error: only one 'baseline <id>' reference allowed" >&2; return 2; }
+                       base_ref="$2"; shift 2;;
             -h|--help) awr_help; return 0;;
-            -*)        echo "Error: unknown option '$1'" >&2; return 2;;
-            *)         ids+=("$1"); shift;;
+            *)         echo "Error: unknown token '$1' (usage: awrdiff begin <a> end <b> begin <c> end <d> | begin <x> end <y> baseline <id>)" >&2; return 2;;
         esac
     done
-    if [ "${#ids[@]}" -ne 4 ]; then
-        echo "Error: usage 'awr awrdiff begin <a> end <b> begin <c> end <d>' (got ${#ids[@]} snap ids, need 4)" >&2
-        return 2
+    local p1b p1e p2b p2e root1 root2
+    if [ -n "$base_ref" ]; then
+        # P1 = baseline (reference), P2 = explicit window (current): delta = P2 - P1
+        # keeps the awrdiff header contract 'Delta = P2-P1' with the baseline
+        # as the reference value (design doc 2026-09-10).
+        [ "${#ids[@]}" -eq 2 ] || { echo "Error: 'baseline <id>' form expects exactly ONE begin/end pair plus the baseline (got ${#ids[@]} ids)" >&2; return 2; }
+        case "$base_ref" in ''|*[!0-9]*) echo "Error: baseline id must be an integer" >&2; return 2;; esac
+        local root; root=$(_awr_root)
+        root1="$root/baselines/$base_ref"
+        [ -f "$root1/baseline.json" ] || { echo "Error: baseline $base_ref not found ($root1)" >&2; return 1; }
+        p1b=$(_awr_baseline_json_get "$root1" begin_id)
+        p1e=$(_awr_baseline_json_get "$root1" end_id)
+        [ -n "$p1b" ] && [ -n "$p1e" ] || { echo "Error: baseline $base_ref has no usable begin/end ids" >&2; return 1; }
+        p2b="${ids[0]}"; p2e="${ids[1]}"
+        root2=$(_awr_snap_root "$p2b" "$p2e") || return 1
+    else
+        [ "${#ids[@]}" -ne 4 ] && { echo "Error: usage 'awr awrdiff begin <a> end <b> begin <c> end <d>' (got ${#ids[@]} snap ids, need 4)" >&2; return 2; }
+        p1b="${ids[0]}"; p1e="${ids[1]}"; p2b="${ids[2]}"; p2e="${ids[3]}"
+        root1=$(_awr_snap_root "$p1b" "$p1e") || return 1
+        root2=$(_awr_snap_root "$p2b" "$p2e") || return 1
     fi
-    local p1b="${ids[0]}" p1e="${ids[1]}" p2b="${ids[2]}" p2e="${ids[3]}"
-    local root; root=$(_awr_root)
     local d1b d1e d2b d2e
-    d1b="$root/snap_$p1b"; d1e="$root/snap_$p1e"; d2b="$root/snap_$p2b"; d2e="$root/snap_$p2e"
+    d1b="$root1/snap_$p1b"; d1e="$root1/snap_$p1e"; d2b="$root2/snap_$p2b"; d2e="$root2/snap_$p2e"
     local d
     for d in "$d1b" "$d1e" "$d2b" "$d2e"; do
         [ -d "$d" ] || { echo "Error: snap dir not found: $d" >&2; return 1; }
@@ -30398,8 +30674,8 @@ _awr_awrdiff() {
     [ "$p1e" -gt "$p2b" ] 2>/dev/null && echo "  [WARN] period1 end ($p1e) > period2 begin ($p2b); periods overlap" >&2
     # restart guard PER PERIOD (each period's begin/end must be same uptime;
     # cross-period restart is allowed -- each period's delta is self-contained).
-    _awr_check_uptime "$p1b" "$p1e" || return 1
-    _awr_check_uptime "$p2b" "$p2e" || return 1
+    _awr_check_uptime "$d1b" "$d1e" || return 1
+    _awr_check_uptime "$d2b" "$d2e" || return 1
     # equal-window guard: the diff report's headline delta columns (DB Time,
     # per-SQL times, wait totals) are raw window deltas -- comparable only
     # across equally long periods (the per-second columns normalize, the deltas
@@ -30408,10 +30684,10 @@ _awr_awrdiff() {
     # that IS equal length. Equal gap but skewed real durations (manual snaps
     # inside a window) still pass, with a WARN. Fallback for differing gaps:
     # durations must match within 600s (cron :00 jitter is seconds).
-    python3 - "$p1b" "$p1e" "$p2b" "$p2e" "$root" <<'PYDUR' || return 1
+    python3 - "$p1b" "$p1e" "$p2b" "$p2e" "$root1" "$root2" <<'PYDUR' || return 1
 import json, sys
-root = sys.argv[5]
-def dur(a, b):
+root1, root2 = sys.argv[5], sys.argv[6]
+def dur(root, a, b):
     try:
         ea = int(json.load(open("%s/snap_%s/meta.json" % (root, a)))["ts_epoch"])
         eb = int(json.load(open("%s/snap_%s/meta.json" % (root, b)))["ts_epoch"])
@@ -30421,7 +30697,7 @@ def dur(a, b):
 def igap(a, b):
     try: return int(b) - int(a)
     except Exception: return None
-d1, d2 = dur(sys.argv[1], sys.argv[2]), dur(sys.argv[3], sys.argv[4])
+d1, d2 = dur(root1, sys.argv[1], sys.argv[2]), dur(root2, sys.argv[3], sys.argv[4])
 g1, g2 = igap(sys.argv[1], sys.argv[2]), igap(sys.argv[3], sys.argv[4])
 if d1 is None or d2 is None:
     sys.stderr.write("Error: cannot read snap meta for the awrdiff window guard\n"); sys.exit(1)
@@ -30434,9 +30710,9 @@ if abs(d1 - d2) > 600:
     sys.stderr.write("       period1 = %ds (gap %s), period2 = %ds (gap %s), difference %ds -- pick equal-length windows.\n" % (d1, g1, d2, g2, abs(d1 - d2)))
     sys.exit(1)
 PYDUR
-    echo "==> rendering awrdiff: period1 snap $p1b->$p1e  vs  period2 snap $p2b->$p2e"
+    echo "==> rendering awrdiff: period1 snap $p1b->$p1e${base_ref:+ (baseline $base_ref)}  vs  period2 snap $p2b->$p2e"
     # no --repl-dir by design: one repl table can't cover two disjoint periods
-    _awr_render --awrdiff "$d1b" "$d1e" "$d2b" "$d2e"
+    _awr_render --awrdiff "$d1b" "$d1e" "$d2b" "$d2e" --sqltext-root "$(_awr_root)"
 }
 
 # awr enable -d N  -- install crontab entry: snapshot every N minutes (default 60).
@@ -30494,6 +30770,11 @@ _awr_enable() {
 # awr disable  -- remove the periodic crontab entries of THIS port (plus any
 # legacy port-less ones from an older vb_tool). Other ports' entries stay.
 _awr_disable() {
+    case "${1:-}" in
+        "") ;;
+        -h|--help) awr_help; return 0;;
+        *)         echo "Error: unexpected argument '$1' (awr disable takes no options)" >&2; return 2;;
+    esac
     local port="${PGPORT:-5432}"
     local removed=0
     if crontab -l 2>/dev/null | { grep -qE "# vb_tool_awr_p${port}\$" || grep -qE "# vb_tool_awr_repl_p${port}\$" || grep -Eq '# vb_tool_awr(_repl)? *$'; }; then
@@ -30510,6 +30791,9 @@ _awr_disable() {
 }
 
 _awr_list() {
+    if [ $# -gt 1 ]; then
+        echo "Error: unexpected argument '$2' (usage: awr list [YYYY-MM-DD])" >&2; return 2
+    fi
     local date_filter="$1"
     if [ -n "$date_filter" ] && ! printf '%s' "$date_filter" | grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'; then
         echo "Error: invalid date '$date_filter' (expect YYYY-MM-DD)" >&2; return 2
@@ -30944,14 +31228,12 @@ _awr_text_report() {
     if [ -z "$begin_id" ] || [ -z "$end_id" ]; then
         echo "Error: usage 'awr $section begin <snap_id> end <snap_id>' [options]" >&2; return 2
     fi
-    local root; root=$(_awr_root)
+    local root; root=$(_awr_snap_root "$begin_id" "$end_id") || return 1
     local bdir="$root/snap_$begin_id" edir="$root/snap_$end_id"
-    [ -d "$bdir" ] || { echo "Error: snap $begin_id not found ($bdir)" >&2; return 1; }
-    [ -d "$edir" ] || { echo "Error: snap $end_id not found ($edir)" >&2; return 1; }
     [ "$begin_id" -gt "$end_id" ] 2>/dev/null && \
         echo "  [WARN] begin snap ($begin_id) is newer than end snap ($end_id); counters may go negative" >&2
-    _awr_check_uptime "$begin_id" "$end_id" || return 1
-    _awr_render --begin "$bdir" --end "$edir" --text "$section" "${pass[@]}"
+    _awr_check_uptime "$bdir" "$edir" || return 1
+    _awr_render --begin "$bdir" --end "$edir" --text "$section" --sqltext-root "$(_awr_root)" "${pass[@]}"
 }
 
 _awr_topsql()  { _awr_text_report topsql  "$@"; }
@@ -30971,9 +31253,10 @@ run_awr() {
     shift
     case "$sub" in
         _repl-sample)   _awr_repl_sample;;   # internal: cron per-minute sampler (not in help)
+        baseline)       _awr_baseline "$@";;
         create)         _awr_create "$@";;
         enable)         _awr_enable "$@";;
-        disable)        _awr_disable;;
+        disable)        _awr_disable "$@";;
         awrrpt)         _awr_awrrpt "$@";;
         awrdiff)        _awr_awrdiff "$@";;
         topsql)         _awr_topsql "$@";;
@@ -30986,9 +31269,9 @@ run_awr() {
         replstat)       _awr_replstat "$@";;
         replslot)       _awr_replslot "$@";;
         replay)         _awr_replay "$@";;
-        list|ls)        _awr_list "$1";;
+        list|ls)        _awr_list "$@";;
         show)           _awr_show "$@";;
-        delete)         if [ "$1" = "until" ]; then _awr_delete_until "$2";
+        delete)         if [ "$1" = "until" ] && [ $# -eq 2 ]; then _awr_delete_until "$2";
                         else echo "Error: usage 'vb_tool awr delete until <time>' (e.g. '2026-08-11')" >&2; return 2; fi;;
         config)         _awr_config "$@";;
         -h|--help|help) awr_help; return 0;;

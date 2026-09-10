@@ -48,6 +48,11 @@ vb_tool list
 | `awr enable` / `awr disable` | 启停 cron 定时采样（间隔由 `awr config interval` 控制，默认 60 分钟） |
 | `awr awrrpt begin <id> end <id>` | 生成两快照区间 AWR 报告 (HTML) |
 | `awr awrdiff begin <a> end <b> begin <c> end <d>` | 两区间对比报告 |
+| `awr awrdiff begin <x> end <y> baseline <id>` | 当前窗口 vs 基线对比（P1=基线参照，Δ=当前−基线） |
+| `awr baseline begin <id> end <id>` | **登记基线**：两端点快照+窗口分钟日志复制为自包含副本（`awrs/<port>/baselines/<id>/`），对 auto purge 与 `awr delete until` 免疫；要求 begin<end 且两端同 DB uptime |
+| `awr baseline info` | 列出已登记基线（id/端点/窗口/创建时间/STATUS） |
+| `awr baseline report <id>` | 生成基线窗口报告（同 awrrpt 链；默认名 `baseline_{db}_{b}_{e}.html`；SQL 文本自动回退主库共享库） |
+| `awr baseline delete <id>` | 删除基线副本（主库无感知） |
 | `awr topsql begin <id> end <id> [-n N] [-m <dim>]` | 屏幕输出区间 Top SQL（wdr_topsql 同款列；维度 dbtime/cpu/io/calls/lreads/preads/rows，默认 dbtime，-n 默认 10；纯文本不生成文件） |
 | `awr event begin <id> end <id> [-E <event>]` | 屏幕输出 Top 等待事件（CPU 时间+事件按总等待排序前 5 行，wdr_event 风格；-E 只看指定事件，忽略大小写） |
 | `awr summary begin <id> end <id>` | 屏幕输出单行负载概要（dbtime/aas/tps/iops/mbps/wal_mb/s 等 12 列，wdr_summary 风格；iops/mbps/wal 需 v2.1.0+ 采集的快照，老快照显示 '-'） |
@@ -103,6 +108,7 @@ vb_tool list
 
 | 版本 | 日期 | 要点 |
 |------|------|------|
+| v2.4.0 | 2026-09-11 | **awr baseline 基线管理（新命令族）**：`awr baseline begin <id> end <id>` 把两端点快照与窗口覆盖天的分钟采样日志复制为**自包含基线副本**（`awrs/<port>/baselines/<id>/`，flock 保护 id 分配，任一步失败自动清理半成品）——主库 auto purge / `awr delete until` 照常运行，基线副本天然免疫（purge 仅匹配顶层 snap_*/repl_* 等）；`baseline info` 数值序列表；`baseline report <id>` 走 awrrpt 同一渲染链（报告名 `baseline_{db}_{b}_{e}.html`，SQL 文本经 `--sqltext-root` 回退主库永存共享库）；`baseline delete <id>` 删副本主库无感；**`awrdiff begin <x> end <y> baseline <ID>`** 新形态：P1=基线参照、P2=当前窗口，Δ=P2−P1=当前−基线（等窗守卫双 root 各自校验）。配套：awr 快照**核心数据守卫**（探针通过但 statement+instance_time 双双未采到时丢弃快照，防空壳毒化报告——REPL/OS 缺失不删）；五处行为修正（`awr delete until <t> extra` 原静默忽略多余参数照删→现拒绝；awrdiff begin/end 定界词改为强制；awr disable/list 多余参数报错；ASH 前窗改取 ts 最新快照）；226 集群实测 delete until 清 195 快照后基线报告仍完整 |
 | v2.3.1 | 2026-09-09 | v2.3.0 就地优化（无新功能）：**se 知识库改为 gzip+base64 内嵌**（`#K` 注释行 + 运行时 `sed→base64 -d→gunzip` 解码，awk 解析器零改动）——脚本 1.92 MB → **1.63 MB**（-290 KB，KB 部分 -63%），单次查询含解码 42ms；明文可编辑源保留 `se_kb.txt`（装配器负责重嵌入） |
 | v2.3.0 | 2026-09-09 | **新命令 `se`（show-event，oerr 风格等待事件知识库）**：`vb_tool se <event>` 类似 Oracle `oerr ora` —— 输入等待事件名输出该事件的**全称、含义、源码级触发点（文件+函数，逐条 grep openGauss 6.0.0 源码核实）、等待原因、可操作解决方案**；覆盖 dbe_perf.wait_events 全部 417 个事件（LOCK 17 / IO 80 / STATUS 76 / LWLOCK 246），冷门/参考树无获取点的事件如实标注不编造；匹配为大小写不敏感的精确 → 唯一子串（`se walwrite`→WALWriteLock）→ 忽略空格连字符 + 全 token（`se "proc array"`→ProcArrayLock）→ 多候选/无匹配时列相似事件并给 `se -l` 引导；`se -l [keyword]` 列表过滤；内容全英文（避免内核术语翻译失真）；纯离线不连库；知识库以注释块内嵌脚本尾部（awk sed 自读，零启动开销），FIX 引用 vtop/as/lockchain/awr event 等现有命令形成排查闭环 |
 | v2.2.0 | 2026-09-09 | **awr 屏幕报告六命令（awrrpt 同源同列的每分钟明细系列）**：`awr cpu/io/page/replstat/replslot/replay begin <id> end <id>`——数据源与列与 awrrpt HTML 对应节完全一致（CPU/Disk IO/Memory-Paging 的 Per-minute detail、Replication Stat/Slots、Wal Receiver），集群实测逐单元格 diff 全部 0 差异；replstat 沿用 awrrpt 的全零健康分钟隐藏语义，replay（备库侧 WAL 回放）每分钟全显；全部纯 stdout 不生成文件，需 `awr enable` 的每分钟采样日志（手动快照无序列时输出提示）；**statement 采集瘦身**：dbe_perf.statement 从 `SELECT *`（60 列）改为渲染端实际读取的显式 14 列 + query 文本采集时扁平化（空行/连续空格/tab → 单空格，首尾 trim——与渲染端 normalize 同语义），实测快照 statement.csv.gz -44.6%，SQL 全单行；老/新快照混窗渲染按列名兼容 |
