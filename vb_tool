@@ -7,7 +7,7 @@
 #-- Author:      MVS & Second-line Team 
 #--------------------------------------------------------------------------------
 set -o pipefail
-export VB_TOOL_VERSION="v2.4.1"
+export VB_TOOL_VERSION="v2.4.2"
 show_help() {
     echo "Vastbase Script Tool (vb_tool)"
     echo ""
@@ -23956,9 +23956,6 @@ Multi-instance: storage, config and crontab entries are all PER PORT -- each
         logs and its own crontab pair (port pinned via PGPORT= in the entry),
         so several instances can be enabled side by side; enable/disable/show/
         list/config always operate on the current port only.
-
-Requirements: dbe_perf + gs_instance_time (same as `workload`). Not on PG-only
-kernels lacking dbe_perf (e.g. E100/v0).
 EOF
 }
 
@@ -29640,8 +29637,19 @@ def text_summary(win, detail_wins=None):
                                       lambda w: [_summary_row(w)[0]])
     if no_io:
         lines.append("")
-        lines.append("note: iops/mbps/wal_mb/s = '-' -- snaps lack db/file_iostat*.csv "
-                     "(captured only by vb_tool versions with the iostat capture)")
+        # differentiate the common cases so the user can act on it
+        el = to_num(win["meta"].get("duration"))
+        fb = win["db"][("begin", "file_iostat")]
+        fe = win["db"][("end", "file_iostat")]
+        if el == 0 or el is None:
+            lines.append("note: iops/mbps/wal_mb/s = '-' -- window has zero duration "
+                         "(begin==end), no delta to compute; widen the window to see rates")
+        elif not fb or not fe:
+            lines.append("note: iops/mbps/wal_mb/s = '-' -- db/file_iostat*.csv missing in "
+                         "one or both snaps (captured only by vb_tool v2.1.0+)")
+        else:
+            lines.append("note: iops/mbps/wal_mb/s = '-' -- file_iostat rows lack filenum column "
+                         "(legacy format, no per-file key for keyed delta)")
     return 0, "\n".join(lines)
 
 def _f1(x):
@@ -30768,7 +30776,9 @@ _awr_baseline_begin() {
     case "$begin_id$end_id" in ''|*[!0-9]*)
         echo "Error: snap ids must be integers" >&2; return 2;; esac
     if [ "$begin_id" -ge "$end_id" ]; then
-        echo "Error: begin snap ($begin_id) must be LOWER than end snap ($end_id)" >&2; return 2
+        echo "Error: begin snap ($begin_id) must be LOWER than end snap ($end_id)" >&2
+        # rc=1 (data error): caller already gave clear guidance; awr_help would be noise
+        return 1
     fi
     local root; root=$(_awr_root)
     local bdir="$root/snap_$begin_id" edir="$root/snap_$end_id"
@@ -31311,8 +31321,10 @@ _awr_awrrpt() {
     local root; root=$(_awr_snap_root "$begin_id" "$end_id") || return 1
     local bdir edir
     bdir="$root/snap_$begin_id"; edir="$root/snap_$end_id"
-    if [ "$begin_id" -gt "$end_id" ] 2>/dev/null; then
-        echo "  [WARN] begin snap ($begin_id) is newer than end snap ($end_id); counters may go negative" >&2
+    if [ "$begin_id" -ge "$end_id" ] 2>/dev/null; then
+        echo "Error: begin snap ($begin_id) must be LOWER than end snap ($end_id) -- 1-snap windows (begin==end) have no delta to render" >&2
+        # rc=1 (data error): caller already gave clear guidance; awr_help would be noise
+        return 1
     fi
     # restart guard (shared helper)
     _awr_check_uptime "$bdir" "$edir" || return 1
@@ -31366,9 +31378,17 @@ _awr_awrdiff() {
     for d in "$d1b" "$d1e" "$d2b" "$d2e"; do
         [ -d "$d" ] || { echo "Error: snap dir not found: $d" >&2; return 1; }
     done
-    # ordering warnings (non-fatal): begin>end or overlapping periods
-    [ "$p1b" -gt "$p1e" ] 2>/dev/null && echo "  [WARN] period1 begin ($p1b) > end ($p1e); counters may go negative" >&2
-    [ "$p2b" -gt "$p2e" ] 2>/dev/null && echo "  [WARN] period2 begin ($p2b) > end ($p2e); counters may go negative" >&2
+    # ordering errors (fatal): reversed periods produce negative counters that
+    # mislead; overlap is just a warn since awrdiff tolerates the comparison.
+    # rc=1 (data error): awr_help would be noise on top of the clear message.
+    if [ "$p1b" -ge "$p1e" ] 2>/dev/null; then
+        echo "Error: period1 begin ($p1b) must be LOWER than end ($p1e) -- 1-snap windows have no delta to render" >&2
+        return 1
+    fi
+    if [ "$p2b" -ge "$p2e" ] 2>/dev/null; then
+        echo "Error: period2 begin ($p2b) must be LOWER than end ($p2e) -- 1-snap windows have no delta to render" >&2
+        return 1
+    fi
     [ "$p1e" -gt "$p2b" ] 2>/dev/null && echo "  [WARN] period1 end ($p1e) > period2 begin ($p2b); periods overlap" >&2
     # restart guard PER PERIOD (each period's begin/end must be same uptime;
     # cross-period restart is allowed -- each period's delta is self-contained).
@@ -31967,8 +31987,11 @@ _awr_text_report() {
     done
     local root; root=$(_awr_snap_root "$begin_id" "$end_id") || return 1
     local bdir="$root/snap_$begin_id" edir="$root/snap_$end_id"
-    [ "$begin_id" -gt "$end_id" ] 2>/dev/null && \
-        echo "  [WARN] begin snap ($begin_id) is newer than end snap ($end_id); counters may go negative" >&2
+    if [ "$begin_id" -ge "$end_id" ] 2>/dev/null; then
+        echo "Error: begin snap ($begin_id) must be LOWER than end snap ($end_id) -- 1-snap windows (begin==end) have no delta to render" >&2
+        # rc=1 (data error): caller already gave clear guidance; awr_help would be noise
+        return 1
+    fi
     _awr_check_uptime "$bdir" "$edir" || return 1
     _awr_render --begin "$bdir" --end "$edir" --text "$section" --sqltext-root "$(_awr_root)" "${pass[@]}"
 }
@@ -32188,10 +32211,16 @@ case "$1" in
             awr_help
             exit 0
         fi
-        if ! run_awr "${@:2}"; then
-            awr_help
-            exit 1
-        fi
+        run_awr "${@:2}"
+rc=$?
+if [ "$rc" -ne 0 ]; then
+    # only print full help on arg/syntax errors (rc=2): data errors
+    # (rc=1, e.g. snap/table not found) already speak for themselves
+    if [ "$rc" -ne 1 ]; then
+        awr_help
+    fi
+    exit "$rc"
+fi
         ;;
     workload)
     if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
