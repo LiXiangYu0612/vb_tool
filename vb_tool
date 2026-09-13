@@ -7,7 +7,7 @@
 #-- Author:      MVS & Second-line Team 
 #--------------------------------------------------------------------------------
 set -o pipefail
-export VB_TOOL_VERSION="v2.4.3"
+export VB_TOOL_VERSION="v2.4.4"
 show_help() {
     echo "Vastbase Script Tool (vb_tool)"
     echo ""
@@ -23801,7 +23801,7 @@ _se_kb_dump() {
 
 awr_help() {
     cat <<'EOF'
-Usage: vb_tool awr <create|enable|disable|awrrpt|awrdiff|baseline|topsql|event|summary|tabstat|cpu|io|page|replstat|replslot|replay|list|show|delete|config> [options]
+Usage: vb_tool awr <create|enable|disable|awrrpt|awrdiff|baseline|topsql|event|summary|tabstat|cpu|io|page|replstat|replslot|replay|ltx|list|show|delete|config> [options]
 
   create  [--root <dir>]    capture ONE single-point snapshot now (foreground,
                             ~5-10s), assigns the next snap_id. No html.
@@ -23901,6 +23901,12 @@ Usage: vb_tool awr <create|enable|disable|awrrpt|awrdiff|baseline|topsql|event|s
                             fields; every minute shown, no hiding; on the
                             primary there is no walreceiver; needs 'awr
                             enable')
+  ltx     begin <id> end <id>
+                            print the window's PER-5MIN long-transaction monitor
+                            to the screen (Sample Time + ltx60_cnt/itx/active +
+                            oldest PID/xact_start/age/state/wait/usi/xmin/xid,
+                            one row per 5-min sample -- awrrpt 'Long Transaction
+                            Monitor' detail fields; needs 'awr enable' sampler)
   list    [YYYY-MM-DD]     list stored snapshots (snap_id / ts / host / db /
                             per-snap DB_TIME delta + AAS), newest first;
                             default latest 30, a date lists that whole day
@@ -29946,6 +29952,74 @@ def text_tabstat(win, dbname, schema, table, detail_wins=None):
     return 0, "\n".join(lines)
 
 
+def text_ltx(win, repl_dir=None):
+    """awrrpt Long Transaction Monitor as a screen table: per-5-min ltx60_*
+    counts + oldest-txn details from the lt_*.log sampler -- same source and
+    columns as the html report's folded detail table. One row per 5-min sample
+    in ts order; window summary line stays on top. Needs 'awr enable' sampler
+    (one sample every 5 min)."""
+    lines = _text_banner("awr ltx detail", win)
+    m = win["meta"]
+    samples = (load_lt_samples(repl_dir, m.get("begin_ts", ""), m.get("end_ts", ""))
+               if repl_dir else {"files": []})
+    if not samples.get("files"):
+        lines.append("(no long-transaction samples in this period -- the sampler runs")
+        lines.append(" while 'awr enable' is on; manual snapshots alone carry no series)")
+        return 0, "\n".join(lines)
+    rows = sorted(samples["rows"], key=lambda r: r[0])
+    if not rows or samples["n_data"] == 0:
+        lines.append("(no usable long-transaction samples in this period "
+                     "(%d sample error(s)))" % samples["n_error"])
+        return 0, "\n".join(lines)
+    # window summary: peak long-txn count and worst oldest-txn age, with times
+    peak_cnt = peak_age = -1
+    peak_cnt_ts = peak_age_ts = ""
+    for ts, kind, f in rows:
+        if kind != "data":
+            continue
+        cnt = (f + [""] * 12)[0]
+        try:
+            c = int(cnt)
+            if c > peak_cnt: peak_cnt, peak_cnt_ts = c, ts
+        except ValueError:
+            pass
+        te, xe = _ts_epoch(ts), _ts_epoch((f + [""] * 12)[4])
+        if te is not None and xe is not None:
+            a = te - xe
+            if a > peak_age: peak_age, peak_age_ts = a, ts
+    lines.append("%d sample(s); peak ltx60_cnt %d at %s; worst oldest-txn age %ss at %s."
+                % (samples["n_data"], peak_cnt, peak_cnt_ts or "-",
+                   ("%.0f" % peak_age) if peak_age >= 0 else "-",
+                   peak_age_ts or "-"))
+    lines.append("")
+    headers = ["time", "ltx60_cnt", "itx", "active", "oldest_pid", "xact_start",
+               "age(s)", "state", "wait_event", "usi", "xmin", "xid"]
+    out_rows = []
+    for ts, kind, f in rows:
+        if kind != "data":
+            out_rows.append([ts] + ["(sample error)"] + [""] * 10)
+            continue
+        cnt, itx, act, pid, xstart, state, ws, we, usi, oxmin, txid = (f + [""] * 11)[:11]
+        te, xe = _ts_epoch(ts), _ts_epoch(xstart)
+        if te is not None and xe is not None:
+            age = "%.0f" % (te - xe)
+        else:
+            age = "-"
+        # prefer wait_event; show wait_status before it when both exist and differ
+        if ws and we and ws != we and ws != "none":
+            wait = "%s/%s" % (ws, we)
+        else:
+            wait = we or ws or "-"
+        usi_cell = "-" if usi in ("", "0") else usi
+        out_rows.append([ts, cnt or "-", itx or "-", act or "-",
+                         pid or "-", xstart or "-", age,
+                         state or "-", wait, usi_cell,
+                         oxmin or "-", txid or "-"])
+    lines.append(_text_table(headers, out_rows, align="l" + "r" * 11))
+    return 0, "\n".join(lines)
+    return 0, "\n".join(lines)
+
+
 def main():
     argv = sys.argv[1:]
     awr_dir = current_dir = single_dir = begin_dir = end_dir = out_html = ""
@@ -30043,9 +30117,9 @@ def main():
         "summary": frozenset({"instance_time", "database", "statement",
                               "file_iostat", "file_redo_iostat"}),
         "tabstat": frozenset({"object_tables"}),
-        # cpu/io/page/replstat/replslot/replay: render whole window only (no
-        # detail_wins), so load_snap is called exactly 2x — slim path adds no
-        # win, keep the default full load (also reads repl sampler logs
+        # cpu/io/page/replstat/replslot/replay/ltx: render whole window only
+        # (no detail_wins), so load_snap is called exactly 2x — slim path adds
+        # no win, keep the default full load (also reads repl/lt sampler logs
         # outside this mechanism).
     }
     text_db_tables = TEXT_DB_TABLES.get(text_section)
@@ -30055,9 +30129,9 @@ def main():
             sys.stderr.write("Error: --text needs --begin DIR and --end DIR\n"); return 2
         if text_section not in ("topsql", "event", "summary", "tabstat",
                                 "cpu", "io", "page", "replstat", "replslot",
-                                "replay"):
+                                "replay", "ltx"):
             sys.stderr.write("Error: --text expects topsql|event|summary|tabstat"
-                             "|cpu|io|page|replstat|replslot|replay\n"); return 2
+                             "|cpu|io|page|replstat|replslot|replay|ltx\n"); return 2
         if not repl_dir:
             # per-minute series (os_*.log) live in the snapshot root,
             # next to the snap_<id> dirs the text reports are given
@@ -30091,6 +30165,8 @@ def main():
                 return text_replslot(w, repl_dir)
             elif text_section == "replay":
                 return text_replay(w, repl_dir)
+            elif text_section == "ltx":
+                return text_ltx(w, repl_dir)
             else:
                 return text_tabstat(w, text_db, text_schema, text_table, detail_wins=dw)
 
@@ -31993,7 +32069,7 @@ _awr_text_report() {
         return 1
     fi
     _awr_check_uptime "$bdir" "$edir" || return 1
-    _awr_render --begin "$bdir" --end "$edir" --text "$section" --sqltext-root "$(_awr_root)" "${pass[@]}"
+    _awr_render --begin "$bdir" --end "$edir" --text "$section" --repl-dir "$root" --sqltext-root "$(_awr_root)" "${pass[@]}"
 }
 
 _awr_topsql()  { _awr_text_report topsql  "$@"; }
@@ -32006,6 +32082,7 @@ _awr_page()    { _awr_text_report page    "$@"; }
 _awr_replstat() { _awr_text_report replstat "$@"; }
 _awr_replslot() { _awr_text_report replslot "$@"; }
 _awr_replay()   { _awr_text_report replay   "$@"; }
+_awr_ltx()     { _awr_text_report ltx     "$@"; }
 
 run_awr() {
     local sub="$1"
@@ -32029,6 +32106,7 @@ run_awr() {
         replstat)       _awr_replstat "$@";;
         replslot)       _awr_replslot "$@";;
         replay)         _awr_replay "$@";;
+        ltx)            _awr_ltx "$@";;
         list|ls)        _awr_list "$@";;
         show)           _awr_show "$@";;
         delete)         if [ "$1" = "until" ] && [ $# -eq 2 ]; then _awr_delete_until "$2";
