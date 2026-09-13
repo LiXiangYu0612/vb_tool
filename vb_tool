@@ -7,7 +7,7 @@
 #-- Author:      MVS & Second-line Team 
 #--------------------------------------------------------------------------------
 set -o pipefail
-export VB_TOOL_VERSION="v2.4.2"
+export VB_TOOL_VERSION="v2.4.3"
 show_help() {
     echo "Vastbase Script Tool (vb_tool)"
     echo ""
@@ -32061,9 +32061,15 @@ case "$1" in
             as_help
             exit 1
         fi
-        if ! run_as "$2"; then
-            as_help
-            exit 1
+        run_as "$2"
+        rc=$?
+        if [ "$rc" -ne 0 ]; then
+            # only print full help on arg/syntax errors (rc=2);
+            # data errors (rc=1, e.g. DB unreachable) speak for themselves
+            if [ "$rc" -ne 1 ]; then
+                as_help
+            fi
+            exit "$rc"
         fi
         ;;
     sp)
@@ -32076,9 +32082,15 @@ case "$1" in
             sp_help
             exit 1
         fi
-        if ! run_sp "$2"; then
-            sp_help
-            exit 1
+        run_sp "$2"
+        rc=$?
+        if [ "$rc" -ne 0 ]; then
+            # only print full help on arg/syntax errors (rc=2);
+            # data errors (rc=1, e.g. DB unreachable) speak for themselves
+            if [ "$rc" -ne 1 ]; then
+                sp_help
+            fi
+            exit "$rc"
         fi
         ;;
     st)
@@ -32091,9 +32103,15 @@ case "$1" in
             st_help
             exit 1
         fi
-        if ! run_st "$2"; then
-            st_help
-            exit 1
+        run_st "$2"
+        rc=$?
+        if [ "$rc" -ne 0 ]; then
+            # only print full help on arg/syntax errors (rc=2);
+            # data errors (rc=1, e.g. DB unreachable) speak for themselves
+            if [ "$rc" -ne 1 ]; then
+                st_help
+            fi
+            exit "$rc"
         fi
         ;;
     slow)
@@ -32101,20 +32119,32 @@ case "$1" in
             slow_help
             exit 0
         fi
-        if ! run_slow; then
-            slow_help
-            exit 1
-        fi
+        run_slow
+rc=$?
+if [ "$rc" -ne 0 ]; then
+    # only print full help on arg/syntax errors (rc=2); data errors
+    # (rc=1, e.g. DB unreachable) speak for themselves
+    if [ "$rc" -ne 1 ]; then
+        slow_help
+    fi
+    exit "$rc"
+fi
         ;;
     xloghc)
         if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
             xloghc_help
             exit 0
         fi
-        if ! run_xloghc; then
-            xloghc_help
-            exit 1
-        fi
+        run_xloghc
+rc=$?
+if [ "$rc" -ne 0 ]; then
+    # only print full help on arg/syntax errors (rc=2); data errors
+    # (rc=1, e.g. DB unreachable) speak for themselves
+    if [ "$rc" -ne 1 ]; then
+        xloghc_help
+    fi
+    exit "$rc"
+fi
         ;;
     analyze_log)
         if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
@@ -32126,40 +32156,62 @@ case "$1" in
             analyze_log_help
             exit 1
         fi
-        if ! run_analyze "$@"; then
-            analyze_log_help
-            exit 1
+        run_analyze "$@"
+        rc=$?
+        if [ "$rc" -ne 0 ]; then
+            # only print full help on arg/syntax errors (rc=2);
+            # data errors (rc=1, e.g. DB unreachable) speak for themselves
+            if [ "$rc" -ne 1 ]; then
+                analyze_log_help
+            fi
+            exit "$rc"
         fi
-        ;;
+	;;
 	analyze_log_v2)
         if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
             analyze_log_v2_help
             exit 0
         fi
 		shift
-        if ! run_analyze_log_v2 "$@"; then
-            analyze_log_v2_help
-            exit 1
+        run_analyze_log_v2 "$@"
+        rc=$?
+        if [ "$rc" -ne 0 ]; then
+            # only print full help on arg/syntax errors (rc=2);
+            # data errors (rc=1, e.g. DB unreachable) speak for themselves
+            if [ "$rc" -ne 1 ]; then
+                analyze_log_v2_help
+            fi
+            exit "$rc"
         fi
         ;;
+
     kill)
         if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
             kill_help
             exit 0
         fi
-        if ! run_kill_sessions "${@:2}"; then
-            kill_help
-            exit 1
+        run_kill_sessions "${@:2}"
+        rc=$?
+        if [ "$rc" -ne 0 ]; then
+            # only print full help on arg/syntax errors (rc=2);
+            # data errors (rc=1, e.g. DB unreachable) speak for themselves
+            if [ "$rc" -ne 1 ]; then
+                kill_help
+            fi
+            exit "$rc"
         fi
         ;;
+
     index_check)
         if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
             index_check_help
             exit 0
         fi
-        if ! run_redundant_index "${@:2}"; then
-             exit 1
-        fi
+        run_redundant_index "${@:2}"
+rc=$?
+if [ "$rc" -ne 0 ]; then
+    exit "$rc"
+fi
         ;;
     tabstat)
         if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
@@ -32171,11 +32223,18 @@ case "$1" in
             tabstat_help
             exit 1
         fi
-        if ! run_tabstat "${@:2}"; then
-            tabstat_help
-            exit 1
+        run_tabstat "${@:2}"
+        rc=$?
+        if [ "$rc" -ne 0 ]; then
+            # only print full help on arg/syntax errors (rc=2);
+            # data errors (rc=1, e.g. DB unreachable) speak for themselves
+            if [ "$rc" -ne 1 ]; then
+                tabstat_help
+            fi
+            exit "$rc"
         fi
         ;;
+
     tabsize)
         if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
             tabsize_help
@@ -32186,11 +32245,18 @@ case "$1" in
             tabsize_help
             exit 1
         fi
-        if ! run_tabsize "${@:2}"; then
-            tabsize_help
-            exit 1
+        run_tabsize "${@:2}"
+        rc=$?
+        if [ "$rc" -ne 0 ]; then
+            # only print full help on arg/syntax errors (rc=2);
+            # data errors (rc=1, e.g. DB unreachable) speak for themselves
+            if [ "$rc" -ne 1 ]; then
+                tabsize_help
+            fi
+            exit "$rc"
         fi
         ;;
+
     sqlstat)
         if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
             sqlstat_help
@@ -32201,11 +32267,18 @@ case "$1" in
             sqlstat_help
             exit 1
         fi
-        if ! run_sqlstat "$2"; then
-            sqlstat_help
-            exit 1
+        run_sqlstat "$2"
+        rc=$?
+        if [ "$rc" -ne 0 ]; then
+            # only print full help on arg/syntax errors (rc=2);
+            # data errors (rc=1, e.g. DB unreachable) speak for themselves
+            if [ "$rc" -ne 1 ]; then
+                sqlstat_help
+            fi
+            exit "$rc"
         fi
         ;;
+
     awr)
         if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
             awr_help
@@ -32228,9 +32301,15 @@ fi
         exit 0
     fi
     shift  
-    if ! run_workload "$@"; then
-        workload_help
-        exit 1
+    run_workload "$@"
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+        # only print full help on arg/syntax errors (rc=2);
+        # data errors (rc=1, e.g. DB unreachable) speak for themselves
+        if [ "$rc" -ne 1 ]; then
+            workload_help
+        fi
+        exit "$rc"
     fi
     ;;
     flamegraph)
@@ -32238,71 +32317,120 @@ fi
             flamegraph_help
             exit 0
         fi
-        if ! run_flamegraph "${@:2}"; then
-            flamegraph_help
-            exit 1
+        run_flamegraph "${@:2}"
+        rc=$?
+        if [ "$rc" -ne 0 ]; then
+            # only print full help on arg/syntax errors (rc=2);
+            # data errors (rc=1, e.g. DB unreachable) speak for themselves
+            if [ "$rc" -ne 1 ]; then
+                flamegraph_help
+            fi
+            exit "$rc"
         fi
         ;;
+
     osw_netstat)
         if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
             osw_netstat_help
             exit 0
         fi
-        if ! run_osw_netstat "${@:2}"; then
-            osw_netstat_help
-            exit 1
+        run_osw_netstat "${@:2}"
+        rc=$?
+        if [ "$rc" -ne 0 ]; then
+            # only print full help on arg/syntax errors (rc=2);
+            # data errors (rc=1, e.g. DB unreachable) speak for themselves
+            if [ "$rc" -ne 1 ]; then
+                osw_netstat_help
+            fi
+            exit "$rc"
         fi
         ;;
+
     wdr_topsql)
         if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
             wdr_topsql_help
             exit 0
         fi
-        if ! run_wdr_topsql "${@:2}"; then
-            wdr_topsql_help
-            exit 1
+        run_wdr_topsql "${@:2}"
+        rc=$?
+        if [ "$rc" -ne 0 ]; then
+            # only print full help on arg/syntax errors (rc=2);
+            # data errors (rc=1, e.g. DB unreachable) speak for themselves
+            if [ "$rc" -ne 1 ]; then
+                wdr_topsql_help
+            fi
+            exit "$rc"
         fi
         ;;
+
     wdr_tabstat)
         if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
             wdr_tabstat_help
             exit 0
         fi
-        if ! run_wdr_tabstat "${@:2}"; then
-            wdr_tabstat_help
-            exit 1
+        run_wdr_tabstat "${@:2}"
+        rc=$?
+        if [ "$rc" -ne 0 ]; then
+            # only print full help on arg/syntax errors (rc=2);
+            # data errors (rc=1, e.g. DB unreachable) speak for themselves
+            if [ "$rc" -ne 1 ]; then
+                wdr_tabstat_help
+            fi
+            exit "$rc"
         fi
         ;;
+
     recover_table)
         if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
             recover_table_help
             exit 0
         fi
-        if ! run_recover_table "${@:2}"; then
-            recover_table_help
-            exit 1
+        run_recover_table "${@:2}"
+        rc=$?
+        if [ "$rc" -ne 0 ]; then
+            # only print full help on arg/syntax errors (rc=2);
+            # data errors (rc=1, e.g. DB unreachable) speak for themselves
+            if [ "$rc" -ne 1 ]; then
+                recover_table_help
+            fi
+            exit "$rc"
         fi
         ;;
+
     wdr_summary)
         if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
             wdr_summary_help
             exit 0
         fi
-        if ! run_wdr_summary "${@:2}";  then
-            wdr_summary_help
-            exit 1
+        run_wdr_summary "${@:2}"
+        rc=$?
+        if [ "$rc" -ne 0 ]; then
+            # only print full help on arg/syntax errors (rc=2);
+            # data errors (rc=1, e.g. DB unreachable) speak for themselves
+            if [ "$rc" -ne 1 ]; then
+                wdr_summary_help
+            fi
+            exit "$rc"
         fi
         ;;
+
     wdr_event)
         if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
             wdr_event_help
             exit 0
         fi
-        if ! run_wdr_event "${@:2}"; then
-            wdr_event_help
-            exit 1
+        run_wdr_event "${@:2}"
+        rc=$?
+        if [ "$rc" -ne 0 ]; then
+            # only print full help on arg/syntax errors (rc=2);
+            # data errors (rc=1, e.g. DB unreachable) speak for themselves
+            if [ "$rc" -ne 1 ]; then
+                wdr_event_help
+            fi
+            exit "$rc"
         fi
         ;;
+
     vtop)
         if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
             vtop_help
@@ -32315,70 +32443,101 @@ fi
             lockchain_help
             exit 0
         fi
-        if ! run_lockchain; then
-            lockchain_help
-            exit 1
-        fi
+        run_lockchain
+rc=$?
+if [ "$rc" -ne 0 ]; then
+    if [ "$rc" -ne 1 ]; then
+        lockchain_help
+    fi
+    exit "$rc"
+fi
         ;;
     lock_details)
         if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
             lock_details_help
             exit 0
         fi
-        if ! run_lock_details; then
-            lock_details_help
-            exit 1
-        fi
+        run_lock_details
+rc=$?
+if [ "$rc" -ne 0 ]; then
+    if [ "$rc" -ne 1 ]; then
+        lock_details_help
+    fi
+    exit "$rc"
+fi
         ;;
     priv)
         if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
             priv_help
             exit 0
         fi
-        if ! run_show_privilege "${@:2}"; then
-            priv_help
-            exit 1
+        run_show_privilege "${@:2}"
+        rc=$?
+        if [ "$rc" -ne 0 ]; then
+            # only print full help on arg/syntax errors (rc=2);
+            # data errors (rc=1, e.g. DB unreachable) speak for themselves
+            if [ "$rc" -ne 1 ]; then
+                priv_help
+            fi
+            exit "$rc"
         fi
         ;;
+
     mem)
         if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
             mem_help
             exit 0
         fi
-        if ! run_mem; then
-            mem_help
-            exit 1
-        fi
+        run_mem
+rc=$?
+if [ "$rc" -ne 0 ]; then
+    if [ "$rc" -ne 1 ]; then
+        mem_help
+    fi
+    exit "$rc"
+fi
         ;;
     net)
         if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
             net_help
             exit 0
         fi
-        if ! run_net; then
-            net_help
-            exit 1
-        fi
+        run_net
+rc=$?
+if [ "$rc" -ne 0 ]; then
+    if [ "$rc" -ne 1 ]; then
+        net_help
+    fi
+    exit "$rc"
+fi
         ;;
     tps)
         if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
             tps_help
             exit 0
         fi
-        if ! run_tps; then
-            tps_help
-            exit 1
-        fi
+        run_tps
+rc=$?
+if [ "$rc" -ne 0 ]; then
+    if [ "$rc" -ne 1 ]; then
+        tps_help
+    fi
+    exit "$rc"
+fi
         ;;
     repl)
         if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
             repl_help
             exit 0
         fi
-        if ! run_repl; then
-            repl_help
-            exit 1
-        fi
+        run_repl
+rc=$?
+if [ "$rc" -ne 0 ]; then
+    if [ "$rc" -ne 1 ]; then
+        repl_help
+    fi
+    exit "$rc"
+fi
         ;;
     relxlog)
         if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
@@ -32390,11 +32549,18 @@ fi
             relxlog_help
             exit 1
         fi
-        if ! run_relxlog "$2" "$3" "$4"; then
-            relxlog_help
-            exit 1
+        run_relxlog "$2" "$3" "$4"
+        rc=$?
+        if [ "$rc" -ne 0 ]; then
+            # only print full help on arg/syntax errors (rc=2);
+            # data errors (rc=1, e.g. DB unreachable) speak for themselves
+            if [ "$rc" -ne 1 ]; then
+                relxlog_help
+            fi
+            exit "$rc"
         fi
         ;;
+
     xlogcom)
         if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
             xlogcom_help
@@ -32405,21 +32571,35 @@ fi
             xlogcom_help
             exit 1
         fi
-        if ! run_xlogcom "$2" "$3" "$4" ; then
-            xlogcom_help
-            exit 1
+        run_xlogcom "$2" "$3" "$4" 
+        rc=$?
+        if [ "$rc" -ne 0 ]; then
+            # only print full help on arg/syntax errors (rc=2);
+            # data errors (rc=1, e.g. DB unreachable) speak for themselves
+            if [ "$rc" -ne 1 ]; then
+                xlogcom_help
+            fi
+            exit "$rc"
         fi
         ;;
+
     memhist)
         if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
             memhist_help
             exit 0
         fi
-        if ! run_memhist "${@:2}"; then
-            memhist_help
-            exit 1
+        run_memhist "${@:2}"
+        rc=$?
+        if [ "$rc" -ne 0 ]; then
+            # only print full help on arg/syntax errors (rc=2);
+            # data errors (rc=1, e.g. DB unreachable) speak for themselves
+            if [ "$rc" -ne 1 ]; then
+                memhist_help
+            fi
+            exit "$rc"
         fi
         ;;
+
     asp)
         if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
             asp_help
@@ -32430,11 +32610,18 @@ fi
             asp_help
             exit 1
         fi
-        if ! run_asp "${@:2}"; then
-            asp_help
-            exit 1
+        run_asp "${@:2}"
+        rc=$?
+        if [ "$rc" -ne 0 ]; then
+            # only print full help on arg/syntax errors (rc=2);
+            # data errors (rc=1, e.g. DB unreachable) speak for themselves
+            if [ "$rc" -ne 1 ]; then
+                asp_help
+            fi
+            exit "$rc"
         fi
         ;;
+
       sqltext)
             if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
                 sqltext_help
@@ -32444,10 +32631,15 @@ fi
                 sqltext_help
                 exit 1
             fi
-            if ! run_sqltext "$2"; then
-                echo "not found unique_id: $2" >&2
-                exit 1
-            fi
+            run_sqltext "$2"
+rc=$?
+if [ "$rc" -ne 0 ]; then
+    # data errors already self-describe; only full help on rc>=2
+    if [ "$rc" -ne 1 ]; then
+        echo "not found unique_id: $2" >&2
+    fi
+    exit "$rc"
+fi
             ;;
 	    sqlhc)
             if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
@@ -32458,21 +32650,32 @@ fi
                 sqlhc_help
                 exit 1
             fi
-            if ! run_sqlhc "${@:2}"; then
-                echo "sqlhc failed for '$2' (see messages above)" >&2
-                exit 1
-            fi
+            run_sqlhc "${@:2}"
+rc=$?
+if [ "$rc" -ne 0 ]; then
+    if [ "$rc" -ne 1 ]; then
+        echo "sqlhc failed for '$2' (see messages above)" >&2
+    fi
+    exit "$rc"
+fi
             ;;
     dead_tups)
         if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
             dead_tups_help
             exit 0
         fi
-        if ! run_dead_tups "${@:2}"; then
-            dead_tups_help
-            exit 1
+        run_dead_tups "${@:2}"
+        rc=$?
+        if [ "$rc" -ne 0 ]; then
+            # only print full help on arg/syntax errors (rc=2);
+            # data errors (rc=1, e.g. DB unreachable) speak for themselves
+            if [ "$rc" -ne 1 ]; then
+                dead_tups_help
+            fi
+            exit "$rc"
         fi
         ;;
+
     -h|--help|help|"")
         show_help
         ;;
@@ -32489,21 +32692,35 @@ fi
             redo_help
             exit 0
         fi
-        if ! run_redo "${@:2}"; then
-            redo_help
-            exit 1
+        run_redo "${@:2}"
+        rc=$?
+        if [ "$rc" -ne 0 ]; then
+            # only print full help on arg/syntax errors (rc=2);
+            # data errors (rc=1, e.g. DB unreachable) speak for themselves
+            if [ "$rc" -ne 1 ]; then
+                redo_help
+            fi
+            exit "$rc"
         fi
         ;;
+
     ssh_setup)
         if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
             ssh_setup_help
             exit 0
         fi
-        if ! run_ssh "${@:2}"; then
-            ssh_setup_help
-            exit 1
+        run_ssh "${@:2}"
+        rc=$?
+        if [ "$rc" -ne 0 ]; then
+            # only print full help on arg/syntax errors (rc=2);
+            # data errors (rc=1, e.g. DB unreachable) speak for themselves
+            if [ "$rc" -ne 1 ]; then
+                ssh_setup_help
+            fi
+            exit "$rc"
         fi
         ;;
+
     lsds)
         if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
             echo "Usage: vb_tool lsds [--raw]"
@@ -32535,21 +32752,35 @@ fi
             collect_log_help
             exit 0
         fi
-        if ! run_collect_log "${@:2}"; then
-            collect_log_help
-            exit 1
+        run_collect_log "${@:2}"
+        rc=$?
+        if [ "$rc" -ne 0 ]; then
+            # only print full help on arg/syntax errors (rc=2);
+            # data errors (rc=1, e.g. DB unreachable) speak for themselves
+            if [ "$rc" -ne 1 ]; then
+                collect_log_help
+            fi
+            exit "$rc"
         fi
         ;;
+
     stack)
         if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
             stack_help
             exit 0
         fi
-        if ! run_stack "${@:2}"; then
-            stack_help
-            exit 1
+        run_stack "${@:2}"
+        rc=$?
+        if [ "$rc" -ne 0 ]; then
+            # only print full help on arg/syntax errors (rc=2);
+            # data errors (rc=1, e.g. DB unreachable) speak for themselves
+            if [ "$rc" -ne 1 ]; then
+                stack_help
+            fi
+            exit "$rc"
         fi
         ;;
+
     *)
         echo "Error: unknown script '$1'" >&2
         show_list
