@@ -7,7 +7,7 @@
 #-- Author:      MVS & Second-line Team 
 #--------------------------------------------------------------------------------
 set -o pipefail
-export VB_TOOL_VERSION="v2.4.4"
+export VB_TOOL_VERSION="v2.4.7"
 show_help() {
     echo "Vastbase Script Tool (vb_tool)"
     echo ""
@@ -23903,10 +23903,11 @@ Usage: vb_tool awr <create|enable|disable|awrrpt|awrdiff|baseline|topsql|event|s
                             enable')
   ltx     begin <id> end <id>
                             print the window's PER-5MIN long-transaction monitor
-                            to the screen (Sample Time + ltx60_cnt/itx/active +
-                            oldest PID/xact_start/age/state/wait/usi/xmin/xid,
-                            one row per 5-min sample -- awrrpt 'Long Transaction
-                            Monitor' detail fields; needs 'awr enable' sampler)
+                            to the screen (Sample Time + ltx60_cnt|itx|act
+                            + pid|state|xact_start + duration(auto unit) +
+                            sql_id + oldestxmin, 7 compact columns; HTML awrrpt
+                            keeps 12 columns + duration cell auto unit; needs
+                            'awr enable' sampler)
   list    [YYYY-MM-DD]     list stored snapshots (snap_id / ts / host / db /
                             per-snap DB_TIME delta + AAS), newest first;
                             default latest 30, a date lists that whole day
@@ -25344,12 +25345,12 @@ def longtxn_section_html(lt):
         if te is not None and xe is not None:
             a = te - xe
             if a > peak_age: peak_age, peak_age_ts = a, ts
-    h = ['<div class="note">%d sample(s); peak ltx60_cnt %d at %s; worst oldest-txn age %ss at %s.</div>'
+    h = ['<div class="note">%d sample(s); peak ltx60_cnt %d at %s; worst oldest-txn age %s at %s.</div>'
          % (lt["n_data"], peak_cnt, esc(peak_cnt_ts or "-"),
             ("%.0f" % peak_age) if peak_age >= 0 else "-", esc(peak_age_ts or "-"))]
     h.append('<table class="t"><tr><th>Sample Time</th><th class="n">ltx60_cnt</th>'
              '<th class="n">ltx60_itx_cnt</th><th class="n">ltx60_active_cnt</th>'
-             '<th class="n">Oldest PID</th><th>Oldest Xact Start</th><th class="n">Age (s)</th>'
+             '<th class="n">Oldest PID</th><th>Oldest Xact Start</th><th class="n">duration</th>'
              '<th>State</th><th>Wait Event</th><th class="n">unique_sql_id</th>'
              '<th class="n">OldestXmin</th><th class="n">Current Xid</th></tr>')
     for ts, kind, f in rows:
@@ -25361,10 +25362,9 @@ def longtxn_section_html(lt):
         te, xe = _ts_epoch(ts), _ts_epoch(xstart)
         if te is not None and xe is not None:
             age_v = te - xe
-            age = ("%.0f" % age_v)
-            age_cell = '<td class="n%s">%s</td>' % (thr_cell_cls(age_v, 300.0, 1800.0), age)
+            dur_cell = '<td class="n%s">%s</td>' % (thr_cell_cls(age_v, 300.0, 1800.0), _fmt_duration(age_v))
         else:
-            age_cell = '<td class="n">-</td>'
+            dur_cell = '<td class="n">-</td>'
         def _n(v):
             try:
                 return '<td class="n%s">%s</td>' % (thr_cell_cls(float(v), 0.5, 10.0), fmt_int(float(v)))
@@ -25379,7 +25379,7 @@ def longtxn_section_html(lt):
         usi_cell = ('<span class="muted">-</span>' if usi in ("", "0") else esc(usi))
         h.append('<tr><td>%s</td>%s<td class="n">%s</td><td>%s</td>%s<td>%s</td><td>%s</td>'
                  '<td class="n">%s</td><td class="n">%s</td><td class="n">%s</td></tr>'
-                 % (esc(ts), cnt_cell, esc(pid or "-"), esc(xstart or "-"), age_cell,
+                 % (esc(ts), cnt_cell, esc(pid or "-"), esc(xstart or "-"), dur_cell,
                     esc(state or "-"), esc(wait), usi_cell, esc(oxmin or "-"),
                     esc(txid or "-")))
     h.append('</table>')
@@ -29952,12 +29952,37 @@ def text_tabstat(win, dbname, schema, table, detail_wins=None):
     return 0, "\n".join(lines)
 
 
+def _fmt_duration(seconds):
+    """Render seconds in the most readable unit: s/m/h/d (1 decimal for >= 60s).
+    Mirrors the 'fmt_us' style used elsewhere in the renderer."""
+    if seconds is None:
+        return "-"
+    try:
+        s = float(seconds)
+    except (TypeError, ValueError):
+        return "-"
+    if s < 0:
+        return "-"
+    a = abs(s)
+    if a < 60:
+        return "%ds" % s
+    if a < 3600:
+        return "%.1fm" % (s / 60.0)
+    if a < 86400:
+        return "%.1fh" % (s / 3600.0)
+    return "%.1fd" % (s / 86400.0)
+
+
 def text_ltx(win, repl_dir=None):
     """awrrpt Long Transaction Monitor as a screen table: per-5-min ltx60_*
     counts + oldest-txn details from the lt_*.log sampler -- same source and
     columns as the html report's folded detail table. One row per 5-min sample
     in ts order; window summary line stays on top. Needs 'awr enable' sampler
-    (one sample every 5 min)."""
+    (one sample every 5 min).
+
+    Compact column layout (vs the 12-col html): oldest_pid|state(act|itx)|
+    xact_start folded into one col, state+wait_event dropped, usi renamed
+    sql_id, current_xid dropped. Age -> 'duration' with auto unit (s/m/h/d)."""
     lines = _text_banner("awr ltx detail", win)
     m = win["meta"]
     samples = (load_lt_samples(repl_dir, m.get("begin_ts", ""), m.get("end_ts", ""))
@@ -29971,9 +29996,9 @@ def text_ltx(win, repl_dir=None):
         lines.append("(no usable long-transaction samples in this period "
                      "(%d sample error(s)))" % samples["n_error"])
         return 0, "\n".join(lines)
-    # window summary: peak long-txn count and worst oldest-txn age, with times
-    peak_cnt = peak_age = -1
-    peak_cnt_ts = peak_age_ts = ""
+    # window summary: peak long-txn count and worst oldest-txn duration, with times
+    peak_cnt = peak_dur = -1
+    peak_cnt_ts = peak_dur_ts = ""
     for ts, kind, f in rows:
         if kind != "data":
             continue
@@ -29986,36 +30011,49 @@ def text_ltx(win, repl_dir=None):
         te, xe = _ts_epoch(ts), _ts_epoch((f + [""] * 12)[4])
         if te is not None and xe is not None:
             a = te - xe
-            if a > peak_age: peak_age, peak_age_ts = a, ts
-    lines.append("%d sample(s); peak ltx60_cnt %d at %s; worst oldest-txn age %ss at %s."
+            if a > peak_dur: peak_dur, peak_dur_ts = a, ts
+    lines.append("%d sample(s); peak ltx60_cnt %d at %s; worst oldest-txn duration %s at %s."
                 % (samples["n_data"], peak_cnt, peak_cnt_ts or "-",
-                   ("%.0f" % peak_age) if peak_age >= 0 else "-",
-                   peak_age_ts or "-"))
+                   _fmt_duration(peak_dur) if peak_dur >= 0 else "-",
+                   peak_dur_ts or "-"))
     lines.append("")
-    headers = ["time", "ltx60_cnt", "itx", "active", "oldest_pid", "xact_start",
-               "age(s)", "state", "wait_event", "usi", "xmin", "xid"]
+    headers = ["time", "ltx60_cnt|itx|act",
+               "pid|state|xact_start", "duration", "sql_id", "oldestxmin"]
     out_rows = []
     for ts, kind, f in rows:
         if kind != "data":
-            out_rows.append([ts] + ["(sample error)"] + [""] * 10)
+            out_rows.append([ts] + ["(sample error)"] + [""] * 6)
             continue
         cnt, itx, act, pid, xstart, state, ws, we, usi, oxmin, txid = (f + [""] * 11)[:11]
         te, xe = _ts_epoch(ts), _ts_epoch(xstart)
         if te is not None and xe is not None:
-            age = "%.0f" % (te - xe)
+            dur = _fmt_duration(te - xe)
         else:
-            age = "-"
-        # prefer wait_event; show wait_status before it when both exist and differ
-        if ws and we and ws != we and ws != "none":
-            wait = "%s/%s" % (ws, we)
+            dur = "-"
+        # oldest_pid|state(act|itx)|xact_start -- state tag is the SHORT
+        # 'act' or 'itx' (matches the per-state counter columns above) so
+        # the reader can tell which bucket that PID is in at a glance.
+        # 'idle in transaction*' is the "itx" bucket; everything else is "act"
+        # (we don't break out other sub-states -- the column is informational,
+        # the wait_event column was dropped to keep the table narrow).
+        # When there is no long-tx in this sample (pid is empty), the state
+        # tag has no meaning either -- emit just '-' for the whole cell.
+        if not pid:
+            pid_xstart = "-"
         else:
-            wait = we or ws or "-"
-        usi_cell = "-" if usi in ("", "0") else usi
-        out_rows.append([ts, cnt or "-", itx or "-", act or "-",
-                         pid or "-", xstart or "-", age,
-                         state or "-", wait, usi_cell,
-                         oxmin or "-", txid or "-"])
-    lines.append(_text_table(headers, out_rows, align="l" + "r" * 11))
+            state_tag = "itx" if (state and state.startswith("idle in transaction")) else "act"
+            if xstart:
+                pid_xstart = "%s|%s|%s" % (pid, state_tag, xstart)
+            else:
+                pid_xstart = "%s|%s|-" % (pid, state_tag)
+        sql_id_cell = "-" if usi in ("", "0") else usi
+        # the three count columns collapsed into one cell with pipe-delimited
+        # values: "N|N|N" (no leading/trailing pipe). Header mirrors the same
+        # shape: "ltx60_cnt|itx60|act60" -- keeps the row narrow and matches
+        # the merged-column look in the next col.
+        counts_cell = "%s|%s|%s" % (cnt or "-", itx or "-", act or "-")
+        out_rows.append([ts, counts_cell, pid_xstart, dur, sql_id_cell, oxmin or "-"])
+    lines.append(_text_table(headers, out_rows, align="l" + "r" * 7))
     return 0, "\n".join(lines)
     return 0, "\n".join(lines)
 
@@ -30322,7 +30360,7 @@ _awr_lt_stack_sample() {
     local out
     # ---- long transaction monitor: exactly one row per sample ----
     out=$(PGCONNECT_TIMEOUT=15 PGOPTIONS='-c statement_timeout=15000' \
-          psql -d postgres -tAF',' -c "with lt as (select count(*)::text as long_cnt, coalesce(sum(case when state like 'idle in transaction%' then 1 else 0 end),0)::text as itx_cnt, coalesce(sum(case when state = 'active' then 1 else 0 end),0)::text as act_cnt from pg_stat_activity where xact_start is not null and xact_start < now() - interval '60 seconds' and pid <> pg_backend_pid() and application_name <> 'workload'), o as (select a.pid::text as pid, a.xact_start::timestamp(0)::text as xstart, a.state as state, coalesce(w.wait_status,'') as ws, coalesce(w.wait_event,'') as we, a.unique_sql_id::text as usi from (select * from pg_stat_activity where xact_start is not null and pid <> pg_backend_pid() and application_name <> 'workload' order by xact_start, pid limit 1) a left join pg_thread_wait_status w on w.tid = a.pid) select lt.long_cnt, lt.itx_cnt, lt.act_cnt, coalesce(o.pid,''), coalesce(o.xstart,''), coalesce(o.state,''), coalesce(o.ws,''), coalesce(o.we,''), coalesce(o.usi,''), gs_txid_oldestxmin()::text, case when pg_is_in_recovery() then '-' else txid_current()::text end from lt left join o on true" 2>/dev/null)
+          psql -d postgres -tAF',' -c "with lt as (select count(*)::text as long_cnt, coalesce(sum(case when state like 'idle in transaction%' then 1 else 0 end),0)::text as itx_cnt, coalesce(sum(case when state = 'active' then 1 else 0 end),0)::text as act_cnt from pg_stat_activity where xact_start is not null and xact_start < now() - interval '60 seconds' and pid <> pg_backend_pid() and application_name <> 'workload' and (state like 'idle in transaction%' or state = 'active')), o as (select a.pid::text as pid, a.xact_start::timestamp(0)::text as xstart, a.state as state, coalesce(w.wait_status,'') as ws, coalesce(w.wait_event,'') as we, a.unique_sql_id::text as usi from (select * from pg_stat_activity where xact_start is not null and pid <> pg_backend_pid() and application_name <> 'workload' and (state like 'idle in transaction%' or state = 'active') order by xact_start, pid limit 1) a left join pg_thread_wait_status w on w.tid = a.pid) select lt.long_cnt, lt.itx_cnt, lt.act_cnt, coalesce(o.pid,''), coalesce(o.xstart,''), coalesce(o.state,''), coalesce(o.ws,''), coalesce(o.we,''), coalesce(o.usi,''), gs_txid_oldestxmin()::text, case when pg_is_in_recovery() then '-' else txid_current()::text end from lt left join o on true" 2>/dev/null)
     if [ "$?" -ne 0 ] || [ -z "$out" ]; then
         printf '%s,error\n' "$ts" >> "$lf"
     else
