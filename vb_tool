@@ -1,13 +1,13 @@
 #!/bin/bash
 #--------------------------------------------------------------------------------
 #-- File name:   vb_tool
-#-- Version  ：  v2.4.8
+#-- Version  ：  v2.4.7
 #-- Commit at：  2026-09-08 14:05:00
 #-- Purpose:     Vastbase Script Tool
 #-- Author:      MVS & Second-line Team 
 #--------------------------------------------------------------------------------
 set -o pipefail
-export VB_TOOL_VERSION="v2.4.8"
+export VB_TOOL_VERSION="v2.4.7"
 show_help() {
     echo "Vastbase Script Tool (vb_tool)"
     echo ""
