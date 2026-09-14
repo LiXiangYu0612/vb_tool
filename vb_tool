@@ -1,13 +1,13 @@
 #!/bin/bash
 #--------------------------------------------------------------------------------
 #-- File name:   vb_tool
-#-- Version  ：  v2.4.6
+#-- Version  ：  v2.4.7
 #-- Commit at：  2026-09-08 14:05:00
 #-- Purpose:     Vastbase Script Tool
 #-- Author:      MVS & Second-line Team 
 #--------------------------------------------------------------------------------
 set -o pipefail
-export VB_TOOL_VERSION="v2.4.6"
+export VB_TOOL_VERSION="v2.4.7"
 show_help() {
     echo "Vastbase Script Tool (vb_tool)"
     echo ""
@@ -25431,7 +25431,8 @@ def load_sessmem_samples(repl_dir, begin_ts, end_ts):
     """Read sessmem_*.log[.gz] rows with ts in [begin_ts, end_ts] (inclusive).
     One row per 5-min sample (written by _awr_lt_stack_sample's session-memory
     block, same lock/gate as lt_/stack_):
-      ts|sessid|total_bytes|pid|usename|state|unique_sql_id|ctxs   (data)
+      ts|sessid|total_bytes|pid|usename|state|unique_sql_id|ctxs[|client_info]
+        (data; client_info = application_name|client_addr|client_port, v2.4.7+)
       ts|unknown    query OK but empty output (user: empty -> unknown)
       ts|error      query failed
     ctxs = 'name(bytes), name(bytes), name(bytes)' (top 3 contexts by
@@ -25452,10 +25453,14 @@ def load_sessmem_samples(repl_dir, begin_ts, end_ts):
             out["rows"].append((ts, "unknown", [])); out["n_unknown"] += 1
         else:
             p = rest.split("|")
-            if len(p) == 7:
-                out["rows"].append((ts, "data", p)); out["n_data"] += 1
-            # anything else: malformed row (e.g. a '|' inside a field) -- dropped,
-            # same discipline as load_lt_samples/load_stack_samples
+            # first 7 fields are fixed (sessid..ctxs; ctxs itself never holds a
+            # '|'); everything past field 7 is joined back together as the ONE
+            # client_info field -- it uses '|' as its inner separator
+            # (application_name|client_addr|client_port) by design, so a v2.4.7
+            # row splits into 9-10 tokens. 7 tokens = pre-v2.4.7 row (no tail).
+            if len(p) >= 7:
+                out["rows"].append((ts, "data", p[:7] + ["|".join(p[7:])])); out["n_data"] += 1
+            # anything else: malformed row (too few fields) -- dropped
     return out
 
 def _chain_html(chain, width=200):
@@ -25646,24 +25651,25 @@ def sessmem_section_html(sm):
             pass
     h = ['<div class="note">%d sample(s); peak session total %s at %s.</div>'
          % (sm["n_data"], fmt_bytes(peak) if peak >= 0 else "-", esc(peak_ts or "-"))]
-    h.append('<table class="t"><tr><th>Sample Time</th><th class="n">PID</th>'
+    h.append('<table class="t"><tr><th>Sample Time</th><th>client_info</th><th class="n">PID</th>'
              '<th>User</th><th>State</th><th class="n">Memsize</th><th>Top 3 Contexts</th>'
              '<th class="n">unique_sql_id</th></tr>')
     for ts, kind, f in rows:
         if kind != "data":
-            h.append('<tr><td>%s</td><td colspan="6" class="muted">sample %s%s</td></tr>'
+            h.append('<tr><td>%s</td><td colspan="7" class="muted">sample %s%s</td></tr>'
                      % (esc(ts), kind, " (query failed)" if kind == "error" else ""))
             continue
-        f = (f + [""] * 7)[:7]
-        _sessid, tot, pid, uname, state, usi, ctxs = f
+        f = (f + [""] * 8)[:8]
+        _sessid, tot, pid, uname, state, usi, ctxs, cinfo = f
+        ci_cell = esc(cinfo) if cinfo and cinfo.strip("|") else "-"
         usi_cell = '<span class="muted">-</span>' if usi in ("", "0") else esc(usi)
         try:
             tot_cell = fmt_bytes(int(tot))
         except ValueError:
             tot_cell = esc(tot or "-")
-        h.append('<tr><td>%s</td><td class="n">%s</td><td>%s</td><td>%s</td>'
+        h.append('<tr><td>%s</td><td>%s</td><td class="n">%s</td><td>%s</td><td>%s</td>'
                  '<td class="n">%s</td><td>%s</td><td class="n">%s</td></tr>'
-                 % (esc(ts), esc(pid or "-"), esc(uname or "-"),
+                 % (esc(ts), ci_cell, esc(pid or "-"), esc(uname or "-"),
                     esc(state or "-"), tot_cell, esc(_ctxs_pretty(ctxs)), usi_cell))
     h.append('</table>')
     return "".join(h)
@@ -30791,10 +30797,12 @@ _awr_lt_stack_sample() {
     # sizes are ALL totalsize (user decision: totalsize only, no usedsize).
     # LEFT JOIN activity: the top-memory session may already be gone from
     # pg_stat_activity (memory rows outlive the activity row). Empty output
-    # writes 'unknown' (user decision), psql failure writes 'error'. ----
+    # writes 'unknown' (user decision), psql failure writes 'error'. v2.4.7:
+    # 8th field client_info = application_name|client_addr|client_port (LEFT
+    # JOIN activity; empty for background threads -> '||'). ----
     local mlf="$root/sessmem_$(date +%Y%m%d).log" mout
     mout=$(PGCONNECT_TIMEOUT=15 PGOPTIONS='-c statement_timeout=15000' \
-          psql -d postgres -tAF'|' -c "with p as (select sessid, sum(totalsize) tot from gs_session_memory_detail group by sessid order by tot desc limit 1), c as (select contextname, sum(totalsize) sz from gs_session_memory_detail where sessid=(select sessid from p) group by contextname order by sz desc limit 3) select p.sessid, p.tot, coalesce(a.pid::text,''), coalesce(a.usename,''), coalesce(a.state,''), coalesce(a.unique_sql_id::text,''), coalesce((select string_agg(contextname||'('||sz||')', ', ') from c), '') from p left join pg_stat_activity a on a.pid::text = split_part(p.sessid, '.', 2)" 2>/dev/null)
+          psql -d postgres -tAF'|' -c "with p as (select sessid, sum(totalsize) tot from gs_session_memory_detail group by sessid order by tot desc limit 1), c as (select contextname, sum(totalsize) sz from gs_session_memory_detail where sessid=(select sessid from p) group by contextname order by sz desc limit 3) select p.sessid, p.tot, coalesce(a.pid::text,''), coalesce(a.usename,''), coalesce(a.state,''), coalesce(a.unique_sql_id::text,''), coalesce((select string_agg(contextname||'('||sz||')', ', ') from c), ''), coalesce(a.application_name,'')||'|'||coalesce(a.client_addr::text,'')||'|'||coalesce(a.client_port::text,'') from p left join pg_stat_activity a on a.pid::text = split_part(p.sessid, '.', 2)" 2>/dev/null)
     if [ "$?" -ne 0 ]; then
         printf '%s|error\n' "$ts" >> "$mlf"
     elif [ -z "$mout" ]; then
