@@ -25297,7 +25297,7 @@ def filestat_rows(win):
     return rows, totals, False
 
 def loadprofile_wal_pw_rows(win, duration):
-    """(label, begin, end, delta, per_sec, ok) tuples for the WAL-write and
+    """(label, begin, end, delta, per_sec, ok, as_bytes) tuples for the WAL-write and
     pagewriter-flush Load Profile rows (v2.4.5). WAL = file_redo_iostat
     (= gs_redo_stat = pg_stat_get_redo_stat, XLogWrite cumulative under
     WALWriteLock, primary-valid); pagewriter = pagewriter.csv
@@ -25317,11 +25317,14 @@ def loadprofile_wal_pw_rows(win, duration):
                               ("WAL write time (ms)", "file_redo_iostat", "writetim")):
         b, e = _sum("begin", table, col), _sum("end", table, col)
         ok = (col != "writetim") or tim_ok
-        rows.append((label, b, e, e - b, ((e - b) / duration) if duration else 0.0, ok))
-    b = _sum("begin", "pagewriter", "pgwr_actual_flush_total_num")
-    e = _sum("end", "pagewriter", "pgwr_actual_flush_total_num")
-    rows.append(("pagewriter pages flushed", b, e, e - b,
-                 ((e - b) / duration) if duration else 0.0, True))
+        rows.append((label, b, e, e - b, ((e - b) / duration) if duration else 0.0, ok, False))
+    # pagewriter: page counts x BLCKSZ(8K) -> SIZE, rendered via fmt_bytes like
+    # the 'WAL written (xlog insert lsn)' row (user 2026-09-14)
+    _PGB = 8192.0
+    b = _sum("begin", "pagewriter", "pgwr_actual_flush_total_num") * _PGB
+    e = _sum("end", "pagewriter", "pgwr_actual_flush_total_num") * _PGB
+    rows.append(("pagewriter flushed", b, e, e - b,
+                 ((e - b) / duration) if duration else 0.0, True, True))
     return rows
 
 # ---- Long-txn + callstack samplers (awrrpt only; 5-min cadence, written by
@@ -28191,16 +28194,18 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     # ---- WAL writes + pagewriter flushes (v2.4.5; the old 'pagewriter written
     # (ckpt_redo_point)' line measured an LSN POSITION, not pages -- removed) ----
     _lpw_neg = False
-    for _lbl, _b, _e, _d, _ps, _ok in loadprofile_wal_pw_rows(win, duration):
-        if _lbl != "pagewriter pages flushed" and "physical standby" in (m.get("db_role") or ""):
+    for _lbl, _b, _e, _d, _ps, _ok, _by in loadprofile_wal_pw_rows(win, duration):
+        if not _by and "physical standby" in (m.get("db_role") or ""):
             _lbl = _lbl + " (primary only)"
+        _cf = fmt_bytes if _by else fmt_int
+        _pf = fmt_bytes if _by else fmt_num
         parts.append('<tr><td>%s</td><td class="n">%s</td><td class="n">%s</td>'
                      '<td class="n">%s</td><td class="n">%s</td></tr>'
                      % (esc(_lbl),
-                        fmt_int(_b) if _ok else '-',
-                        fmt_int(_e) if _ok else '-',
-                        fmt_int(_d) if _ok else '-',
-                        fmt_num(_ps) if _ok else '-'))
+                        _cf(_b) if _ok else '-',
+                        _cf(_e) if _ok else '-',
+                        _cf(_d) if _ok else '-',
+                        _pf(_ps) if _ok else '-'))
         if _d < 0:
             _lpw_neg = True
     if _lpw_neg:
@@ -29255,11 +29260,11 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     # ---- WAL writes + pagewriter flushes (v2.4.5; P1/P2 window deltas, per-second per period) ----
     _lpw1 = dict((r[0], r) for r in loadprofile_wal_pw_rows(win1, dur1))
     _lpw2 = dict((r[0], r) for r in loadprofile_wal_pw_rows(win2, dur2))
-    for _lbl, _b1, _e1, _d1, _ps1, _ok1 in _lpw1.values():
-        _lbl, _b2, _e2, _d2, _ps2, _ok2 = _lpw2[_lbl]
+    for _lbl, _b1, _e1, _d1, _ps1, _ok1, _by1 in _lpw1.values():
+        _lbl, _b2, _e2, _d2, _ps2, _ok2, _by2 = _lpw2[_lbl]
         _ok = _ok1 and _ok2
-        _cell  = fmt_int if _ok else (lambda v: "-")
-        _celln = fmt_num if _ok else (lambda v: "-")
+        _cell  = (fmt_bytes if _by1 else fmt_int) if _ok else (lambda v: "-")
+        _celln = (fmt_bytes if _by1 else fmt_num) if _ok else (lambda v: "-")
         parts.append('<tr><td>%s</td><td class="n">%s</td><td class="n">%s</td><td class="n">%s</td>'
                      '<td class="n">%s</td><td class="n">%s</td></tr>' % (
                          esc(_lbl), _cell(_d1), _cell(_d2), _cell(_d2 - _d1),
