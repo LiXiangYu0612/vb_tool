@@ -25318,13 +25318,16 @@ def loadprofile_wal_pw_rows(win, duration):
         b, e = _sum("begin", table, col), _sum("end", table, col)
         ok = (col != "writetim") or tim_ok
         rows.append((label, b, e, e - b, ((e - b) / duration) if duration else 0.0, ok, False))
-    # pagewriter: page counts x BLCKSZ(8K) -> SIZE, rendered via fmt_bytes like
-    # the 'WAL written (xlog insert lsn)' row (user 2026-09-14)
+    # pagewriter: Begin/End stay RAW PAGE COUNTS (user 2026-09-15: keep the
+    # original unit there); only Δ Total / Δ Per Second are byte-scaled
+    # (pages x BLCKSZ 8K) and rendered via fmt_bytes like the 'WAL written
+    # (xlog insert lsn)' row's deltas
     _PGB = 8192.0
-    b = _sum("begin", "pagewriter", "pgwr_actual_flush_total_num") * _PGB
-    e = _sum("end", "pagewriter", "pgwr_actual_flush_total_num") * _PGB
-    rows.append(("pagewriter flushed", b, e, e - b,
-                 ((e - b) / duration) if duration else 0.0, True, True))
+    _pb = _sum("begin", "pagewriter", "pgwr_actual_flush_total_num")
+    _pe = _sum("end", "pagewriter", "pgwr_actual_flush_total_num")
+    _pd = (_pe - _pb) * _PGB
+    rows.append(("pagewriter flushed", _pb, _pe, _pd,
+                 (_pd / duration) if duration else 0.0, True, True))
     return rows
 
 # ---- Long-txn + callstack samplers (awrrpt only; 5-min cadence, written by
@@ -28202,8 +28205,8 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         parts.append('<tr><td>%s</td><td class="n">%s</td><td class="n">%s</td>'
                      '<td class="n">%s</td><td class="n">%s</td></tr>'
                      % (esc(_lbl),
-                        _cf(_b) if _ok else '-',
-                        _cf(_e) if _ok else '-',
+                        fmt_int(_b) if _ok else '-',
+                        fmt_int(_e) if _ok else '-',
                         _cf(_d) if _ok else '-',
                         _pf(_ps) if _ok else '-'))
         if _d < 0:
