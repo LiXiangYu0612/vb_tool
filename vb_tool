@@ -1,13 +1,13 @@
 #!/bin/bash
 #--------------------------------------------------------------------------------
 #-- File name:   vb_tool
-#-- Version  ：  v2.4.5
+#-- Version  ：  v2.4.6
 #-- Commit at：  2026-09-08 14:05:00
 #-- Purpose:     Vastbase Script Tool
 #-- Author:      MVS & Second-line Team 
 #--------------------------------------------------------------------------------
 set -o pipefail
-export VB_TOOL_VERSION="v2.4.5"
+export VB_TOOL_VERSION="v2.4.6"
 show_help() {
     echo "Vastbase Script Tool (vb_tool)"
     echo ""
@@ -25280,15 +25280,16 @@ def filestat_rows(win):
             bucket[c] += _d(c)
     rows = []
     for key, o in own.items():
-        r = {"obj": "%s.%s" % (key[1] or "?", key[2]), "db": o["db"], "spc": o["spc"],
-             "relkind": o["relkind"], "parttype": o["parttype"], "comp": o["comp"]}
+        r = {"db": key[0] or "-", "schema": key[1] or "-", "name": key[2],
+             "spc": o["spc"], "relkind": o["relkind"], "parttype": o["parttype"],
+             "comp": o["comp"]}
         r["otype"] = _fs_otype(r)
         for c in DIMS:
             r[c] = sum(x.get(c, 0.0) for x in o["comp"].values())
         rows.append(r)
     if any(unresolved[c] for c in DIMS):
-        r = {"obj": "(deleted / unresolved files)", "db": "-", "spc": "-",
-             "relkind": "", "parttype": "", "comp": {}, "otype": "-"}
+        r = {"db": "-", "schema": "-", "name": "(deleted / unresolved files)",
+             "spc": "-", "relkind": "", "parttype": "", "comp": {}, "otype": "-"}
         for c in DIMS:
             r[c] = unresolved[c]
         rows.append(r)
@@ -25605,10 +25606,26 @@ def callstack_section_html(st):
     fe_html = "".join(h)
     return be_html, av_html, fe_html
 
+def _ctxs_pretty(ctxs):
+    """Top-3 context cell 'name(bytes), name(bytes), name(bytes)' with the byte
+    counts rendered through fmt_bytes (user 2026-09-14: auto-unit the sizes).
+    Parser-side so already-written sampler rows reformat too; any chunk that
+    does not match name(bytes) passes through untouched."""
+    out = []
+    for chunk in (ctxs or "").split(", "):
+        m = re.match(r"^(.*)\((\d+)\)$", chunk)
+        if m:
+            out.append("%s (%s)" % (m.group(1), fmt_bytes(int(m.group(2)))))
+        elif chunk:
+            out.append(chunk)
+    return ", ".join(out)
+
 def sessmem_section_html(sm):
     """Max Session Memory Sample body (caller emits the sub() title; placed
     right after Session Memory Summary). Window peak line + one row per 5-min
-    sample; unknown/error samples render as muted gap rows (visible > silent)."""
+    sample; unknown/error samples render as muted gap rows (visible > silent).
+    sessid stays in the log grammar (correlates with gs_session_memory_detail)
+    but is NOT displayed (user 2026-09-14)."""
     if not sm["files"]:
         return ('<div class="note">no session memory samples in this period '
                 '(sampler runs while awr is enabled, one sample every 5 min)</div>')
@@ -25629,25 +25646,25 @@ def sessmem_section_html(sm):
             pass
     h = ['<div class="note">%d sample(s); peak session total %s at %s.</div>'
          % (sm["n_data"], fmt_bytes(peak) if peak >= 0 else "-", esc(peak_ts or "-"))]
-    h.append('<table class="t"><tr><th>Sample Time</th><th>sessid</th><th class="n">PID</th>'
-             '<th>User</th><th>State</th><th class="n">Total</th><th>Top 3 Contexts</th>'
+    h.append('<table class="t"><tr><th>Sample Time</th><th class="n">PID</th>'
+             '<th>User</th><th>State</th><th class="n">Memsize</th><th>Top 3 Contexts</th>'
              '<th class="n">unique_sql_id</th></tr>')
     for ts, kind, f in rows:
         if kind != "data":
-            h.append('<tr><td>%s</td><td colspan="7" class="muted">sample %s%s</td></tr>'
+            h.append('<tr><td>%s</td><td colspan="6" class="muted">sample %s%s</td></tr>'
                      % (esc(ts), kind, " (query failed)" if kind == "error" else ""))
             continue
         f = (f + [""] * 7)[:7]
-        sessid, tot, pid, uname, state, usi, ctxs = f
+        _sessid, tot, pid, uname, state, usi, ctxs = f
         usi_cell = '<span class="muted">-</span>' if usi in ("", "0") else esc(usi)
         try:
             tot_cell = fmt_bytes(int(tot))
         except ValueError:
             tot_cell = esc(tot or "-")
-        h.append('<tr><td>%s</td><td>%s</td><td class="n">%s</td><td>%s</td><td>%s</td>'
+        h.append('<tr><td>%s</td><td class="n">%s</td><td>%s</td><td>%s</td>'
                  '<td class="n">%s</td><td>%s</td><td class="n">%s</td></tr>'
-                 % (esc(ts), esc(sessid or "-"), esc(pid or "-"), esc(uname or "-"),
-                    esc(state or "-"), tot_cell, esc(ctxs or "-"), usi_cell))
+                 % (esc(ts), esc(pid or "-"), esc(uname or "-"),
+                    esc(state or "-"), tot_cell, esc(_ctxs_pretty(ctxs)), usi_cell))
     h.append('</table>')
     return "".join(h)
 
@@ -28530,8 +28547,8 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                                 ("Top 10 Tables by Write Time", "writetim", 3)):
             sub(_ttl)
             _top = sorted(_fs_rows, key=lambda r: r[_dim], reverse=True)[:10]
-            parts.append('<table class="t"><tr><th>Object</th><th>object_type</th>'
-                         '<th>Database</th><th>Tablespace</th><th class="n">phyrds</th>'
+            parts.append('<table class="t"><tr><th>dbname</th><th>schema</th><th>object</th>'
+                         '<th>object_type</th><th>Tablespace</th><th class="n">phyrds</th>'
                          '<th class="n">phywrts</th><th class="n">readtim (ms)</th>'
                          '<th class="n">writetim (ms)</th><th class="n">ms/rd</th>'
                          '<th class="n">ms/wr</th><th class="n">table%</th><th class="n">index%</th>'
@@ -28543,12 +28560,13 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                     b = r["comp"].get(comp, {}).get(_dim, 0.0)
                     return ("%.1f%%" % (b / r[_dim] * 100)) if r[_dim] > 0 else "-"
                 _pct = ("%.1f%%" % (r[_dim] / _fs_tot[_di] * 100)) if _fs_tot[_di] > 0 else "-"
-                parts.append('<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td>'
+                parts.append('<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td>'
                              '<td class="n">%s</td><td class="n">%s</td><td class="n">%s</td>'
                              '<td class="n">%s</td><td class="n">%s</td><td class="n">%s</td>'
                              '<td class="n">%s</td><td class="n">%s</td><td class="n">%s</td>'
                              '<td class="n">%s</td></tr>'
-                             % (esc(r["obj"]), esc(r["otype"]), esc(r["db"]), esc(r["spc"]),
+                             % (esc(r["db"]), esc(r["schema"]), esc(r["name"]),
+                                esc(r["otype"]), esc(r["spc"]),
                                 fmt_int(r["phyrds"]), fmt_int(r["phywrts"]),
                                 fmt_int(r["readtim"]), fmt_int(r["writetim"]),
                                 _mrd, _mwr, _shr(r, "table"), _shr(r, "index"),
@@ -29356,7 +29374,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         note("File I/O tables skipped: one period's snaps predate vb_tool v2.4.5.")
     else:
         def _okey(r):
-            return (r["db"], r["obj"])
+            return (r["db"], r["schema"], r["name"])
         _fs1_by = {_okey(r): r for r in _fs1}
         for _ttl, _dim, _di in (("Top 10 Tables by Physical Reads", "phyrds", 0),
                                 ("Top 10 Tables by Physical Writes", "phywrts", 1),
@@ -29365,23 +29383,25 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             sub(_ttl)
             _merged = []
             for r2 in _fs2:
-                r1 = _fs1_by.get(_okey(r2), {"obj": r2["obj"], "otype": r2["otype"],
-                                             "db": r2["db"], "spc": r2["spc"], _dim: 0.0})
+                r1 = _fs1_by.get(_okey(r2), {"db": r2["db"], "schema": r2["schema"],
+                                             "name": r2["name"], "otype": r2["otype"],
+                                             "spc": r2["spc"], _dim: 0.0})
                 _merged.append((r2[_dim] - r1[_dim], r1, r2))
             _merged.sort(key=lambda t: t[0], reverse=True)
             if not _merged:
                 note("no per-file I/O data in this period")
                 continue
-            parts.append('<table class="t"><tr><th>Object</th><th>object_type</th>'
-                         '<th>Database</th><th>Tablespace</th><th class="n">P1 %s</th>'
+            parts.append('<table class="t"><tr><th>dbname</th><th>schema</th><th>object</th>'
+                         '<th>object_type</th><th>Tablespace</th><th class="n">P1 %s</th>'
                          '<th class="n">P2 %s</th><th class="n">Δ</th><th class="n">%%P2</th></tr>'
                          % (_dim, _dim))
             for _dd, r1, r2 in _merged[:10]:
                 _pct = ("%.1f%%" % (r2[_dim] / _fs2_tot[_di] * 100)) if _fs2_tot[_di] > 0 else "-"
-                parts.append('<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td>'
+                parts.append('<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td>'
                              '<td class="n">%s</td><td class="n">%s</td><td class="n">%s</td>'
                              '<td class="n">%s</td></tr>'
-                             % (esc(r2["obj"]), esc(r2["otype"]), esc(r2["db"]), esc(r2["spc"]),
+                             % (esc(r2["db"]), esc(r2["schema"]), esc(r2["name"]),
+                                esc(r2["otype"]), esc(r2["spc"]),
                                 fmt_int(r1[_dim]), fmt_int(r2[_dim]), fmt_int(_dd), _pct))
             parts.append('</table>')
     obj_diff("Top Objects by Dead Tuples (window Δ)",
