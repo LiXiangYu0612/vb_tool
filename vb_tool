@@ -1,13 +1,13 @@
 #!/bin/bash
 #--------------------------------------------------------------------------------
 #-- File name:   vb_tool
-#-- Version  ：  v2.2.0
+#-- Version  ：  v2.4.5
 #-- Commit at：  2026-09-08 14:05:00
 #-- Purpose:     Vastbase Script Tool
 #-- Author:      MVS & Second-line Team 
 #--------------------------------------------------------------------------------
 set -o pipefail
-export VB_TOOL_VERSION="v2.4.7"
+export VB_TOOL_VERSION="v2.4.5"
 show_help() {
     echo "Vastbase Script Tool (vb_tool)"
     echo ""
@@ -23950,11 +23950,19 @@ Storage (per snapshot; <root> = $VB_TOOL_HOME/awrs/<port>, per instance):
                all walsender+walreceiver+standby startup/parallel redo workers;
                frontend: one longest-running session per LWLock wait event;
                pipe-separated rows)
+  sessmem logs:<root>/sessmem_<YYYYMMDD>.log  5-min max-session-memory samples
+              (top session by sum(totalsize) + its top-3 contexts + pid/user/
+              state/unique_sql_id; same 5-min gate as lt_/stack_)
   iostat:     <root>/snap_<id>/db/file_iostat.csv  per-file rows (filenum/
-              dbid/spcid + phyrds/phywrts/phyblkrd/phyblkwrt) -- the renderer
-              diffs per file so temp/log file churn cannot skew the sums;
-              file_redo_iostat.csv = single global row. For the awr summary
-              iops/mbps/wal columns (this vb_tool version+)
+              dbid/spcid + phyrds/phywrts/phyblkrd/phyblkwrt/readtim/writetim
+              + owner-table resolution: datname/spcname/schema/relname/relkind/
+              parttype/component) -- the renderer diffs per file (temp/log file
+              churn immune), aggregates per TABLE (partitions/subpartitions/
+              indexes/toasts roll up to the parent) and ranks Top 10 Tables by
+              reads/writes/readtim/writetim with table%/index%/toast% splits;
+              file_redo_iostat.csv = global WAL row (gs_redo_stat: phywrts/
+              phyblkwrt/writetim) for the summary iops/mbps/wal + Load Profile
+              WAL rows (this vb_tool version+)
 
 Env: VB_TOOL_HOME  base dir (default ~/.vb_tool); snaps under $VB_TOOL_HOME/awrs/<port>/snap_<id>/
 Port:   -P <port> anywhere on the command line selects the instance (default: current $PGPORT)
@@ -23982,7 +23990,8 @@ _awr_root() {
             mkdir -p "$root"
             mv "$base"/snap_* "$base"/sequence "$base"/retention "$base"/interval \
                "$base"/repl_*.log "$base"/slot_*.log "$base"/os_*.log "$base"/os_*.log.gz \
-               "$base"/walrcv_*.log "$base"/lt_*.log "$base"/stack_*.log "$root"/ 2>/dev/null
+               "$base"/walrcv_*.log "$base"/lt_*.log "$base"/stack_*.log \
+               "$base"/sessmem_*.log "$base"/sessmem_*.log.gz "$root"/ 2>/dev/null
             echo "awr: migrated existing snapshots/config into per-port layout $root" >&2
         ) 9>"$base/.migrate.lock"
     fi
@@ -24175,8 +24184,7 @@ _awr_collect() {
 \copy (SELECT name,setting,unit,context,short_desc FROM pg_settings ORDER BY name) TO '$dbd/pg_settings.csv' WITH CSV HEADER
 \copy (SELECT application_name, client_addr, state, sync_state, sender_sent_location, receiver_write_location, receiver_flush_location, receiver_replay_location FROM pg_stat_replication ORDER BY application_name) TO '$dbd/replication.csv' WITH CSV HEADER
 \copy (SELECT slot_name, plugin, slot_type, database, active, xmin, catalog_xmin, restart_lsn, dummy_standby, confirmed_flush FROM pg_replication_slots ORDER BY slot_name) TO '$dbd/replication_slots.csv' WITH CSV HEADER
-\copy (SELECT filenum, dbid, spcid, phyrds, phywrts, phyblkrd, phyblkwrt FROM dbe_perf.file_iostat) TO '$dbd/file_iostat.csv' WITH CSV HEADER
-\copy (SELECT sum(phywrts) phywrts, sum(phyblkwrt) phyblkwrt FROM dbe_perf.file_redo_iostat) TO '$dbd/file_redo_iostat.csv' WITH CSV HEADER
+\copy (SELECT sum(phywrts) phywrts, sum(phyblkwrt) phyblkwrt, sum(writetim) writetim FROM dbe_perf.file_redo_iostat) TO '$dbd/file_redo_iostat.csv' WITH CSV HEADER
 PSQL
     # ---- ASH flush sources. primary: gs_asp('g') + local_active_session('l')
     # dual source (the live stream hands off between them, observed on 204).
@@ -24220,7 +24228,7 @@ PSQL2
 PSQL2
     fi
     local t
-    for t in statement wait_events instance_time database pagewriter memory_node_detail shared_memory session_memory session_by_sess pg_settings file_iostat file_redo_iostat; do
+    for t in statement wait_events instance_time database pagewriter memory_node_detail shared_memory session_memory session_by_sess pg_settings file_redo_iostat; do
         [ -s "$dbd/$t.csv" ] || echo "  [WARN] db/$t.csv missing/empty (view unavailable or DB error)" >&2
     done
     # ---- core-data guard (user 2026-09-09): the connect probe can pass and the
@@ -24410,14 +24418,24 @@ PSQL4
       for _odb in $_odbs; do
           PGCONNECT_TIMEOUT=$_ct PGOPTIONS="$_st" psql -d "$_odb" -tAF',' -c "select '$_odb',schemaname,relname,coalesce(seq_scan,0),coalesce(seq_tup_read,0),coalesce(idx_scan,0),coalesce(idx_tup_fetch,0),coalesce(n_tup_ins,0),coalesce(n_tup_upd,0),coalesce(n_tup_del,0),coalesce(n_tup_hot_upd,0),coalesce(n_live_tup,0),coalesce(n_dead_tup,0) from pg_stat_user_tables" 2>/dev/null
       done; } > "$dbd/object_tables.csv"
-    { echo "dbname,schema,object,index,idx_scan,idx_tup_read,idx_tup_fetch"
-      for _odb in $_odbs; do
-          PGCONNECT_TIMEOUT=$_ct PGOPTIONS="$_st" psql -d "$_odb" -tAF',' -c "select '$_odb',schemaname,relname,indexrelname,coalesce(idx_scan,0),coalesce(idx_tup_read,0),coalesce(idx_tup_fetch,0) from pg_stat_user_indexes" 2>/dev/null
-      done; } > "$dbd/object_indexes.csv"
     { echo "dbname,schema,object,table_age,relpages,reltuples,n_dml_tup,n_live_tup,n_dead_tup"
       for _odb in $_odbs; do
           PGCONNECT_TIMEOUT=$_ct PGOPTIONS="$_st" psql -d "$_odb" -tAF',' -c "select '$_odb',n.nspname,c.relname,age(c.relfrozenxid64),c.relpages,c.reltuples,coalesce(pg_stat_get_tuples_changed(c.oid),0),coalesce(pg_stat_get_live_tuples(c.oid),0),coalesce(pg_stat_get_dead_tuples(c.oid),0) from pg_class c left join pg_namespace n on n.oid=c.relnamespace where c.relkind in ('r','t','m')" 2>/dev/null
       done; } > "$dbd/object_dead.csv"
+    # ---- per-file I/O with owner-table resolution (v2.4.5; replaces the old
+    # 7-col postgres-only \copy). Each file lands in EXACTLY ONE chain (no
+    # double counting); partitions/subpartitions/indexes/toasts resolve to the
+    # parent TABLE row; global/partitioned indexes (relkind 'I') via pg_index.
+    # relfilenode joins carry NO reltablespace condition (0 = db-default). ----
+    { echo "filenum,dbid,spcid,phyrds,phywrts,phyblkrd,phyblkwrt,readtim,writetim,datname,spcname,schema,relname,relkind,parttype,component"
+      for _odb in $_odbs; do
+          PGCONNECT_TIMEOUT=$_ct PGOPTIONS="$_st" psql -d "$_odb" -tAF',' -c "with files as (select * from gs_file_stat where dbid=(select oid from pg_database where datname=current_database())), res as (select f.filenum,'table' as component,c.oid as owner from files f join pg_class c on c.relfilenode=f.filenum and c.relkind in ('r','m') union all select f.filenum,'index',gi.indrelid from files f join pg_class i on i.relfilenode=f.filenum and i.relkind in ('i','I') join pg_index gi on gi.indexrelid=i.oid union all select f.filenum,'toast',c.oid from files f join pg_class t on t.relfilenode=f.filenum and t.relkind='t' join pg_class c on c.reltoastrelid=t.oid union all select f.filenum,'table',p.parentid from files f join pg_partition p on p.relfilenode=f.filenum and p.parttype='p' union all select f.filenum,'table',p1.parentid from files f join pg_partition s on s.relfilenode=f.filenum and s.parttype='s' join pg_partition p1 on p1.oid=s.parentid union all select f.filenum,'toast',coalesce(p1.parentid,pp.parentid) from files f join pg_partition tt on tt.relfilenode=f.filenum and tt.parttype='t' join pg_partition pp on pp.oid=tt.parentid left join pg_partition p1 on p1.oid=pp.parentid union all select f.filenum,'index',gi.indrelid from files f join pg_partition xx on xx.relfilenode=f.filenum and xx.parttype='x' join pg_index gi on gi.indexrelid=xx.parentid) select f.filenum, f.dbid, f.spcid, coalesce(f.phyrds,0), coalesce(f.phywrts,0), coalesce(f.phyblkrd,0), coalesce(f.phyblkwrt,0), coalesce(f.readtim,0), coalesce(f.writetim,0), coalesce(d.datname,''), coalesce(spo.spcname,''), coalesce(n.nspname,''), coalesce(oc.relname,''), coalesce(oc.relkind::text,''), coalesce(oc.parttype::text,''), coalesce(r.component,'') from files f left join res r on r.filenum=f.filenum left join pg_class oc on oc.oid=r.owner left join pg_namespace n on n.oid=oc.relnamespace left join pg_database d on d.oid=f.dbid left join pg_tablespace spo on spo.oid=case when oc.reltablespace<>0 then oc.reltablespace else d.dattablespace end" 2>/dev/null
+      done
+      PGCONNECT_TIMEOUT=$_ct PGOPTIONS="$_st" psql -d postgres -tAF',' -c "select f.filenum, f.dbid, f.spcid, coalesce(f.phyrds,0), coalesce(f.phywrts,0), coalesce(f.phyblkrd,0), coalesce(f.phyblkwrt,0), coalesce(f.readtim,0), coalesce(f.writetim,0), coalesce(d.datname,''), coalesce(sp.spcname,''), '', '', '', '', '' from gs_file_stat f left join pg_database d on d.oid=f.dbid left join pg_tablespace sp on sp.oid=f.spcid where not exists (select 1 from pg_database dd where dd.oid=f.dbid and dd.datallowconn and not dd.datistemplate)" 2>/dev/null
+    } > "$dbd/file_iostat.csv"
+    if [ ! -s "$dbd/file_iostat.csv" ]; then
+        echo "  [WARN] db/file_iostat.csv missing/empty (gs_file_stat unavailable or DB error)" >&2
+    fi
     # compress all db csv in place; renderer reads .csv.gz with plain-text fallback
     gzip -f "$dbd"/*.csv 2>/dev/null
     return 0
@@ -24690,7 +24708,7 @@ def load_window(d):
             w["os"][(phase, f)] = _read_os_text(p) if os.path.isfile(p) else ""
         for t in ("statement", "wait_events", "instance_time", "database", "pagewriter",
                   "memory_node_detail", "shared_memory", "session_memory", "session_by_sess",
-                  "object_tables", "object_indexes", "object_dead"):
+                  "object_tables", "object_dead"):
             w["db"][(phase, t)] = read_csv_rows(os.path.join(d, "db", phase, t + ".csv"))
     return w
 
@@ -24722,7 +24740,7 @@ def load_snap(d, tables=None):
     _DB_TABLES = ("statement", "wait_events", "instance_time", "database", "pagewriter",
                  "memory_node_detail", "shared_memory", "session_memory", "session_by_sess",
                  "pg_settings",
-                 "object_tables", "object_indexes", "object_dead", "walreceiver",
+                 "object_tables", "object_dead", "walreceiver",
                  "replication", "replication_slots",
                  "file_iostat", "file_redo_iostat")
     if tables is None:
@@ -24825,7 +24843,7 @@ def build_window_from_snaps(begin_dir, end_dir, sqltext_root=None, load_sqltext=
     for t in ("statement", "wait_events", "instance_time", "database", "pagewriter",
               "memory_node_detail", "shared_memory", "session_memory", "session_by_sess",
               "pg_settings",
-              "object_tables", "object_indexes", "object_dead", "walreceiver",
+              "object_tables", "object_dead", "walreceiver",
               "replication", "replication_slots",
               "file_iostat", "file_redo_iostat"):
         win["db"][("begin", t)] = b["db"].get(t, [])
@@ -25193,6 +25211,118 @@ def walreceiver_subtable_html(wr):
                  'Total = sender_sent&minus;replay.</div>')
     return _fold("Per-minute detail", "".join(parts))
 
+def _fs_otype(r):
+    """object_type cell (user-named column): partitioned tables get their own
+    label via VastBase's Oracle-compat pg_class.parttype ('p' partitioned /
+    's' subpartitioned / 'n' ordinary)."""
+    if not r.get("relkind"):
+        return "-"
+    if r["relkind"] == "m":
+        return "matview"
+    if r.get("parttype") in ("p", "s"):
+        return "partitioned table"
+    return "table"
+
+def filestat_rows(win):
+    """TABLE-LEVEL per-file keyed I/O deltas from file_iostat.csv (v2.4.5
+    16-col capture; owner = the TABLE -- a partitioned table's partitions,
+    subpartitions, partitioned/global indexes and toasts all roll up to the
+    parent table row; per-partition rows were rejected: global indexes would
+    double-count). Per-FILE keyed delta first -- (filenum,dbid,spcid), vanished
+    keys excluded, new keys counted in full, negative deltas clamped to 0 --
+    then grouped by owner with three component buckets (table/index/toast).
+    Owner/name fields: END side preferred, BEGIN side fallback. Returns
+    (rows, totals, legacy): rows = dicts {obj, otype, db, spc, relkind,
+    parttype, comp:{component:{4 dims}}, phyrds, phywrts, readtim, writetim}
+    where the 4 top-level dims = the row's component sums; unresolved files
+    aggregate into ONE '(deleted / unresolved files)' row; totals = 4-col sums
+    over all rows; legacy = True on pre-v2.4.5 snaps (caller hides tables)."""
+    b_rows = win["db"].get(("begin", "file_iostat"), [])
+    e_rows = win["db"].get(("end", "file_iostat"), [])
+    def _newfmt(rows):
+        return bool(rows) and "readtim" in rows[0] and "relname" in rows[0] and "component" in rows[0]
+    if not _newfmt(b_rows) and not _newfmt(e_rows):
+        return [], [0.0] * 4, True
+    def _idx(rows):
+        out = {}
+        for r in rows:
+            k = (str(r.get("filenum", "")).strip(), str(r.get("dbid", "")).strip(),
+                 str(r.get("spcid", "")).strip())
+            if k[0]:
+                out[k] = r
+        return out
+    b, e = _idx(b_rows), _idx(e_rows)
+    DIMS = ("phyrds", "phywrts", "readtim", "writetim")
+    own = {}
+    unresolved = {c: 0.0 for c in DIMS}
+    for k, er in e.items():
+        br = b.get(k, {})
+        def _d(c):
+            v = to_num(er.get(c, 0)) - to_num(br.get(c, 0))
+            return v if v > 0 else 0.0
+        relname = (er.get("relname") or br.get("relname") or "").strip()
+        if not relname:
+            for c in DIMS:
+                unresolved[c] += _d(c)
+            continue
+        key = ((er.get("datname") or br.get("datname") or "").strip(),
+               (er.get("schema") or br.get("schema") or "").strip(),
+               relname)
+        o = own.setdefault(key, {
+            "db": key[0] or "-", "spc": (er.get("spcname") or br.get("spcname") or "").strip() or "-",
+            "relname": relname,
+            "relkind": (er.get("relkind") or br.get("relkind") or "").strip(),
+            "parttype": (er.get("parttype") or br.get("parttype") or "").strip(),
+            "comp": {}})
+        comp = (er.get("component") or br.get("component") or "").strip() or "table"
+        bucket = o["comp"].setdefault(comp, {c: 0.0 for c in DIMS})
+        for c in DIMS:
+            bucket[c] += _d(c)
+    rows = []
+    for key, o in own.items():
+        r = {"obj": "%s.%s" % (key[1] or "?", key[2]), "db": o["db"], "spc": o["spc"],
+             "relkind": o["relkind"], "parttype": o["parttype"], "comp": o["comp"]}
+        r["otype"] = _fs_otype(r)
+        for c in DIMS:
+            r[c] = sum(x.get(c, 0.0) for x in o["comp"].values())
+        rows.append(r)
+    if any(unresolved[c] for c in DIMS):
+        r = {"obj": "(deleted / unresolved files)", "db": "-", "spc": "-",
+             "relkind": "", "parttype": "", "comp": {}, "otype": "-"}
+        for c in DIMS:
+            r[c] = unresolved[c]
+        rows.append(r)
+    totals = [sum(r[c] for r in rows) for c in DIMS]
+    return rows, totals, False
+
+def loadprofile_wal_pw_rows(win, duration):
+    """(label, begin, end, delta, per_sec, ok) tuples for the WAL-write and
+    pagewriter-flush Load Profile rows (v2.4.5). WAL = file_redo_iostat
+    (= gs_redo_stat = pg_stat_get_redo_stat, XLogWrite cumulative under
+    WALWriteLock, primary-valid); pagewriter = pagewriter.csv
+    pgwr_actual_flush_total_num (cumulative pages flushed by the pagewriter --
+    an actual page count, unlike ckpt_redo_point which is an LSN POSITION).
+    ok=False only on the writetim row when EITHER side lacks writetim
+    (legacy snaps have no writetim column; a mixed begin/end window must not
+    inflate the delta to the full END cumulative) -> caller prints '-' cells.
+    per_sec=0 when duration<=0."""
+    def _sum(phase, table, col):
+        return sum(to_num(r.get(col, 0)) for r in win["db"].get((phase, table), []))
+    tim_ok = (any("writetim" in r for r in win["db"].get(("end", "file_redo_iostat"), []))
+              and any("writetim" in r for r in win["db"].get(("begin", "file_redo_iostat"), [])))
+    rows = []
+    for label, table, col in (("WAL writes (phywrts)", "file_redo_iostat", "phywrts"),
+                              ("WAL blocks written (phyblkwrt)", "file_redo_iostat", "phyblkwrt"),
+                              ("WAL write time (ms)", "file_redo_iostat", "writetim")):
+        b, e = _sum("begin", table, col), _sum("end", table, col)
+        ok = (col != "writetim") or tim_ok
+        rows.append((label, b, e, e - b, ((e - b) / duration) if duration else 0.0, ok))
+    b = _sum("begin", "pagewriter", "pgwr_actual_flush_total_num")
+    e = _sum("end", "pagewriter", "pgwr_actual_flush_total_num")
+    rows.append(("pagewriter pages flushed", b, e, e - b,
+                 ((e - b) / duration) if duration else 0.0, True))
+    return rows
+
 # ---- Long-txn + callstack samplers (awrrpt only; 5-min cadence, written by
 # _awr_lt_stack_sample in bash, piggybacked on the per-minute sampler cron) ----
 # lt_<YYYYMMDD>.log[.gz] row grammar (comma):
@@ -25294,6 +25424,37 @@ def load_stack_samples(repl_dir, begin_ts, end_ts):
             out["be_err"] += 1
         elif p == ["fe", "error"]:
             out["fe_err"] += 1
+    return out
+
+def load_sessmem_samples(repl_dir, begin_ts, end_ts):
+    """Read sessmem_*.log[.gz] rows with ts in [begin_ts, end_ts] (inclusive).
+    One row per 5-min sample (written by _awr_lt_stack_sample's session-memory
+    block, same lock/gate as lt_/stack_):
+      ts|sessid|total_bytes|pid|usename|state|unique_sql_id|ctxs   (data)
+      ts|unknown    query OK but empty output (user: empty -> unknown)
+      ts|error      query failed
+    ctxs = 'name(bytes), name(bytes), name(bytes)' (top 3 contexts by
+    totalsize within that session)."""
+    out = {"rows": [], "n_data": 0, "n_unknown": 0, "n_error": 0, "files": []}
+    for ln in _iter_lt_stack_logs(repl_dir, "sessmem_", begin_ts, end_ts, out["files"]):
+        ln = ln.strip()
+        if not ln:
+            continue
+        ts, rest = (ln.split("|", 1) + [""])[:2]
+        if begin_ts and ts < str(begin_ts):
+            continue
+        if end_ts and ts > str(end_ts):
+            continue
+        if rest == "error":
+            out["rows"].append((ts, "error", [])); out["n_error"] += 1
+        elif rest == "unknown":
+            out["rows"].append((ts, "unknown", [])); out["n_unknown"] += 1
+        else:
+            p = rest.split("|")
+            if len(p) == 7:
+                out["rows"].append((ts, "data", p)); out["n_data"] += 1
+            # anything else: malformed row (e.g. a '|' inside a field) -- dropped,
+            # same discipline as load_lt_samples/load_stack_samples
     return out
 
 def _chain_html(chain, width=200):
@@ -25443,6 +25604,52 @@ def callstack_section_html(st):
     h.append('</table>')
     fe_html = "".join(h)
     return be_html, av_html, fe_html
+
+def sessmem_section_html(sm):
+    """Max Session Memory Sample body (caller emits the sub() title; placed
+    right after Session Memory Summary). Window peak line + one row per 5-min
+    sample; unknown/error samples render as muted gap rows (visible > silent)."""
+    if not sm["files"]:
+        return ('<div class="note">no session memory samples in this period '
+                '(sampler runs while awr is enabled, one sample every 5 min)</div>')
+    rows = sorted(sm["rows"], key=lambda r: r[0])
+    if sm["n_data"] == 0:
+        return ('<div class="note">no usable session memory samples in this period '
+                '(%d error(s), %d unknown)</div>' % (sm["n_error"], sm["n_unknown"]))
+    peak = -1
+    peak_ts = ""
+    for ts, kind, f in rows:
+        if kind != "data":
+            continue
+        try:
+            v = int(f[1])
+            if v > peak:
+                peak, peak_ts = v, ts
+        except (IndexError, ValueError):
+            pass
+    h = ['<div class="note">%d sample(s); peak session total %s at %s.</div>'
+         % (sm["n_data"], fmt_bytes(peak) if peak >= 0 else "-", esc(peak_ts or "-"))]
+    h.append('<table class="t"><tr><th>Sample Time</th><th>sessid</th><th class="n">PID</th>'
+             '<th>User</th><th>State</th><th class="n">Total</th><th>Top 3 Contexts</th>'
+             '<th class="n">unique_sql_id</th></tr>')
+    for ts, kind, f in rows:
+        if kind != "data":
+            h.append('<tr><td>%s</td><td colspan="7" class="muted">sample %s%s</td></tr>'
+                     % (esc(ts), kind, " (query failed)" if kind == "error" else ""))
+            continue
+        f = (f + [""] * 7)[:7]
+        sessid, tot, pid, uname, state, usi, ctxs = f
+        usi_cell = '<span class="muted">-</span>' if usi in ("", "0") else esc(usi)
+        try:
+            tot_cell = fmt_bytes(int(tot))
+        except ValueError:
+            tot_cell = esc(tot or "-")
+        h.append('<tr><td>%s</td><td>%s</td><td class="n">%s</td><td>%s</td><td>%s</td>'
+                 '<td class="n">%s</td><td>%s</td><td class="n">%s</td></tr>'
+                 % (esc(ts), esc(sessid or "-"), esc(pid or "-"), esc(uname or "-"),
+                    esc(state or "-"), tot_cell, esc(ctxs or "-"), usi_cell))
+    h.append('</table>')
+    return "".join(h)
 
 # ---- OS per-minute sampler (awrrpt only; written by _awr_repl_sample in bash) ----
 # os_<YYYYMMDD>.log[.gz] row grammar (the sampler gzips every PAST day's file):
@@ -27954,11 +28161,23 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         parts.append('<tr><td>WAL written (xlog insert lsn)</td><td class="n">%s</td><td class="n">%s</td>'
                      '<td class="n">%s</td><td class="n">%s</td></tr>'
                      % (esc(_wal_bs), esc(_wal_es), fmt_bytes(_wal_d), fmt_bytes(_wal_d / duration)))
-    _pf_bs = _pwlsn_str("begin", "ckpt_redo_point"); _pf_es = _pwlsn_str("end", "ckpt_redo_point")
-    _pf_d = _pwlsn("end", "ckpt_redo_point") - _pwlsn("begin", "ckpt_redo_point")
-    parts.append('<tr><td>pagewriter written (ckpt_redo_point)</td><td class="n">%s</td><td class="n">%s</td>'
-                 '<td class="n">%s</td><td class="n">%s</td></tr>'
-                 % (esc(_pf_bs), esc(_pf_es), fmt_bytes(_pf_d), fmt_bytes(_pf_d / duration)))
+    # ---- WAL writes + pagewriter flushes (v2.4.5; the old 'pagewriter written
+    # (ckpt_redo_point)' line measured an LSN POSITION, not pages -- removed) ----
+    _lpw_neg = False
+    for _lbl, _b, _e, _d, _ps, _ok in loadprofile_wal_pw_rows(win, duration):
+        if _lbl != "pagewriter pages flushed" and "physical standby" in (m.get("db_role") or ""):
+            _lbl = _lbl + " (primary only)"
+        parts.append('<tr><td>%s</td><td class="n">%s</td><td class="n">%s</td>'
+                     '<td class="n">%s</td><td class="n">%s</td></tr>'
+                     % (esc(_lbl),
+                        fmt_int(_b) if _ok else '-',
+                        fmt_int(_e) if _ok else '-',
+                        fmt_int(_d) if _ok else '-',
+                        fmt_num(_ps) if _ok else '-'))
+        if _d < 0:
+            _lpw_neg = True
+    if _lpw_neg:
+        note("WARNING: negative delta in WAL/pagewriter counters — possible counter reset (switchover/promote); these rows may be unreliable.")
     parts.append('</table>')
 
     # ================= Cache Hit Ratio =================
@@ -28083,6 +28302,10 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         parts.append('<tr><td>%s</td><td class="n">%s</td><td class="n">%s</td><td class="n">%s</td></tr>'
                      % (esc(_lbl), _fmt(_b), _fmt(_e), _fmt(_e - _b)))
     parts.append('</table>')
+    if repl_dir is not None:
+        sub("Max Session Memory Sample")
+        parts.append(sessmem_section_html(
+            load_sessmem_samples(repl_dir, m.get("begin_ts", ""), m.get("end_ts", ""))))
 
     # ================= Replication (awrrpt: per-minute sampler logs) =================
     # role-aware: a standby snap shows the walreceiver side (the walsender views
@@ -28290,12 +28513,47 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
          ("n_tup_ins", "d"), ("n_tup_upd", "d"), ("n_tup_del", "d"), ("n_tup_hot_upd", "d"),
          ("n_live_tup", "e"), ("n_dead_tup", "be")],
         lambda v: (v["seq_tup_read"][1] - v["seq_tup_read"][0]) + (v["idx_tup_fetch"][1] - v["idx_tup_fetch"][0]))
-    object_table("Top Indexes by Scans",
-        win["db"].get(("begin", "object_indexes"), []),
-        win["db"].get(("end", "object_indexes"), []),
-        ("dbname", "schema", "object", "index"),
-        [("idx_scan", "d"), ("idx_tup_read", "d"), ("idx_tup_fetch", "d")],
-        lambda v: v["idx_scan"][1] - v["idx_scan"][0])
+    # ---- Top Table I/O (v2.4.5; replaces 'Top Indexes by Scans'. gs_file_stat
+    # keyed delta aggregated per TABLE (partitions/subpartitions/index/toast
+    # roll up to the parent; global indexes made per-partition rows
+    # double-count, so table level it is) ----
+    _fs_rows, _fs_tot, _fs_legacy = filestat_rows(win)
+    if _fs_legacy:
+        note("File I/O tables need snaps captured by vb_tool v2.4.5+ "
+             "(per-file gs_file_stat with readtim/writetim + resolved object names).")
+    elif not _fs_rows:
+        note("no per-file I/O data in this window (file_iostat rows missing or empty)")
+    else:
+        for _ttl, _dim, _di in (("Top 10 Tables by Physical Reads", "phyrds", 0),
+                                ("Top 10 Tables by Physical Writes", "phywrts", 1),
+                                ("Top 10 Tables by Read Time", "readtim", 2),
+                                ("Top 10 Tables by Write Time", "writetim", 3)):
+            sub(_ttl)
+            _top = sorted(_fs_rows, key=lambda r: r[_dim], reverse=True)[:10]
+            parts.append('<table class="t"><tr><th>Object</th><th>object_type</th>'
+                         '<th>Database</th><th>Tablespace</th><th class="n">phyrds</th>'
+                         '<th class="n">phywrts</th><th class="n">readtim (ms)</th>'
+                         '<th class="n">writetim (ms)</th><th class="n">ms/rd</th>'
+                         '<th class="n">ms/wr</th><th class="n">table%</th><th class="n">index%</th>'
+                         '<th class="n">toast%</th><th class="n">% Total</th></tr>')
+            for r in _top:
+                _mrd = "%.1f" % (r["readtim"] / r["phyrds"]) if r["phyrds"] > 0 else "-"
+                _mwr = "%.1f" % (r["writetim"] / r["phywrts"]) if r["phywrts"] > 0 else "-"
+                def _shr(r, comp):
+                    b = r["comp"].get(comp, {}).get(_dim, 0.0)
+                    return ("%.1f%%" % (b / r[_dim] * 100)) if r[_dim] > 0 else "-"
+                _pct = ("%.1f%%" % (r[_dim] / _fs_tot[_di] * 100)) if _fs_tot[_di] > 0 else "-"
+                parts.append('<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td>'
+                             '<td class="n">%s</td><td class="n">%s</td><td class="n">%s</td>'
+                             '<td class="n">%s</td><td class="n">%s</td><td class="n">%s</td>'
+                             '<td class="n">%s</td><td class="n">%s</td><td class="n">%s</td>'
+                             '<td class="n">%s</td></tr>'
+                             % (esc(r["obj"]), esc(r["otype"]), esc(r["db"]), esc(r["spc"]),
+                                fmt_int(r["phyrds"]), fmt_int(r["phywrts"]),
+                                fmt_int(r["readtim"]), fmt_int(r["writetim"]),
+                                _mrd, _mwr, _shr(r, "table"), _shr(r, "index"),
+                                _shr(r, "toast"), _pct))
+            parts.append('</table>')
 
     # ================= Active Session History =================
     # gs_asp/local_active_session = persisted 1-second kernel ASP samples;
@@ -28953,8 +29211,8 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         re_ = win["db"].get(("end", "walreceiver"), [])
         if not rb or not re_:
             return None
-        return (sum(_lsn_to_int(r.get("receiver_replay_location", "")) for r in re_)
-                - sum(_lsn_to_int(r.get("receiver_replay_location", "")) for r in rb))
+        return (sum(_lsn(r.get("receiver_replay_location", "")) for r in re_)
+                - sum(_lsn(r.get("receiver_replay_location", "")) for r in rb))
     _sb1 = "standby" in str(m1.get("db_role", "")); _sb2 = "standby" in str(m2.get("db_role", ""))
     _w1 = _walval(win1, _sb1); _w2 = _walval(win2, _sb2)
     _wl = ("WAL replayed (receiver replay lsn)" if _sb1 and _sb2 else
@@ -28966,11 +29224,18 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                      "-" if (_w1 is None or _w2 is None) else fmt_bytes(_w2 - _w1),
                      "-" if _w1 is None else fmt_bytes(_w1 / dur1),
                      "-" if _w2 is None else fmt_bytes(_w2 / dur2)))
-    _pf1 = _pwlsn_delta(win1, "ckpt_redo_point"); _pf2 = _pwlsn_delta(win2, "ckpt_redo_point")
-    parts.append('<tr><td>pagewriter written</td><td class="n">%s</td><td class="n">%s</td><td class="n">%s</td>'
-                 '<td class="n">%s</td><td class="n">%s</td></tr>' % (
-                     fmt_bytes(_pf1), fmt_bytes(_pf2), fmt_bytes(_pf2 - _pf1),
-                     fmt_bytes(_pf1 / dur1), fmt_bytes(_pf2 / dur2)))
+    # ---- WAL writes + pagewriter flushes (v2.4.5; P1/P2 window deltas, per-second per period) ----
+    _lpw1 = dict((r[0], r) for r in loadprofile_wal_pw_rows(win1, dur1))
+    _lpw2 = dict((r[0], r) for r in loadprofile_wal_pw_rows(win2, dur2))
+    for _lbl, _b1, _e1, _d1, _ps1, _ok1 in _lpw1.values():
+        _lbl, _b2, _e2, _d2, _ps2, _ok2 = _lpw2[_lbl]
+        _ok = _ok1 and _ok2
+        _cell  = fmt_int if _ok else (lambda v: "-")
+        _celln = fmt_num if _ok else (lambda v: "-")
+        parts.append('<tr><td>%s</td><td class="n">%s</td><td class="n">%s</td><td class="n">%s</td>'
+                     '<td class="n">%s</td><td class="n">%s</td></tr>' % (
+                         esc(_lbl), _cell(_d1), _cell(_d2), _cell(_d2 - _d1),
+                         _celln(_ps1), _celln(_ps2)))
     parts.append('</table>')
 
     # ================= Cache Hit Ratio =================
@@ -29082,11 +29347,43 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
              win2["db"].get(("begin", "object_tables"), []), win2["db"].get(("end", "object_tables"), []),
              ("dbname", "schema", "object"),
              ("seq_scan", "seq_tup_read", "idx_scan", "idx_tup_fetch", "n_tup_upd", "n_tup_del"), "seq_tup_read")
-    obj_diff("Top Indexes by Scans",
-             win1["db"].get(("begin", "object_indexes"), []), win1["db"].get(("end", "object_indexes"), []),
-             win2["db"].get(("begin", "object_indexes"), []), win2["db"].get(("end", "object_indexes"), []),
-             ("dbname", "schema", "object", "index"),
-             ("idx_scan", "idx_tup_read", "idx_tup_fetch"), "idx_scan")
+    # ---- Top Table I/O diff (v2.4.5; P1/P2/Δ per table, shares from P2) ----
+    _fs1, _fs1_tot, _fs1_leg = filestat_rows(win1)
+    _fs2, _fs2_tot, _fs2_leg = filestat_rows(win2)
+    if _fs1_leg and _fs2_leg:
+        note("File I/O tables need snaps captured by vb_tool v2.4.5+.")
+    elif _fs1_leg or _fs2_leg:
+        note("File I/O tables skipped: one period's snaps predate vb_tool v2.4.5.")
+    else:
+        def _okey(r):
+            return (r["db"], r["obj"])
+        _fs1_by = {_okey(r): r for r in _fs1}
+        for _ttl, _dim, _di in (("Top 10 Tables by Physical Reads", "phyrds", 0),
+                                ("Top 10 Tables by Physical Writes", "phywrts", 1),
+                                ("Top 10 Tables by Read Time", "readtim", 2),
+                                ("Top 10 Tables by Write Time", "writetim", 3)):
+            sub(_ttl)
+            _merged = []
+            for r2 in _fs2:
+                r1 = _fs1_by.get(_okey(r2), {"obj": r2["obj"], "otype": r2["otype"],
+                                             "db": r2["db"], "spc": r2["spc"], _dim: 0.0})
+                _merged.append((r2[_dim] - r1[_dim], r1, r2))
+            _merged.sort(key=lambda t: t[0], reverse=True)
+            if not _merged:
+                note("no per-file I/O data in this period")
+                continue
+            parts.append('<table class="t"><tr><th>Object</th><th>object_type</th>'
+                         '<th>Database</th><th>Tablespace</th><th class="n">P1 %s</th>'
+                         '<th class="n">P2 %s</th><th class="n">Δ</th><th class="n">%%P2</th></tr>'
+                         % (_dim, _dim))
+            for _dd, r1, r2 in _merged[:10]:
+                _pct = ("%.1f%%" % (r2[_dim] / _fs2_tot[_di] * 100)) if _fs2_tot[_di] > 0 else "-"
+                parts.append('<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td>'
+                             '<td class="n">%s</td><td class="n">%s</td><td class="n">%s</td>'
+                             '<td class="n">%s</td></tr>'
+                             % (esc(r2["obj"]), esc(r2["otype"]), esc(r2["db"]), esc(r2["spc"]),
+                                fmt_int(r1[_dim]), fmt_int(r2[_dim]), fmt_int(_dd), _pct))
+            parts.append('</table>')
     obj_diff("Top Objects by Dead Tuples (window Δ)",
              win1["db"].get(("begin", "object_dead"), []), win1["db"].get(("end", "object_dead"), []),
              win2["db"].get(("begin", "object_dead"), []), win2["db"].get(("end", "object_dead"), []),
@@ -30469,6 +30766,22 @@ _awr_lt_stack_sample() {
         chain="${chain% <- }"
         printf '%s|fe|%s|%s|%s|%s|%s\n' "$ts" "$wev" "$pid" "$usi" "$ecnt" "$chain" >> "$sf"
     done < <(printf '%s\n' "$fe_list")
+    # ---- session memory: ONE max-total session per 5-min sample (own log,
+    # pipe grammar, renderer = load_sessmem_samples). Ranking and context
+    # sizes are ALL totalsize (user decision: totalsize only, no usedsize).
+    # LEFT JOIN activity: the top-memory session may already be gone from
+    # pg_stat_activity (memory rows outlive the activity row). Empty output
+    # writes 'unknown' (user decision), psql failure writes 'error'. ----
+    local mlf="$root/sessmem_$(date +%Y%m%d).log" mout
+    mout=$(PGCONNECT_TIMEOUT=15 PGOPTIONS='-c statement_timeout=15000' \
+          psql -d postgres -tAF'|' -c "with p as (select sessid, sum(totalsize) tot from gs_session_memory_detail group by sessid order by tot desc limit 1), c as (select contextname, sum(totalsize) sz from gs_session_memory_detail where sessid=(select sessid from p) group by contextname order by sz desc limit 3) select p.sessid, p.tot, coalesce(a.pid::text,''), coalesce(a.usename,''), coalesce(a.state,''), coalesce(a.unique_sql_id::text,''), coalesce((select string_agg(contextname||'('||sz||')', ', ') from c), '') from p left join pg_stat_activity a on a.pid::text = split_part(p.sessid, '.', 2)" 2>/dev/null)
+    if [ "$?" -ne 0 ]; then
+        printf '%s|error\n' "$ts" >> "$mlf"
+    elif [ -z "$mout" ]; then
+        printf '%s|unknown\n' "$ts" >> "$mlf"
+    else
+        printf '%s|%s\n' "$ts" "$mout" >> "$mlf"
+    fi
     return 0
 }
 
@@ -30729,9 +31042,9 @@ _awr_repl_sample() {
     # plain so the per-minute append keeps working. The lt_/stack_ logs join
     # the pass (same reader discipline). ----
     today=$(date +%Y%m%d)
-    for og in "$root"/os_*.log "$root"/lt_*.log "$root"/stack_*.log; do
+    for og in "$root"/os_*.log "$root"/lt_*.log "$root"/stack_*.log "$root"/sessmem_*.log; do
         [ -f "$og" ] || continue
-        od8=$(basename "$og" .log); od8="${od8#os_}"; od8="${od8#lt_}"; od8="${od8#stack_}"
+        od8=$(basename "$og" .log); od8="${od8#os_}"; od8="${od8#lt_}"; od8="${od8#stack_}"; od8="${od8#sessmem_}"
         case "$od8" in
             [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
             *) continue;;
@@ -30943,7 +31256,7 @@ PYBL
         rm -rf "$broot"; echo "Error: cannot read snap timestamps for the log day set" >&2; return 1
     fi
     for day in $days; do
-        for f in os_ repl_ slot_ walrcv_ lt_ stack_; do
+        for f in os_ repl_ slot_ walrcv_ lt_ stack_ sessmem_; do
             [ -f "$root/${f}${day}.log" ] && cp -p "$root/${f}${day}.log" "$broot/" 2>/dev/null
             [ -f "$root/${f}${day}.log.gz" ] && cp -p "$root/${f}${day}.log.gz" "$broot/" 2>/dev/null
         done
@@ -31896,10 +32209,10 @@ PY
     fi
     # repl_/slot_/os_/lt_/stack_<YYYYMMDD>.log[.gz]: delete only when the WHOLE day is before until
     local rcount=0 rf rd d_ep
-    for rf in "$root"/repl_*.log "$root"/slot_*.log "$root"/walrcv_*.log "$root"/os_*.log "$root"/os_*.log.gz "$root"/lt_*.log "$root"/lt_*.log.gz "$root"/stack_*.log "$root"/stack_*.log.gz; do
+    for rf in "$root"/repl_*.log "$root"/slot_*.log "$root"/walrcv_*.log "$root"/os_*.log "$root"/os_*.log.gz "$root"/lt_*.log "$root"/lt_*.log.gz "$root"/stack_*.log "$root"/stack_*.log.gz "$root"/sessmem_*.log "$root"/sessmem_*.log.gz; do
         [ -f "$rf" ] || continue
         rd=$(basename "$rf"); rd="${rd%.gz}"; rd="${rd%.log}"
-        rd="${rd#repl_}"; rd="${rd#slot_}"; rd="${rd#walrcv_}"; rd="${rd#os_}"; rd="${rd#lt_}"; rd="${rd#stack_}"
+        rd="${rd#repl_}"; rd="${rd#slot_}"; rd="${rd#walrcv_}"; rd="${rd#os_}"; rd="${rd#lt_}"; rd="${rd#stack_}"; rd="${rd#sessmem_}"
         case "$rd" in
             [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9])
                 d_ep=$(date -d "${rd:0:4}-${rd:4:2}-${rd:6:2}" +%s 2>/dev/null)
