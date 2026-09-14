@@ -25662,7 +25662,8 @@ def sessmem_section_html(sm):
         f = (f + [""] * 8)[:8]
         _sessid, tot, pid, uname, state, usi, ctxs, cinfo = f
         if cinfo and cinfo.strip("|"):
-            ci_cell = esc("|".join(s if s else "-" for s in cinfo.split("|")))  # empty seg -> '-'
+            # empty seg -> '-'; client_port -1 = unix-socket "no port" sentinel -> '-'
+            ci_cell = esc("|".join(s if s not in ("", "-1") else "-" for s in cinfo.split("|")))
         else:
             ci_cell = "-"
         usi_cell = '<span class="muted">-</span>' if usi in ("", "0") else esc(usi)
