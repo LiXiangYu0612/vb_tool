@@ -1,13 +1,13 @@
 #!/bin/bash
 #--------------------------------------------------------------------------------
 #-- File name:   vb_tool
-#-- Version  ：  v2.4.7
+#-- Version  ：  v2.4.8
 #-- Commit at：  2026-09-08 14:05:00
 #-- Purpose:     Vastbase Script Tool
 #-- Author:      MVS & Second-line Team 
 #--------------------------------------------------------------------------------
 set -o pipefail
-export VB_TOOL_VERSION="v2.4.7"
+export VB_TOOL_VERSION="v2.4.8"
 show_help() {
     echo "Vastbase Script Tool (vb_tool)"
     echo ""
@@ -25661,7 +25661,10 @@ def sessmem_section_html(sm):
             continue
         f = (f + [""] * 8)[:8]
         _sessid, tot, pid, uname, state, usi, ctxs, cinfo = f
-        ci_cell = esc(cinfo) if cinfo and cinfo.strip("|") else "-"
+        if cinfo and cinfo.strip("|"):
+            ci_cell = esc("|".join(s if s else "-" for s in cinfo.split("|")))  # empty seg -> '-'
+        else:
+            ci_cell = "-"
         usi_cell = '<span class="muted">-</span>' if usi in ("", "0") else esc(usi)
         try:
             tot_cell = fmt_bytes(int(tot))
