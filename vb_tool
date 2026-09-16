@@ -1,13 +1,13 @@
 #!/bin/bash
 #--------------------------------------------------------------------------------
 #-- File name:   vb_tool
-#-- Version  ：  v2.4.8
-#-- Commit at： 2026-09-16 15:10:00
+#-- Version  ：  v2.4.9
+#-- Commit at： 2026-09-16 22:40:00
 #-- Purpose:     Vastbase Script Tool
 #-- Author:      MVS & Second-line Team 
 #--------------------------------------------------------------------------------
 set -o pipefail
-export VB_TOOL_VERSION="v2.4.8"
+export VB_TOOL_VERSION="v2.4.9"
 show_help() {
     echo "Vastbase Script Tool (vb_tool)"
     echo ""
@@ -23953,16 +23953,15 @@ Storage (per snapshot; <root> = $VB_TOOL_HOME/awrs/<port>, per instance):
   sessmem logs:<root>/sessmem_<YYYYMMDD>.log  5-min max-session-memory samples
               (top session by sum(totalsize) + its top-3 contexts + pid/user/
               state/unique_sql_id; same 5-min gate as lt_/stack_)
-  iostat:     <root>/snap_<id>/db/file_iostat.csv  per-file rows (filenum/
-              dbid/spcid + phyrds/phywrts/phyblkrd/phyblkwrt/readtim/writetim
-              + owner-table resolution: datname/spcname/schema/relname/relkind/
-              parttype/component) -- the renderer diffs per file (temp/log file
-              churn immune), aggregates per TABLE (partitions/subpartitions/
-              indexes/toasts roll up to the parent) and ranks Top 10 Tables by
-              reads/writes/readtim/writetim with table%/index%/toast% splits;
-              file_redo_iostat.csv = global WAL row (gs_redo_stat: phywrts/
-              phyblkwrt/writetim) for the summary iops/mbps/wal + Load Profile
-              WAL rows (this vb_tool version+)
+  iostat:     <root>/snap_<id>/db/rel_iostat.csv  ONE cumulative row from
+              pg_catalog.get_local_rel_iostat() (phyrds/phywrts/phyblkrd/
+              phyblkwrt) -- the kernel's fileIOStat DIRECT counters, uncapped
+              (the old per-file gs_file_stat capture read a shared array of
+              only the 2000 most-recently-active files, LRU-evicted with the
+              counters zeroed -- whole databases vanished from it on big
+              systems; capture + the Top-10 tables built on it removed
+              2026-09-16)
+
 
 Env: VB_TOOL_HOME  base dir (default ~/.vb_tool); snaps under $VB_TOOL_HOME/awrs/<port>/snap_<id>/
 Port:   -P <port> anywhere on the command line selects the instance (default: current $PGPORT)
@@ -24440,19 +24439,18 @@ PSQL4
       for _odb in $_odbs; do
           PGCONNECT_TIMEOUT=$_ct PGOPTIONS="$_st" psql -d "$_odb" -tAF',' -c "select '$_odb',n.nspname,c.relname,age(c.relfrozenxid64),c.relpages,c.reltuples,coalesce(pg_stat_get_tuples_changed(c.oid),0),coalesce(pg_stat_get_live_tuples(c.oid),0),coalesce(pg_stat_get_dead_tuples(c.oid),0) from pg_class c left join pg_namespace n on n.oid=c.relnamespace where c.relkind in ('r','t','m')" 2>/dev/null
       done; } > "$dbd/object_dead.csv"
-    # ---- per-file I/O with owner-table resolution (v2.4.5; replaces the old
-    # 7-col postgres-only \copy). Each file lands in EXACTLY ONE chain (no
-    # double counting); partitions/subpartitions/indexes/toasts resolve to the
-    # parent TABLE row; global/partitioned indexes (relkind 'I') via pg_index.
-    # relfilenode joins carry NO reltablespace condition (0 = db-default). ----
-    { echo "filenum,dbid,spcid,phyrds,phywrts,phyblkrd,phyblkwrt,readtim,writetim,datname,spcname,schema,relname,relkind,parttype,component"
-      for _odb in $_odbs; do
-          PGCONNECT_TIMEOUT=$_ct PGOPTIONS="$_st" psql -d "$_odb" -tAF',' -c "with files as (select * from gs_file_stat where dbid in (select oid from pg_database where datname=current_database())), res as (select f.filenum,'table' as component,c.oid as owner from files f join pg_class c on c.relfilenode=f.filenum and c.relkind in ('r','m') union all select f.filenum,'index',gi.indrelid from files f join pg_class i on i.relfilenode=f.filenum and i.relkind in ('i','I') join pg_index gi on gi.indexrelid=i.oid union all select f.filenum,'toast',c.oid from files f join pg_class t on t.relfilenode=f.filenum and t.relkind='t' join pg_class c on c.reltoastrelid=t.oid union all select f.filenum,'table',p.parentid from files f join pg_partition p on p.relfilenode=f.filenum and p.parttype='p' union all select f.filenum,'table',p1.parentid from files f join pg_partition s on s.relfilenode=f.filenum and s.parttype='s' join pg_partition p1 on p1.oid=s.parentid union all select f.filenum,'toast',coalesce(p1.parentid,pp.parentid) from files f join pg_partition tt on tt.relfilenode=f.filenum and tt.parttype='t' join pg_partition pp on pp.oid=tt.parentid left join pg_partition p1 on p1.oid=pp.parentid union all select f.filenum,'index',gi.indrelid from files f join pg_partition xx on xx.relfilenode=f.filenum and xx.parttype='x' join pg_index gi on gi.indexrelid=xx.parentid) select f.filenum, f.dbid, f.spcid, coalesce(f.phyrds,0), coalesce(f.phywrts,0), coalesce(f.phyblkrd,0), coalesce(f.phyblkwrt,0), coalesce(f.readtim,0), coalesce(f.writetim,0), coalesce(d.datname,''), coalesce(spo.spcname,''), coalesce(n.nspname,''), coalesce(oc.relname,''), coalesce(oc.relkind::text,''), coalesce(oc.parttype::text,''), coalesce(r.component,'') from files f left join res r on r.filenum=f.filenum left join pg_class oc on oc.oid=r.owner left join pg_namespace n on n.oid=oc.relnamespace left join pg_database d on d.oid=f.dbid left join pg_tablespace spo on spo.oid=case when oc.reltablespace<>0 then oc.reltablespace else d.dattablespace end" 2>/dev/null
-      done
-      PGCONNECT_TIMEOUT=$_ct PGOPTIONS="$_st" psql -d postgres -tAF',' -c "select f.filenum, f.dbid, f.spcid, coalesce(f.phyrds,0), coalesce(f.phywrts,0), coalesce(f.phyblkrd,0), coalesce(f.phyblkwrt,0), coalesce(f.readtim,0), coalesce(f.writetim,0), coalesce(d.datname,''), coalesce(sp.spcname,''), '', '', '', '', '' from gs_file_stat f left join pg_database d on d.oid=f.dbid left join pg_tablespace sp on sp.oid=f.spcid where not exists (select 1 from pg_database dd where dd.oid=f.dbid and dd.datallowconn and not dd.datistemplate)" 2>/dev/null
-    } > "$dbd/file_iostat.csv"
-    if [ ! -s "$dbd/file_iostat.csv" ]; then
-        echo "  [WARN] db/file_iostat.csv missing/empty (gs_file_stat unavailable or DB error)" >&2
+    # ---- instance-wide physical I/O totals (2026-09-16; replaces the per-file
+    # gs_file_stat capture AND the Top-10 file-IO report tables). Source =
+    # pg_catalog.get_local_rel_iostat(): the kernel fileIOStat DIRECT counters
+    # -- no capacity limit. gs_file_stat / pg_stat_get_file_stat() backed a
+    # shared array of only the 2000 most-recently-active files, LRU-evicting
+    # older entries with their cumulative counters zeroed: on big systems
+    # whole databases (production hihis) vanished from it. WDR's own IO
+    # dashboard reads the same direct counters. One cumulative row; renderer
+    # derives read/write iops and mbps. ----
+    PGCONNECT_TIMEOUT=$_ct PGOPTIONS="$_st" psql -d postgres -c "\copy (SELECT phyrds, phywrts, phyblkrd, phyblkwrt FROM pg_catalog.get_local_rel_iostat()) TO '$dbd/rel_iostat.csv' WITH CSV HEADER" >/dev/null 2>&1
+    if [ ! -s "$dbd/rel_iostat.csv" ]; then
+        echo "  [WARN] db/rel_iostat.csv missing/empty (get_local_rel_iostat unavailable or DB error)" >&2
     fi
     # compress all db csv in place; renderer reads .csv.gz with plain-text fallback
     gzip -f "$dbd"/*.csv 2>/dev/null
@@ -24773,7 +24771,7 @@ def load_snap(d, tables=None):
                  "pg_settings",
                  "object_tables", "object_dead", "walreceiver",
                  "replication", "replication_slots",
-                 "file_iostat", "file_redo_iostat")
+                 "rel_iostat", "file_redo_iostat")
     if tables is None:
         for t in _DB_TABLES:
             s["db"][t] = read_csv_rows(os.path.join(d, "db", t + ".csv"))
@@ -24876,7 +24874,7 @@ def build_window_from_snaps(begin_dir, end_dir, sqltext_root=None, load_sqltext=
               "pg_settings",
               "object_tables", "object_dead", "walreceiver",
               "replication", "replication_slots",
-              "file_iostat", "file_redo_iostat"):
+              "rel_iostat", "file_redo_iostat"):
         win["db"][("begin", t)] = b["db"].get(t, [])
         win["db"][("end", t)] = e["db"].get(t, [])
     bm, em = b["meta"], e["meta"]
@@ -25254,91 +25252,25 @@ def _fs_otype(r):
         return "partitioned table"
     return "table"
 
-def filestat_rows(win):
-    """TABLE-LEVEL per-file keyed I/O deltas from file_iostat.csv (v2.4.5
-    16-col capture; owner = the TABLE -- a partitioned table's partitions,
-    subpartitions, partitioned/global indexes and toasts all roll up to the
-    parent table row; per-partition rows were rejected: global indexes would
-    double-count). Per-FILE keyed delta first -- (filenum,dbid,spcid), vanished
-    keys excluded, new keys counted in full, negative deltas clamped to 0 --
-    then grouped by owner with three component buckets (table/index/toast).
-    Owner/name fields: END side preferred, BEGIN side fallback. Returns
-    (rows, totals, legacy): rows = dicts {obj, otype, db, spc, relkind,
-    parttype, comp:{component:{4 dims}}, phyrds, phywrts, readtim, writetim}
-    where the 4 top-level dims = the row's component sums; unresolved files
-    aggregate into ONE '(deleted / unresolved files)' row; totals = 4-col sums
-    over all rows; legacy = True on pre-v2.4.5 snaps (caller hides tables)."""
-    b_rows = win["db"].get(("begin", "file_iostat"), [])
-    e_rows = win["db"].get(("end", "file_iostat"), [])
-    def _newfmt(rows):
-        return bool(rows) and "readtim" in rows[0] and "relname" in rows[0] and "component" in rows[0]
-    if not _newfmt(b_rows) and not _newfmt(e_rows):
-        return [], [0.0] * 4, True, False
-    # mixed-format window (begin side predates v2.4.5): keyed COUNT deltas
-    # stay valid, but readtim/writetim have no begin value -- diffing against
-    # 0 would show the END-cumulative time as a "window delta" (badly wrong).
-    # Same rule as the WAL writetim guard in loadprofile_wal_pw_rows.
-    tim_ok = _newfmt(b_rows) and _newfmt(e_rows)
-    def _idx(rows):
-        out = {}
-        for r in rows:
-            k = (str(r.get("filenum", "")).strip(), str(r.get("dbid", "")).strip(),
-                 str(r.get("spcid", "")).strip())
-            if k[0]:
-                out[k] = r
-        return out
-    b, e = _idx(b_rows), _idx(e_rows)
-    DIMS = ("phyrds", "phywrts", "readtim", "writetim")
-    own = {}
-    unresolved = {c: 0.0 for c in DIMS}
-    for k, er in e.items():
-        br = b.get(k, {})
-        def _d(c):
-            v = to_num(er.get(c, 0)) - to_num(br.get(c, 0))
-            return v if v > 0 else 0.0
-        relname = (er.get("relname") or br.get("relname") or "").strip()
-        if not relname:
-            for c in DIMS:
-                unresolved[c] += _d(c)
-            continue
-        key = ((er.get("datname") or br.get("datname") or "").strip(),
-               (er.get("schema") or br.get("schema") or "").strip(),
-               relname)
-        o = own.setdefault(key, {
-            "db": key[0] or "-", "spc": (er.get("spcname") or br.get("spcname") or "").strip() or "-",
-            "relname": relname,
-            "relkind": (er.get("relkind") or br.get("relkind") or "").strip(),
-            "parttype": (er.get("parttype") or br.get("parttype") or "").strip(),
-            "comp": {}})
-        comp = (er.get("component") or br.get("component") or "").strip() or "table"
-        bucket = o["comp"].setdefault(comp, {c: 0.0 for c in DIMS})
-        for c in DIMS:
-            bucket[c] += _d(c)
+def loadprofile_iostat_rows(win, duration):
+    """(label, begin, end, delta, per_sec, mode, ok) rows from rel_iostat.csv --
+    ONE cumulative row captured from pg_catalog.get_local_rel_iostat() (the
+    kernel fileIOStat DIRECT counters, uncapped; replaced the 2000-slot-LRU
+    gs_file_stat per-file capture on 2026-09-16). mode 'count' = IO operations
+    (fmt_int/fmt_num), 'blocks' = 8K pages (fmt_blocks/fmt_blocks_ps composites,
+    Begin/End stay raw page counts). ok False on pre-change snaps (no csv) ->
+    callers print '-' cells."""
+    def _sum(phase, col):
+        return sum(to_num(r.get(col, 0)) for r in win["db"].get((phase, "rel_iostat"), []))
+    ok = bool(win["db"].get(("begin", "rel_iostat"))) and bool(win["db"].get(("end", "rel_iostat")))
     rows = []
-    for key, o in own.items():
-        r = {"db": key[0] or "-", "schema": key[1] or "-", "name": key[2],
-             "spc": o["spc"], "relkind": o["relkind"], "parttype": o["parttype"],
-             "comp": o["comp"]}
-        r["otype"] = _fs_otype(r)
-        for c in DIMS:
-            r[c] = sum(x.get(c, 0.0) for x in o["comp"].values())
-        rows.append(r)
-    if any(unresolved[c] for c in DIMS):
-        r = {"db": "-", "schema": "-", "name": "(deleted / unresolved files)",
-             "spc": "-", "relkind": "", "parttype": "", "comp": {}, "otype": "-",
-             "deleted": True}
-        for c in DIMS:
-            r[c] = unresolved[c]
-        rows.append(r)
-    totals = [sum(r[c] for r in rows) for c in DIMS]
-    if not tim_ok:
-        # keep the invariant: with no begin-side time counters the time dims
-        # are meaningless (END-cumulative) -- zero them so no downstream
-        # consumer can ever render an inflated value
-        for r in rows:
-            r["readtim"] = 0.0; r["writetim"] = 0.0
-        totals[2] = totals[3] = 0.0
-    return rows, totals, False, tim_ok
+    for label, col, mode in (("read iops (phyrds)", "phyrds", "count"),
+                             ("write iops (phywrts)", "phywrts", "count"),
+                             ("read data (phyblkrd)", "phyblkrd", "blocks"),
+                             ("write data (phyblkwrt)", "phyblkwrt", "blocks")):
+        b, e = _sum("begin", col), _sum("end", col)
+        rows.append((label, b, e, e - b, ((e - b) / duration) if duration else 0.0, mode, ok))
+    return rows
 
 def loadprofile_wal_pw_rows(win, duration):
     """(label, begin, end, delta, per_sec, ok, as_bytes, as_pages) tuples for the WAL-write and
@@ -28367,6 +28299,13 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             _lpw_neg = True
     if _lpw_neg:
         note("WARNING: negative delta in WAL/pagewriter counters — possible counter reset (switchover/promote); these rows may be unreliable.")
+    for _lbl, _b, _e, _d, _ps, _md, _ok in loadprofile_iostat_rows(win, duration):
+        _cf = (fmt_blocks if _md == "blocks" else fmt_int) if _ok else (lambda v: "-")
+        _pf = (fmt_blocks_ps if _md == "blocks" else fmt_num) if _ok else (lambda v: "-")
+        parts.append('<tr><td>%s</td><td class="n">%s</td><td class="n">%s</td>'
+                     '<td class="n">%s</td><td class="n">%s</td></tr>'
+                     % (esc(_lbl), fmt_int(_b) if _ok else "-", fmt_int(_e) if _ok else "-",
+                        _cf(_d), _pf(_ps)))
     parts.append('</table>')
 
     # ================= Cache Hit Ratio =================
@@ -28702,63 +28641,6 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
          ("n_tup_ins", "d"), ("n_tup_upd", "d"), ("n_tup_del", "d"), ("n_tup_hot_upd", "d"),
          ("n_live_tup", "e"), ("n_dead_tup", "be")],
         lambda v: (v["seq_tup_read"][1] - v["seq_tup_read"][0]) + (v["idx_tup_fetch"][1] - v["idx_tup_fetch"][0]))
-    # ---- Top Table I/O (v2.4.5; replaces 'Top Indexes by Scans'. gs_file_stat
-    # keyed delta aggregated per TABLE (partitions/subpartitions/index/toast
-    # roll up to the parent; global indexes made per-partition rows
-    # double-count, so table level it is) ----
-    _fs_rows, _fs_tot, _fs_legacy, _fs_timok = filestat_rows(win)
-    if _fs_legacy:
-        note("File I/O tables need snaps captured by vb_tool v2.4.5+ "
-             "(per-file gs_file_stat with readtim/writetim + resolved object names).")
-    elif not _fs_rows:
-        note("no per-file I/O data in this window (file_iostat rows missing or empty)")
-    else:
-        _fs_dims = (("Top 10 Tables by Physical Reads", "phyrds", 0),
-                    ("Top 10 Tables by Physical Writes", "phywrts", 1),
-                    ("Top 10 Tables by Read Time", "readtim", 2),
-                    ("Top 10 Tables by Write Time", "writetim", 3))
-        if not _fs_timok:
-            _fs_dims = _fs_dims[:2]
-            note("Read/Write Time tables skipped: one snap in this window predates "
-                 "vb_tool v2.4.5 (readtim/writetim not captured) -- a mixed window "
-                 "would show END-cumulative times, not the window delta.")
-        for _ttl, _dim, _di in _fs_dims:
-            sub(_ttl)
-            # Exclude system DBs (postgres WDR/snapshot, template0/1) from
-            # ranking -- their gs_file_stat counters accumulate since db start
-            # and dominate the Top 10, drowning out business tables. (2026-09-15)
-            _top = sorted(
-                [r for r in _fs_rows
-                 if r.get("db") not in ("postgres", "template0", "template1")],
-                key=lambda r: r[_dim], reverse=True)[:10]
-            parts.append('<table class="t"><tr><th>dbname</th><th>schema</th><th>object</th>'
-                         '<th>object_type</th><th>Tablespace</th><th class="n">phyrds</th>'
-                         '<th class="n">phywrts</th><th class="n">readtim (ms)</th>'
-                         '<th class="n">writetim (ms)</th><th class="n">ms/rd</th>'
-                         '<th class="n">ms/wr</th><th class="n">table%</th><th class="n">index%</th>'
-                         '<th class="n">toast%</th><th class="n">% Total</th></tr>')
-            for r in _top:
-                _mrd = "%.1f" % (r["readtim"] / r["phyrds"]) if r["phyrds"] > 0 else "-"
-                _mwr = "%.1f" % (r["writetim"] / r["phywrts"]) if r["phywrts"] > 0 else "-"
-                def _shr(r, comp):
-                    if r.get("deleted"):
-                        return "-"   # design: unresolved row shows '-', not 0.0%
-                    b = r["comp"].get(comp, {}).get(_dim, 0.0)
-                    return ("%.1f%%" % (b / r[_dim] * 100)) if r[_dim] > 0 else "-"
-                _pct = ("%.1f%%" % (r[_dim] / _fs_tot[_di] * 100)) if _fs_tot[_di] > 0 else "-"
-                parts.append('<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td>'
-                             '<td class="n">%s</td><td class="n">%s</td><td class="n">%s</td>'
-                             '<td class="n">%s</td><td class="n">%s</td><td class="n">%s</td>'
-                             '<td class="n">%s</td><td class="n">%s</td><td class="n">%s</td>'
-                             '<td class="n">%s</td></tr>'
-                             % (esc(r["db"]), esc(r["schema"]), esc(r["name"]),
-                                esc(r["otype"]), esc(r["spc"]),
-                                fmt_int(r["phyrds"]), fmt_int(r["phywrts"]),
-                                fmt_int(r["readtim"]), fmt_int(r["writetim"]),
-                                _mrd, _mwr, _shr(r, "table"), _shr(r, "index"),
-                                _shr(r, "toast"), _pct))
-            parts.append('</table>')
-
     # ================= Active Session History =================
     # gs_asp/local_active_session = persisted 1-second kernel ASP samples;
     # every create flushes [prev snap, now]; the window unions every flush
@@ -28780,44 +28662,54 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                                      (t0 + timedelta(minutes=5)).strftime("%H:%M:%S"))
             except ValueError:
                 return "%s %s" % (tag, bk)
+        # Count/Event/Top SQL render UNCONDITIONALLY (waitchain precedent,
+        # user 2026-09-16): an absent sub reads as "feature missing", an
+        # empty one reads as "no samples of this kind in this window"
+        sub("Active Session History Count")
+        _h = ['<table class="t"><tr><th>date_time</th><th class="n">max_sess</th>'
+              '<th class="n">avg_sess</th><th class="n">max_active_sess</th>'
+              '<th class="n">wait_lock</th><th class="n">wait_lwlock</th>'
+              '<th class="n">wait_io</th><th class="n">wait_wal_sync</th>'
+              '<th class="n">wait_trans_sync</th></tr>']
         if _ash["cnt"]:
-            sub("Active Session History Count")
-            parts.append('<table class="t"><tr><th>date_time</th><th class="n">max_sess</th>'
-                         '<th class="n">avg_sess</th><th class="n">max_active_sess</th>'
-                         '<th class="n">wait_lock</th><th class="n">wait_lwlock</th>'
-                         '<th class="n">wait_io</th><th class="n">wait_wal_sync</th>'
-                         '<th class="n">wait_trans_sync</th></tr>')
             for (src, bk) in sorted(_ash["cnt"], key=lambda k: k[1]):
                 v = _ash["cnt"][(src, bk)]
-                parts.append('<tr><td>%s</td>%s</tr>'
-                             % (_ash_dt(src, bk),
-                                "".join('<td class="n">%s</td>' % fmt_int(x) for x in v)))
-            parts.append('</table>')
+                _h.append('<tr><td>%s</td>%s</tr>'
+                          % (_ash_dt(src, bk),
+                             "".join('<td class="n">%s</td>' % fmt_int(x) for x in v)))
+        else:
+            _h.append('<tr><td colspan="9" class="note">no data</td></tr>')
+        _h.append('</table>')
+        parts.append("".join(_h))
+        sub("Active Session History Event")
+        _h = ['<table class="t"><tr><th>date_time</th><th>event_type</th>'
+              '<th>event</th><th class="n">max_cnt</th><th class="n">avg_cnt</th></tr>']
         if _ash["event"]:
-            _h = ['<table class="t"><tr><th>date_time</th><th>event_type</th>'
-                  '<th>event</th><th class="n">max_cnt</th><th class="n">avg_cnt</th></tr>']
             for (src, bk, ev), v in sorted(_ash["event"].items(),
                                            key=lambda kv: (kv[0][1], -kv[1][1])):
                 _h.append('<tr><td>%s</td><td>%s</td><td>%s</td>'
                           '<td class="n">%s</td><td class="n">%s</td></tr>'
                           % (_ash_dt(src, bk), esc(v[0]), esc(ev),
                              fmt_int(v[1]), fmt_int(v[2])))
-            _h.append('</table>')
-            sub("Active Session History Event")
-            parts.append("".join(_h))
+        else:
+            _h.append('<tr><td colspan="5" class="note">no data</td></tr>')
+        _h.append('</table>')
+        parts.append("".join(_h))
+        sub("Active Session History Top SQL")
+        _h = ['<table class="t"><tr><th>date_time</th><th class="n">unique_query_id</th>'
+              '<th>unique_query</th><th class="n">max_cnt</th>'
+              '<th class="n">avg_cnt</th></tr>']
         if _ash["sql"]:
-            _h = ['<table class="t"><tr><th>date_time</th><th class="n">unique_query_id</th>'
-                  '<th>unique_query</th><th class="n">max_cnt</th>'
-                  '<th class="n">avg_cnt</th></tr>']
             for (src, bk, qid), v in sorted(_ash["sql"].items(),
                                             key=lambda kv: (kv[0][1], -kv[1][1])):
                 _h.append('<tr><td>%s</td><td class="n">%s</td><td>%s</td>'
                           '<td class="n">%s</td><td class="n">%s</td></tr>'
                           % (_ash_dt(src, bk), esc(qid), esc(v[0]),
                              fmt_int(v[1]), fmt_int(v[2])))
-            _h.append('</table>')
-            sub("Active Session History Top SQL")
-            parts.append("".join(_h))
+        else:
+            _h.append('<tr><td colspan="5" class="note">no data</td></tr>')
+        _h.append('</table>')
+        parts.append("".join(_h))
         # waitchain header is unconditional within the section: an absent
         # table reads as "feature missing", an empty one reads as "no chains
         # in this window" -- the latter is the information the reader wants
@@ -29461,6 +29353,15 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             _lpw_neg = True
     if _lpw_neg:
         note("WARNING: negative delta in WAL/pagewriter counters — possible counter reset (switchover/promote); these rows may be unreliable.")
+    _lio2 = {r[0]: r for r in loadprofile_iostat_rows(win2, dur2)}
+    for _lbl, _b1, _e1, _d1, _ps1, _md1, _ok1 in loadprofile_iostat_rows(win1, dur1):
+        _lbl, _b2, _e2, _d2, _ps2, _md2, _ok2 = _lio2[_lbl]
+        _ok = _ok1 and _ok2
+        _cf = (fmt_blocks if _md1 == "blocks" else fmt_int) if _ok else (lambda v: "-")
+        _cn = (fmt_blocks_ps if _md1 == "blocks" else fmt_num) if _ok else (lambda v: "-")
+        parts.append('<tr><td>%s</td><td class="n">%s</td><td class="n">%s</td><td class="n">%s</td>'
+                     '<td class="n">%s</td><td class="n">%s</td></tr>'
+                     % (esc(_lbl), _cf(_d1), _cf(_d2), _cf(_d2 - _d1), _cn(_ps1), _cn(_ps2)))
     parts.append('</table>')
 
     # ================= Cache Hit Ratio =================
@@ -29572,52 +29473,6 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
              win2["db"].get(("begin", "object_tables"), []), win2["db"].get(("end", "object_tables"), []),
              ("dbname", "schema", "object"),
              ("seq_scan", "seq_tup_read", "idx_scan", "idx_tup_fetch", "n_tup_upd", "n_tup_del"), "seq_tup_read")
-    # ---- Top Table I/O diff (v2.4.5; P1/P2/Δ per table, shares from P2) ----
-    _fs1, _fs1_tot, _fs1_leg, _fs1_tim = filestat_rows(win1)
-    _fs2, _fs2_tot, _fs2_leg, _fs2_tim = filestat_rows(win2)
-    if _fs1_leg and _fs2_leg:
-        note("File I/O tables need snaps captured by vb_tool v2.4.5+.")
-    elif _fs1_leg or _fs2_leg:
-        note("File I/O tables skipped: one period's snaps predate vb_tool v2.4.5.")
-    else:
-        def _okey(r):
-            return (r["db"], r["schema"], r["name"])
-        _fs1_by = {_okey(r): r for r in _fs1}
-        _fs_dims = (("Top 10 Tables by Physical Reads", "phyrds", 0),
-                    ("Top 10 Tables by Physical Writes", "phywrts", 1),
-                    ("Top 10 Tables by Read Time", "readtim", 2),
-                    ("Top 10 Tables by Write Time", "writetim", 3))
-        if not (_fs1_tim and _fs2_tim):
-            _fs_dims = _fs_dims[:2]
-            note("Read/Write Time tables skipped: one period's snaps predate "
-                 "vb_tool v2.4.5 (readtim/writetim missing on one side).")
-        for _ttl, _dim, _di in _fs_dims:
-            sub(_ttl)
-            _merged = []
-            for r2 in _fs2:
-                r1 = _fs1_by.get(_okey(r2), {"db": r2["db"], "schema": r2["schema"],
-                                             "name": r2["name"], "otype": r2["otype"],
-                                             "spc": r2["spc"], _dim: 0.0})
-                _merged.append((r2[_dim] - r1[_dim], r1, r2))
-            _merged = [t for t in _merged
-                       if t[1].get("db") not in ("postgres", "template0", "template1")]
-            _merged.sort(key=lambda t: t[0], reverse=True)
-            if not _merged:
-                note("no per-file I/O data in this period (excluded postgres/template0/1)")
-                continue
-            parts.append('<table class="t"><tr><th>dbname</th><th>schema</th><th>object</th>'
-                         '<th>object_type</th><th>Tablespace</th><th class="n">P1 %s</th>'
-                         '<th class="n">P2 %s</th><th class="n">Δ</th><th class="n">%%P2</th></tr>'
-                         % (_dim, _dim))
-            for _dd, r1, r2 in _merged[:10]:
-                _pct = ("%.1f%%" % (r2[_dim] / _fs2_tot[_di] * 100)) if _fs2_tot[_di] > 0 else "-"
-                parts.append('<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td>'
-                             '<td class="n">%s</td><td class="n">%s</td><td class="n">%s</td>'
-                             '<td class="n">%s</td></tr>'
-                             % (esc(r2["db"]), esc(r2["schema"]), esc(r2["name"]),
-                                esc(r2["otype"]), esc(r2["spc"]),
-                                fmt_int(r1[_dim]), fmt_int(r2[_dim]), fmt_int(_dd), _pct))
-            parts.append('</table>')
     obj_diff("Top Objects by Dead Tuples (window Δ)",
              win1["db"].get(("begin", "object_dead"), []), win1["db"].get(("end", "object_dead"), []),
              win2["db"].get(("begin", "object_dead"), []), win2["db"].get(("end", "object_dead"), []),
@@ -30107,39 +29962,10 @@ def _summary_row(win):
             ev = sum(to_num(r.get(c, 0)) for r in e)
             out.append(ev - bv if ev - bv >= 0 else None)
         return out
-    # file_iostat rows are PER FILE (filenum/dbid/spcid); the membership drifts
-    # between snaps (temp/log files come and go), so the delta of the row-SUM
-    # goes negative on a healthy window (observed on the test cluster). Diff
-    # per file key instead: dropped files excluded, new files fully counted.
-    def _io_delta_keyed(table, cols):
-        b_rows = win["db"][("begin", table)]
-        e_rows = win["db"][("end", table)]
-        def _has_keys(rows):
-            return any(str(r.get("filenum", "")).strip() for r in rows)
-        # missing csv / empty / pre-keyed aggregate rows (older captures) ->
-        # no per-file data -> caller shows '-'
-        if not b_rows or not e_rows or not _has_keys(b_rows) or not _has_keys(e_rows):
-            return [None] * len(cols)
-        def _sums(rows):
-            out = {}
-            for r in rows:
-                k = (r.get("filenum", ""), r.get("dbid", ""), r.get("spcid", ""))
-                s = out.setdefault(k, [0.0] * len(cols))
-                for i, c in enumerate(cols):
-                    s[i] += to_num(r.get(c, 0))
-            return out
-        b = _sums(b_rows)
-        e = _sums(e_rows)
-        tot = [0.0] * len(cols)
-        zero = [0.0] * len(cols)
-        for k in set(b) | set(e):
-            for i in range(len(cols)):
-                d = e.get(k, zero)[i] - b.get(k, zero)[i]
-                if d > 0:
-                    tot[i] += d
+    # rel_iostat = ONE cumulative row (kernel direct counters): plain delta
         return tot
-    phyrds, phywrts, phyblkrd, phyblkwrt = _io_delta_keyed(
-        "file_iostat", ["phyrds", "phywrts", "phyblkrd", "phyblkwrt"])
+    phyrds, phywrts, phyblkrd, phyblkwrt = _io_delta(
+        "rel_iostat", ["phyrds", "phywrts", "phyblkrd", "phyblkwrt"])
     # file_redo_iostat is a global aggregate (no per-file key): plain row-sum
     redo_blkwrt = _io_delta("file_redo_iostat", ["phywrts", "phyblkwrt"])[-1]
     def rate(num):
@@ -30176,17 +30002,17 @@ def text_summary(win, detail_wins=None):
         lines.append("")
         # differentiate the common cases so the user can act on it
         el = to_num(win["meta"].get("duration"))
-        fb = win["db"][("begin", "file_iostat")]
-        fe = win["db"][("end", "file_iostat")]
+        fb = win["db"][("begin", "rel_iostat")]
+        fe = win["db"][("end", "rel_iostat")]
         if el == 0 or el is None:
             lines.append("note: iops/mbps/wal_mb/s = '-' -- window has zero duration "
                          "(begin==end), no delta to compute; widen the window to see rates")
         elif not fb or not fe:
-            lines.append("note: iops/mbps/wal_mb/s = '-' -- db/file_iostat*.csv missing in "
-                         "one or both snaps (captured only by vb_tool v2.1.0+)")
+            lines.append("note: iops/mbps/wal_mb/s = '-' -- db/rel_iostat*.csv missing in "
+                         "one or both snaps (captured only by vb_tool v2.4.8+)")
         else:
-            lines.append("note: iops/mbps/wal_mb/s = '-' -- file_iostat rows lack filenum column "
-                         "(legacy format, no per-file key for keyed delta)")
+            lines.append("note: iops/mbps/wal_mb/s = '-' -- rel_iostat counters went backwards "
+                         "(possible instance restart / counter reset); rates suppressed")
     return 0, "\n".join(lines)
 
 def _f1(x):
@@ -30689,7 +30515,7 @@ def main():
         "topsql":  frozenset({"statement"}),
         "event":   frozenset({"instance_time", "wait_events"}),
         "summary": frozenset({"instance_time", "database", "statement",
-                              "file_iostat", "file_redo_iostat"}),
+                              "rel_iostat", "file_redo_iostat"}),
         "tabstat": frozenset({"object_tables"}),
         # cpu/io/page/replstat/replslot/replay/ltx: render whole window only
         # (no detail_wins), so load_snap is called exactly 2x — slim path adds
