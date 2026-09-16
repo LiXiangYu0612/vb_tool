@@ -24593,6 +24593,14 @@ def fmt_bytes(v):
         return "%s%.2f KB" % (sign, a / 1024)
     return "%s%.0f B" % (sign, a)
 
+def fmt_blocks(v):
+    """count(bytes) composite for BLOCK/PAGE totals: '177,241,781(1.32 TB)'."""
+    return "%s(%s)" % (fmt_int(v), fmt_bytes(to_num(v) * 8192.0))
+
+def fmt_blocks_ps(v):
+    """count/s(bytes/s) composite for BLOCK/PAGE rates."""
+    return "%s(%s)" % (fmt_num(v), fmt_bytes(to_num(v) * 8192.0))
+
 def fmt_kb(v):
     """kilobytes (sysfs node meminfo unit) -> human MB/GB"""
     return fmt_bytes(to_num(v) * 1024)
@@ -25333,7 +25341,7 @@ def filestat_rows(win):
     return rows, totals, False, tim_ok
 
 def loadprofile_wal_pw_rows(win, duration):
-    """(label, begin, end, delta, per_sec, ok, as_bytes) tuples for the WAL-write and
+    """(label, begin, end, delta, per_sec, ok, as_bytes, as_pages) tuples for the WAL-write and
     pagewriter-flush Load Profile rows (v2.4.5). WAL = file_redo_iostat
     (= gs_redo_stat = pg_stat_get_redo_stat, XLogWrite cumulative under
     WALWriteLock, primary-valid); pagewriter = pagewriter.csv
@@ -25353,17 +25361,16 @@ def loadprofile_wal_pw_rows(win, duration):
                               ("WAL write time (ms)", "file_redo_iostat", "writetim")):
         b, e = _sum("begin", table, col), _sum("end", table, col)
         ok = (col != "writetim") or tim_ok
-        rows.append((label, b, e, e - b, ((e - b) / duration) if duration else 0.0, ok, False))
+        rows.append((label, b, e, e - b, ((e - b) / duration) if duration else 0.0, ok, False, False))
     # pagewriter: Begin/End stay RAW PAGE COUNTS (user 2026-09-15: keep the
     # original unit there); only Δ Total / Δ Per Second are byte-scaled
     # (pages x BLCKSZ 8K) and rendered via fmt_bytes like the 'WAL written
     # (xlog insert lsn)' row's deltas
-    _PGB = 8192.0
     _pb = _sum("begin", "pagewriter", "pgwr_actual_flush_total_num")
     _pe = _sum("end", "pagewriter", "pgwr_actual_flush_total_num")
-    _pd = (_pe - _pb) * _PGB
+    _pd = _pe - _pb   # raw PAGES; renderer prints pages(bytes) via as_pages flag
     rows.append(("pagewriter flushed", _pb, _pe, _pd,
-                 (_pd / duration) if duration else 0.0, True, True))
+                 (_pd / duration) if duration else 0.0, True, False, True))
     return rows
 
 # ---- Long-txn + callstack samplers (awrrpt only; 5-min cadence, written by
@@ -28298,13 +28305,15 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     parts.append('<table class="t"><tr><th>Metric</th>'
                  '<th class="n">Begin</th><th class="n">End</th>'
                  '<th class="n">Δ Total</th><th class="n">Δ Per Second</th></tr>')
-    def lp(label, col):
+    def lp(label, col, blocks=False):
         _b = _dbsum("begin", col); _e = _dbsum("end", col); _d = _e - _b
         parts.append('<tr><td>%s</td><td class="n">%s</td><td class="n">%s</td>'
                      '<td class="n">%s</td><td class="n">%s</td></tr>'
-                     % (esc(label), fmt_int(_b), fmt_int(_e), fmt_int(_d), fmt_num(_d / duration)))
-    lp("blocks read (blks_read)", "blks_read")
-    lp("blocks hit (blks_hit)", "blks_hit")
+                     % (esc(label), fmt_int(_b), fmt_int(_e),
+                        fmt_blocks(_d) if blocks else fmt_int(_d),
+                        fmt_blocks_ps(_d / duration) if blocks else fmt_num(_d / duration)))
+    lp("blocks read (blks_read)", "blks_read", blocks=True)
+    lp("blocks hit (blks_hit)", "blks_hit", blocks=True)
     lp("rows returned (tup_returned)", "tup_returned")
     lp("rows fetched (tup_fetched)", "tup_fetched")
     lp("rows inserted (tup_inserted)", "tup_inserted")
@@ -28342,11 +28351,11 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     # ---- WAL writes + pagewriter flushes (v2.4.5; the old 'pagewriter written
     # (ckpt_redo_point)' line measured an LSN POSITION, not pages -- removed) ----
     _lpw_neg = False
-    for _lbl, _b, _e, _d, _ps, _ok, _by in loadprofile_wal_pw_rows(win, duration):
-        if not _by and "physical standby" in (m.get("db_role") or ""):
+    for _lbl, _b, _e, _d, _ps, _ok, _by, _pg in loadprofile_wal_pw_rows(win, duration):
+        if not _by and not _pg and "physical standby" in (m.get("db_role") or ""):
             _lbl = _lbl + " (primary only)"
-        _cf = fmt_bytes if _by else fmt_int
-        _pf = fmt_bytes if _by else fmt_num
+        _cf = fmt_blocks if _pg else (fmt_bytes if _by else fmt_int)
+        _pf = fmt_blocks_ps if _pg else (fmt_bytes if _by else fmt_num)
         parts.append('<tr><td>%s</td><td class="n">%s</td><td class="n">%s</td>'
                      '<td class="n">%s</td><td class="n">%s</td></tr>'
                      % (esc(_lbl),
@@ -29391,10 +29400,15 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                      ("rollbacks", "xact_rollback"), ("deadlocks", "deadlocks"),
                      ("conflicts", "conflicts"), ("temp bytes", "temp_bytes")]:
         v1 = _dbsum(db1, col); v2 = _dbsum(db2, col)
-        fb = fmt_bytes if col == "temp_bytes" else fmt_int
+        if col == "temp_bytes":
+            fb = fn = fmt_bytes
+        elif col in ("blks_read", "blks_hit"):
+            fb, fn = fmt_blocks, fmt_blocks_ps
+        else:
+            fb = fn = fmt_int
         parts.append('<tr><td>%s</td><td class="n">%s</td><td class="n">%s</td><td class="n">%s</td>'
                      '<td class="n">%s</td><td class="n">%s</td></tr>' % (
-                         esc(lbl), fb(v1), fb(v2), fb(v2 - v1), fmt_num(v1 / dur1), fmt_num(v2 / dur2)))
+                         esc(lbl), fb(v1), fb(v2), fb(v2 - v1), fn(v1 / dur1), fn(v2 / dur2)))
     # role-aware WAL movement: a standby writes no local WAL (xlog insert lsn
     # sits at a static near-zero there) -- on standby windows use the standby's
     # own walreceiver replay lsn delta; "-" when that window has no
@@ -29423,16 +29437,22 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     _lpw1 = dict((r[0], r) for r in loadprofile_wal_pw_rows(win1, dur1))
     _lpw2 = dict((r[0], r) for r in loadprofile_wal_pw_rows(win2, dur2))
     _lpw_neg = False
-    for _lbl, _b1, _e1, _d1, _ps1, _ok1, _by1 in _lpw1.values():
-        _lbl, _b2, _e2, _d2, _ps2, _ok2, _by2 = _lpw2[_lbl]
+    for _lbl, _b1, _e1, _d1, _ps1, _ok1, _by1, _pg1 in _lpw1.values():
+        _lbl, _b2, _e2, _d2, _ps2, _ok2, _by2, _pg2 = _lpw2[_lbl]
         # gs_redo_stat is primary-valid: label standby-side rows (awrrpt parity)
-        if not _by1 and "physical standby" in str(m1.get("db_role", "")):
+        if not _by1 and not _pg1 and "physical standby" in str(m1.get("db_role", "")):
             _lbl = _lbl + " (P1 primary only)"
-        if not _by2 and "physical standby" in str(m2.get("db_role", "")):
+        if not _by2 and not _pg2 and "physical standby" in str(m2.get("db_role", "")):
             _lbl = _lbl + " (P2 primary only)"
         _ok = _ok1 and _ok2
-        _cell  = (fmt_bytes if _by1 else fmt_int) if _ok else (lambda v: "-")
-        _celln = (fmt_bytes if _by1 else fmt_num) if _ok else (lambda v: "-")
+        if not _ok:
+            _cell = _celln = (lambda v: "-")
+        elif _pg1:
+            _cell, _celln = fmt_blocks, fmt_blocks_ps
+        elif _by1:
+            _cell = _celln = fmt_bytes
+        else:
+            _cell, _celln = fmt_int, fmt_num
         parts.append('<tr><td>%s</td><td class="n">%s</td><td class="n">%s</td><td class="n">%s</td>'
                      '<td class="n">%s</td><td class="n">%s</td></tr>' % (
                          esc(_lbl), _cell(_d1), _cell(_d2), _cell(_d2 - _d1),
