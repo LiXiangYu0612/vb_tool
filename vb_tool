@@ -26728,10 +26728,6 @@ def filesystem_usage_html(win):
         h.append('<td class="n">%s</td><td class="n">%s</td></tr>'
                  % (_cell(dino, fmt_int), _cell(dkb, lambda v: fmt_bytes(v * 1024))))
     h.append('</table>')
-    h.append('<div class="note">Begin/End are instantaneous snapshot values. '
-             'Δ Used = END − BEGIN of used (space: total − available, reserved '
-             'blocks included; negative = space freed). Pseudo filesystems '
-             '(proc/sysfs/tmpfs/...) are excluded.</div>')
     if "# df-timeout" in raw_b or "# df-timeout" in raw_e:
         h.append('<div class="note">filesystem inventory incomplete: df hit the '
                  '10 s timeout on at least one snapshot (hung network mount?) '
