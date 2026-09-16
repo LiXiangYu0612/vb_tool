@@ -1,13 +1,13 @@
 #!/bin/bash
 #--------------------------------------------------------------------------------
 #-- File name:   vb_tool
-#-- Version  ：  v2.4.7
-#-- Commit at：  2026-09-08 14:05:00
+#-- Version  ：  v2.4.8
+#-- Commit at： 2026-09-16 15:10:00
 #-- Purpose:     Vastbase Script Tool
 #-- Author:      MVS & Second-line Team 
 #--------------------------------------------------------------------------------
 set -o pipefail
-export VB_TOOL_VERSION="v2.4.7"
+export VB_TOOL_VERSION="v2.4.8"
 show_help() {
     echo "Vastbase Script Tool (vb_tool)"
     echo ""
@@ -23681,7 +23681,7 @@ se_help() {
 Usage: vb_tool se <event_name>       explain one wait event (oerr style)
        vb_tool se -l [<keyword>]     list events (optional substring filter)
 
-  Wait-event knowledge base (419 events of dbe_perf.wait_events: LOCK /
+  Wait-event knowledge base (417 events of dbe_perf.wait_events: LOCK /
   IO / STATUS / LWLOCK families): full event name, type, meaning,
   kernel-source trigger points, why sessions wait on it, and what to do.
   Matching is case-insensitive: exact name first, then unique substring
@@ -24045,6 +24045,24 @@ _awr_collect() {
     if [ -x "$sscmd" ]; then
         "$sscmd" -tin state established 2>/dev/null | head -c 524288 > "$osd/net_rtt"
         [ -s "$osd/net_rtt" ] || rm -f "$osd/net_rtt"
+    fi
+    # df_fs: filesystem inventory at snap time -- space (df -TPk, 1K blocks,
+    # Available) and inodes (df -TPi) dumped raw into ONE file with an '@ino@'
+    # separator; the renderer merges by (device, mount). Pseudo/kernel fs types
+    # are filtered at RENDER time so the raw file stays complete. Each df runs
+    # under `timeout 10` + line-buffered (stdbuf -oL; same coreutils package as
+    # df, always present together): a hard-mounted network fs with a dead
+    # network blocks statfs in the kernel -- the kill keeps the snapshot alive
+    # and line buffering keeps rows df already printed; a timed-out half leaves
+    # a '# df-timeout' marker the renderer turns into a note. No df / empty
+    # -> no file -> renderer hides the sub-section (old snaps unaffected).
+    if command -v df >/dev/null 2>&1; then
+        _dfto=""
+        { timeout 10 stdbuf -oL df -TPk 2>/dev/null || _dfto=1
+          printf '@ino@\n'
+          timeout 10 stdbuf -oL df -TPi 2>/dev/null || _dfto=1
+          [ -n "$_dfto" ] && printf '# df-timeout\n'; } > "$osd/df_fs"
+        [ -s "$osd/df_fs" ] || rm -f "$osd/df_fs"
     fi
     # ---- NUMA topology + numastat (per-node cumulative counters; renderer computes end-begin) ----
     # File format (one stanza per node, blank-line separated):
@@ -24429,7 +24447,7 @@ PSQL4
     # relfilenode joins carry NO reltablespace condition (0 = db-default). ----
     { echo "filenum,dbid,spcid,phyrds,phywrts,phyblkrd,phyblkwrt,readtim,writetim,datname,spcname,schema,relname,relkind,parttype,component"
       for _odb in $_odbs; do
-          PGCONNECT_TIMEOUT=$_ct PGOPTIONS="$_st" psql -d "$_odb" -tAF',' -c "with files as (select * from gs_file_stat where dbid=(select oid from pg_database where datname=current_database())), res as (select f.filenum,'table' as component,c.oid as owner from files f join pg_class c on c.relfilenode=f.filenum and c.relkind in ('r','m') union all select f.filenum,'index',gi.indrelid from files f join pg_class i on i.relfilenode=f.filenum and i.relkind in ('i','I') join pg_index gi on gi.indexrelid=i.oid union all select f.filenum,'toast',c.oid from files f join pg_class t on t.relfilenode=f.filenum and t.relkind='t' join pg_class c on c.reltoastrelid=t.oid union all select f.filenum,'table',p.parentid from files f join pg_partition p on p.relfilenode=f.filenum and p.parttype='p' union all select f.filenum,'table',p1.parentid from files f join pg_partition s on s.relfilenode=f.filenum and s.parttype='s' join pg_partition p1 on p1.oid=s.parentid union all select f.filenum,'toast',coalesce(p1.parentid,pp.parentid) from files f join pg_partition tt on tt.relfilenode=f.filenum and tt.parttype='t' join pg_partition pp on pp.oid=tt.parentid left join pg_partition p1 on p1.oid=pp.parentid union all select f.filenum,'index',gi.indrelid from files f join pg_partition xx on xx.relfilenode=f.filenum and xx.parttype='x' join pg_index gi on gi.indexrelid=xx.parentid) select f.filenum, f.dbid, f.spcid, coalesce(f.phyrds,0), coalesce(f.phywrts,0), coalesce(f.phyblkrd,0), coalesce(f.phyblkwrt,0), coalesce(f.readtim,0), coalesce(f.writetim,0), coalesce(d.datname,''), coalesce(spo.spcname,''), coalesce(n.nspname,''), coalesce(oc.relname,''), coalesce(oc.relkind::text,''), coalesce(oc.parttype::text,''), coalesce(r.component,'') from files f left join res r on r.filenum=f.filenum left join pg_class oc on oc.oid=r.owner left join pg_namespace n on n.oid=oc.relnamespace left join pg_database d on d.oid=f.dbid left join pg_tablespace spo on spo.oid=case when oc.reltablespace<>0 then oc.reltablespace else d.dattablespace end" 2>/dev/null
+          PGCONNECT_TIMEOUT=$_ct PGOPTIONS="$_st" psql -d "$_odb" -tAF',' -c "with files as (select * from gs_file_stat where dbid in (select oid from pg_database where datname=current_database())), res as (select f.filenum,'table' as component,c.oid as owner from files f join pg_class c on c.relfilenode=f.filenum and c.relkind in ('r','m') union all select f.filenum,'index',gi.indrelid from files f join pg_class i on i.relfilenode=f.filenum and i.relkind in ('i','I') join pg_index gi on gi.indexrelid=i.oid union all select f.filenum,'toast',c.oid from files f join pg_class t on t.relfilenode=f.filenum and t.relkind='t' join pg_class c on c.reltoastrelid=t.oid union all select f.filenum,'table',p.parentid from files f join pg_partition p on p.relfilenode=f.filenum and p.parttype='p' union all select f.filenum,'table',p1.parentid from files f join pg_partition s on s.relfilenode=f.filenum and s.parttype='s' join pg_partition p1 on p1.oid=s.parentid union all select f.filenum,'toast',coalesce(p1.parentid,pp.parentid) from files f join pg_partition tt on tt.relfilenode=f.filenum and tt.parttype='t' join pg_partition pp on pp.oid=tt.parentid left join pg_partition p1 on p1.oid=pp.parentid union all select f.filenum,'index',gi.indrelid from files f join pg_partition xx on xx.relfilenode=f.filenum and xx.parttype='x' join pg_index gi on gi.indexrelid=xx.parentid) select f.filenum, f.dbid, f.spcid, coalesce(f.phyrds,0), coalesce(f.phywrts,0), coalesce(f.phyblkrd,0), coalesce(f.phyblkwrt,0), coalesce(f.readtim,0), coalesce(f.writetim,0), coalesce(d.datname,''), coalesce(spo.spcname,''), coalesce(n.nspname,''), coalesce(oc.relname,''), coalesce(oc.relkind::text,''), coalesce(oc.parttype::text,''), coalesce(r.component,'') from files f left join res r on r.filenum=f.filenum left join pg_class oc on oc.oid=r.owner left join pg_namespace n on n.oid=oc.relnamespace left join pg_database d on d.oid=f.dbid left join pg_tablespace spo on spo.oid=case when oc.reltablespace<>0 then oc.reltablespace else d.dattablespace end" 2>/dev/null
       done
       PGCONNECT_TIMEOUT=$_ct PGOPTIONS="$_st" psql -d postgres -tAF',' -c "select f.filenum, f.dbid, f.spcid, coalesce(f.phyrds,0), coalesce(f.phywrts,0), coalesce(f.phyblkrd,0), coalesce(f.phyblkwrt,0), coalesce(f.readtim,0), coalesce(f.writetim,0), coalesce(d.datname,''), coalesce(sp.spcname,''), '', '', '', '', '' from gs_file_stat f left join pg_database d on d.oid=f.dbid left join pg_tablespace sp on sp.oid=f.spcid where not exists (select 1 from pg_database dd where dd.oid=f.dbid and dd.datallowconn and not dd.datistemplate)" 2>/dev/null
     } > "$dbd/file_iostat.csv"
@@ -24708,7 +24726,7 @@ def load_window(d):
         except Exception:
             w["meta"] = {}
     for phase in ("begin", "end"):
-        for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi", "softnet_stat", "net_rtt"):
+        for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi", "softnet_stat", "net_rtt", "df_fs"):
             p = os.path.join(d, "os", phase, f)
             w["os"][(phase, f)] = _read_os_text(p) if os.path.isfile(p) else ""
         for t in ("statement", "wait_events", "instance_time", "database", "pagewriter",
@@ -24739,7 +24757,7 @@ def load_snap(d, tables=None):
             s["meta"] = json.load(open(mp))
         except Exception:
             s["meta"] = {}
-    for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi", "softnet_stat", "net_rtt"):
+    for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi", "softnet_stat", "net_rtt", "df_fs"):
         p = os.path.join(d, "os", f)
         s["os"][f] = _read_os_text(p) if os.path.isfile(p) else ""
     _DB_TABLES = ("statement", "wait_events", "instance_time", "database", "pagewriter",
@@ -24842,7 +24860,7 @@ def build_window_from_snaps(begin_dir, end_dir, sqltext_root=None, load_sqltext=
     b = load_snap(begin_dir, db_tables)
     e = load_snap(end_dir, db_tables)
     win = {"meta": {}, "os": {}, "db": {}}
-    for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi", "softnet_stat", "net_rtt"):
+    for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi", "softnet_stat", "net_rtt", "df_fs"):
         win["os"][("begin", f)] = b["os"].get(f, "")
         win["os"][("end", f)] = e["os"].get(f, "")
     for t in ("statement", "wait_events", "instance_time", "database", "pagewriter",
@@ -26619,6 +26637,110 @@ def parse_softnet(txt):
             continue
     return t, d, s
 
+# pseudo / kernel filesystem types filtered from the Filesystem Usage table
+# (they carry no meaningful capacity for a DBA; df itself already hides the
+# zero-size ones like proc/sysfs, tmpfs still shows and is dropped here)
+_DF_PSEUDO_FS = {"proc", "sysfs", "devpts", "devtmpfs", "tmpfs", "ramfs",
+                 "cgroup", "cgroup2", "cpuset", "overlay", "squashfs",
+                 "iso9660", "securityfs", "debugfs", "pstore", "tracefs",
+                 "configfs", "fusectl", "mqueue", "hugetlbfs", "binfmt_misc",
+                 "autofs", "systemd-1", "rpc_pipefs", "nsfs", "bpf",
+                 "efivarfs", "devfs", "cgmfs", "none"}
+
+def parse_df_fs(txt):
+    """os/df_fs = two raw dumps in one file, '@ino@'-separated: `df -TPk`
+    (space, 1K blocks, Available) then `df -TPi` (inodes). Merged here by
+    (device, mount) -> {(dev, mount): {type, kb_total, kb_avail, ino_total,
+    ino_free}}; pseudo fs types dropped. '-' inode fields (fs without inode
+    stats, e.g. some NFS) leave the ino_* keys absent."""
+    if not txt:
+        return {}
+    out = {}
+    def _half(rows, ino):
+        for ln in rows.splitlines():
+            f = ln.split()
+            if len(f) < 7 or f[0] == "Filesystem":
+                continue
+            dev, typ, mount = f[0], f[1], " ".join(f[6:])
+            ent = out.setdefault((dev, mount), {})
+            ent["type"] = typ
+            try:
+                if ino:
+                    ent["ino_total"] = int(f[2]); ent["ino_free"] = int(f[4])
+                else:
+                    ent["kb_total"] = int(f[2]); ent["kb_avail"] = int(f[4])
+            except ValueError:
+                pass   # '-' (NFS without inode stats etc.) -> key stays absent
+    halves = txt.split("@ino@")
+    _half(halves[0], False)
+    if len(halves) > 1:
+        _half(halves[1], True)
+    return {k: v for k, v in out.items() if v.get("type") not in _DF_PSEUDO_FS}
+
+def filesystem_usage_html(win):
+    """OS Statistics sub-section 'Filesystem Usage' (awrrpt only -- same policy
+    as the other instantaneous OS detail tables). Instantaneous BEGIN/END
+    values per filesystem plus the window's USED-delta for inodes and space.
+    Requires df_fs in BOTH snaps (old snaps -> whole sub-section hidden)."""
+    raw_b = win["os"].get(("begin", "df_fs"), "")
+    raw_e = win["os"].get(("end", "df_fs"), "")
+    b = parse_df_fs(raw_b)
+    e = parse_df_fs(raw_e)
+    if not b or not e:
+        return None
+    keys = [k for k in e if k in b]
+    vanished = len(e) - len(keys)
+    def _cell(v, fmt):
+        return "-" if v is None else fmt(v)
+    rows = []
+    for k in keys:
+        rb, re_ = b[k], e[k]
+        it_b, if_b = rb.get("ino_total"), rb.get("ino_free")
+        it_e, if_e = re_.get("ino_total"), re_.get("ino_free")
+        # used-delta = (total-free)_end - (total-free)_begin; None when either
+        # side lacks inode stats
+        if None not in (it_b, if_b, it_e, if_e):
+            dino = (it_e - if_e) - (it_b - if_b)
+        else:
+            dino = None
+        kt_b, ka_b, kt_e, ka_e = (rb.get("kb_total"), rb.get("kb_avail"),
+                                  re_.get("kb_total"), re_.get("kb_avail"))
+        dkb = (kt_e - ka_e) - (kt_b - ka_b) if None not in (kt_b, ka_b, kt_e, ka_e) else None
+        rows.append((k, rb, re_, it_b, it_e, if_b, if_e,
+                     kt_b, kt_e, ka_b, ka_e, dino, dkb))
+    h = ['<table class="t"><tr><th>Device</th><th>Mount</th><th>Type</th>'
+         '<th class="n">Inode Total (Begin)</th><th class="n">Inode Total (End)</th>'
+         '<th class="n">Inode Free (Begin)</th><th class="n">Inode Free (End)</th>'
+         '<th class="n">Space Total (Begin)</th><th class="n">Space Total (End)</th>'
+         '<th class="n">Space Free (Begin)</th><th class="n">Space Free (End)</th>'
+         '<th class="n">Δ Inodes Used</th><th class="n">Δ Space Used</th></tr>']
+    for (dev, mnt), rb, re_, it_b, it_e, if_b, if_e, kt_b, kt_e, ka_b, ka_e, dino, dkb in rows:
+        h.append('<tr><td>%s</td><td>%s</td><td>%s</td>'
+                 % (esc(dev), esc(mnt), esc(re_.get("type", ""))))
+        h.append('<td class="n">%s</td><td class="n">%s</td><td class="n">%s</td><td class="n">%s</td>'
+                 % (_cell(it_b, fmt_int), _cell(it_e, fmt_int),
+                    _cell(if_b, fmt_int), _cell(if_e, fmt_int)))
+        h.append('<td class="n">%s</td><td class="n">%s</td><td class="n">%s</td><td class="n">%s</td>'
+                 % (_cell(kt_b, lambda v: fmt_bytes(v * 1024)),
+                    _cell(kt_e, lambda v: fmt_bytes(v * 1024)),
+                    _cell(ka_b, lambda v: fmt_bytes(v * 1024)),
+                    _cell(ka_e, lambda v: fmt_bytes(v * 1024))))
+        h.append('<td class="n">%s</td><td class="n">%s</td></tr>'
+                 % (_cell(dino, fmt_int), _cell(dkb, lambda v: fmt_bytes(v * 1024))))
+    h.append('</table>')
+    h.append('<div class="note">Begin/End are instantaneous snapshot values. '
+             'Δ Used = END − BEGIN of used (space: total − available, reserved '
+             'blocks included; negative = space freed). Pseudo filesystems '
+             '(proc/sysfs/tmpfs/...) are excluded.</div>')
+    if "# df-timeout" in raw_b or "# df-timeout" in raw_e:
+        h.append('<div class="note">filesystem inventory incomplete: df hit the '
+                 '10 s timeout on at least one snapshot (hung network mount?) '
+                 '-- filesystems after the hang point are missing.</div>')
+    if vanished:
+        h.append('<div class="note">%d filesystem(s) present at only one end of '
+                 'the window are not listed.</div>' % vanished)
+    return "".join(h)
+
 def parse_net_rtt(txt):
     """os/net_rtt = raw `ss -tin state established` snapshot (loopback NOT
     filtered at capture time; filtered here). -> [conn] for non-loopback peers
@@ -27920,6 +28042,10 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     parts.append('</table>')
     if os_smp is not None:
         parts.append(osmin_disk_table(os_smp, m.get("begin_ts", "")))
+    _fsu = filesystem_usage_html(win)
+    if _fsu:
+        sub("Filesystem Usage")
+        parts.append(_fsu)
     sub("Network per interface")
     dur_os = osd.get("dur", 1.0) or 1.0
     def nrate(it, key):
@@ -28593,7 +28719,13 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                  "would show END-cumulative times, not the window delta.")
         for _ttl, _dim, _di in _fs_dims:
             sub(_ttl)
-            _top = sorted(_fs_rows, key=lambda r: r[_dim], reverse=True)[:10]
+            # Exclude system DBs (postgres WDR/snapshot, template0/1) from
+            # ranking -- their gs_file_stat counters accumulate since db start
+            # and dominate the Top 10, drowning out business tables. (2026-09-15)
+            _top = sorted(
+                [r for r in _fs_rows
+                 if r.get("db") not in ("postgres", "template0", "template1")],
+                key=lambda r: r[_dim], reverse=True)[:10]
             parts.append('<table class="t"><tr><th>dbname</th><th>schema</th><th>object</th>'
                          '<th>object_type</th><th>Tablespace</th><th class="n">phyrds</th>'
                          '<th class="n">phywrts</th><th class="n">readtim (ms)</th>'
@@ -29451,9 +29583,11 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                                              "name": r2["name"], "otype": r2["otype"],
                                              "spc": r2["spc"], _dim: 0.0})
                 _merged.append((r2[_dim] - r1[_dim], r1, r2))
+            _merged = [t for t in _merged
+                       if t[1].get("db") not in ("postgres", "template0", "template1")]
             _merged.sort(key=lambda t: t[0], reverse=True)
             if not _merged:
-                note("no per-file I/O data in this period")
+                note("no per-file I/O data in this period (excluded postgres/template0/1)")
                 continue
             parts.append('<table class="t"><tr><th>dbname</th><th>schema</th><th>object</th>'
                          '<th>object_type</th><th>Tablespace</th><th class="n">P1 %s</th>'
@@ -30696,7 +30830,10 @@ VB_BL_COMPARE_PY
 #          'idle in transaction*' state, ltx60_active_cnt = active ones.
 #          The WLM monitor's resident session (application_name='workload',
 #          query 'WLM fetch collect info from data nodes', xact_start pinned
-#          since instance start) is excluded from counts and the oldest pick.
+#          since instance start) is excluded from counts and the oldest pick,
+#          and so is the WDR snapshot session (application_name='WDRSnapshot',
+#          same pinned-xact_start problem -- it would fake the oldest long
+#          transaction).
 #          oldestxmin = gs_txid_oldestxmin() (primary vacuum horizon; stays 0
 #          on a standby -- not maintained in recovery). A brief 2026-09-12
 #          experiment logged a recentxmin column (txid_current_snapshot()
@@ -30715,7 +30852,8 @@ VB_BL_COMPARE_PY
 #          'Wal Receive Writer' on a standby), and on a standby the Startup
 #          (replay) thread plus parallel redo workers. AutoVacWorkers do NOT
 #          appear here (own 'av' row below). cpu = that thread's CPU% over
-#          the 1s /proc/<lwpid>/stat utime+stime window taken with the sample
+#          the 1s /proc/<tgid>/task/<lwpid>/stat utime+stime window taken
+#          with the sample
 #          ('' = lwpid unreadable -> '-' in the report; 6-field rows from
 #          older samplers = no cpu column yet). These threads have NO
 #          pg_stat_activity row: state/wait come from pg_thread_wait_status
@@ -30743,6 +30881,20 @@ VB_BL_COMPARE_PY
 # stack per thread per sample (no aggregation), so the pt-pmp normalization
 # vb_tool stack applies would only throw information away.
 # Always returns 0 (cron-friendly; failures are data, not exit codes).
+# _awr_thr_cpu_ticks <lwpid> -> that thread's OWN utime+stime (clock ticks).
+# Only /proc/<tgid>/task/<lwpid>/stat is per-thread: EVERY top-level
+# /proc/<pid-or-tid>/stat -- including /proc/<tid>/stat for a plain worker
+# thread -- reports the whole thread GROUP's aggregated utime+stime (identical
+# numbers for every thread; this is the `ps` process view, and it is why
+# top -H reads the task dir). Reading the top-level path made every
+# Background Threads CPU% show the whole-instance CPU (~5000% on a busy box,
+# all rows in lockstep). tgid is resolved from the thread's own status file;
+# unreadable lwpid -> empty output (caller renders '-').
+_awr_thr_cpu_ticks() {
+    local tg
+    tg=$(awk '/^Tgid:/{print $2}' "/proc/$1/status" 2>/dev/null)
+    awk '{n=split($0,p,")"); m=split(p[2],f," "); print f[12]+f[13]}' "/proc/${tg:-$1}/task/$1/stat" 2>/dev/null
+}
 _awr_lt_stack_sample() {
     local root="$1" ts="$2"
     # 5-minute cadence gate from the sample ts (minute = chars 15-16)
@@ -30754,7 +30906,7 @@ _awr_lt_stack_sample() {
     local out
     # ---- long transaction monitor: exactly one row per sample ----
     out=$(PGCONNECT_TIMEOUT=15 PGOPTIONS='-c statement_timeout=15000' \
-          psql -d postgres -tAF',' -c "with lt as (select count(*)::text as long_cnt, coalesce(sum(case when state like 'idle in transaction%' then 1 else 0 end),0)::text as itx_cnt, coalesce(sum(case when state = 'active' then 1 else 0 end),0)::text as act_cnt from pg_stat_activity where xact_start is not null and xact_start < now() - interval '60 seconds' and pid <> pg_backend_pid() and application_name <> 'workload' and (state like 'idle in transaction%' or state = 'active')), o as (select a.pid::text as pid, a.xact_start::timestamp(0)::text as xstart, a.state as state, coalesce(w.wait_status,'') as ws, coalesce(w.wait_event,'') as we, a.unique_sql_id::text as usi from (select * from pg_stat_activity where xact_start is not null and pid <> pg_backend_pid() and application_name <> 'workload' and (state like 'idle in transaction%' or state = 'active') order by xact_start, pid limit 1) a left join pg_thread_wait_status w on w.tid = a.pid) select lt.long_cnt, lt.itx_cnt, lt.act_cnt, coalesce(o.pid,''), coalesce(o.xstart,''), coalesce(o.state,''), coalesce(o.ws,''), coalesce(o.we,''), coalesce(o.usi,''), gs_txid_oldestxmin()::text, case when pg_is_in_recovery() then '-' else txid_current()::text end from lt left join o on true" 2>/dev/null)
+          psql -d postgres -tAF',' -c "with lt as (select count(*)::text as long_cnt, coalesce(sum(case when state like 'idle in transaction%' then 1 else 0 end),0)::text as itx_cnt, coalesce(sum(case when state = 'active' then 1 else 0 end),0)::text as act_cnt from pg_stat_activity where xact_start is not null and xact_start < now() - interval '60 seconds' and pid <> pg_backend_pid() and application_name not in ('workload','WDRSnapshot') and (state like 'idle in transaction%' or state = 'active')), o as (select a.pid::text as pid, a.xact_start::timestamp(0)::text as xstart, a.state as state, coalesce(w.wait_status,'') as ws, coalesce(w.wait_event,'') as we, a.unique_sql_id::text as usi from (select * from pg_stat_activity where xact_start is not null and pid <> pg_backend_pid() and application_name not in ('workload','WDRSnapshot') and (state like 'idle in transaction%' or state = 'active') order by xact_start, pid limit 1) a left join pg_thread_wait_status w on w.tid = a.pid) select lt.long_cnt, lt.itx_cnt, lt.act_cnt, coalesce(o.pid,''), coalesce(o.xstart,''), coalesce(o.state,''), coalesce(o.ws,''), coalesce(o.we,''), coalesce(o.usi,''), gs_txid_oldestxmin()::text, case when pg_is_in_recovery() then '-' else txid_current()::text end from lt left join o on true" 2>/dev/null)
     if [ "$?" -ne 0 ] || [ -z "$out" ]; then
         printf '%s,error\n' "$ts" >> "$lf"
     else
@@ -30770,23 +30922,35 @@ _awr_lt_stack_sample() {
         be_list=""
     fi
     # ---- per-thread CPU% over ONE 1s /proc window, taken with the sample:
-    # utime+stime (fields 14+15, clock ticks) read twice 1s apart on every
-    # candidate lwpid; delta*100/CLK_TCK = CPU%. The same delta picks the
-    # highest-CPU AutoVacWorker when several run. Unreadable lwpid -> ''.
-    local clk; clk=$(getconf CLK_TCK 2>/dev/null || echo 100)
+    # utime+stime (clock ticks, /proc/<tgid>/task/<tid>/stat fields 14+15 of
+    # the post-comm portion -- the task path, see _awr_thr_cpu_ticks) read
+    # twice 1s apart on every candidate lwpid; delta*100/CLK_TCK
+    # = CPU% (same formula as `top -Hp`). The same delta picks the highest-CPU
+    # AutoVacWorker when several run. Unreadable lwpid -> ''.
+    # USER_HZ is 100 on Linux and that's what /proc/<tid>/stat utime/stime
+    # are counted in. Some embedded kernels / containers return 1 instead
+    # of 100 from `getconf CLK_TCK`, which inflates the formula by 100x.
+    # Use getconf as primary; only trust 100; fall back to 100 otherwise
+    # (matches the actual /proc/<tid>/stat tick unit).
+    # The awk splits on ')' first so comm containing spaces (Wal Writer /
+    # Wal Writer Auxiliary / WalSender to Standby[dn_6002] / parallel redo
+    # worker ...) does not shift the utime/stime field positions.
+    local clk
+    clk=$(getconf CLK_TCK 2>/dev/null)
+    case "$clk" in 100) ;; *) clk=100 ;; esac
     local -a rows=() cpu1=() cpu=()
     local idx=0 name tid ws we lwp x d i avbest=-1
     while IFS='|' read -r name tid ws we lwp; do
         [ -n "$name" ] || continue
         rows[idx]="$name|$tid|$ws|$we|$lwp"
-        cpu1[idx]=$(awk '{print $14+$15}' "/proc/$lwp/stat" 2>/dev/null)
+        cpu1[idx]=$(_awr_thr_cpu_ticks "$lwp")
         idx=$((idx+1))
     done < <(printf '%s\n' "$be_list")
     [ "$idx" -gt 0 ] && sleep 1
     i=0
     while [ "$i" -lt "$idx" ]; do
         lwp="${rows[$i]##*|}"
-        x=$(awk '{print $14+$15}' "/proc/$lwp/stat" 2>/dev/null)
+        x=$(_awr_thr_cpu_ticks "$lwp")
         if [ -n "$x" ] && [ -n "${cpu1[$i]}" ]; then
             d=$(( x - cpu1[$i] )); [ "$d" -lt 0 ] && d=0
             cpu[$i]=$(awk -v d="$d" -v c="$clk" 'BEGIN{printf "%d", d*100/c}')
@@ -30873,7 +31037,7 @@ _awr_lt_stack_sample() {
     # JOIN activity; empty for background threads -> '||'). ----
     local mlf="$root/sessmem_$(date +%Y%m%d).log" mout
     mout=$(PGCONNECT_TIMEOUT=15 PGOPTIONS='-c statement_timeout=15000' \
-          psql -d postgres -tAF'|' -c "with p as (select sessid, sum(totalsize) tot from gs_session_memory_detail group by sessid order by tot desc limit 1), c as (select contextname, sum(totalsize) sz from gs_session_memory_detail where sessid=(select sessid from p) group by contextname order by sz desc limit 3) select p.sessid, p.tot, coalesce(a.pid::text,''), coalesce(a.usename,''), coalesce(a.state,''), coalesce(a.unique_sql_id::text,''), coalesce((select string_agg(contextname||'('||sz||')', ', ') from c), ''), coalesce(a.application_name,'')||'|'||coalesce(a.client_addr::text,'')||'|'||coalesce(a.client_port::text,'') from p left join pg_stat_activity a on a.pid::text = split_part(p.sessid, '.', 2)" 2>/dev/null)
+          psql -d postgres -tAF'|' -c "with p as (select sessid, sum(totalsize) tot from gs_session_memory_detail group by sessid order by tot desc limit 1), c as (select contextname, sum(totalsize) sz from gs_session_memory_detail where sessid in (select sessid from p) group by contextname order by sz desc limit 3) select p.sessid, p.tot, coalesce(a.pid::text,''), coalesce(a.usename,''), coalesce(a.state,''), coalesce(a.unique_sql_id::text,''), coalesce((select string_agg(contextname||'('||sz||')', ', ') from c), ''), coalesce(a.application_name,'')||'|'||coalesce(a.client_addr::text,'')||'|'||coalesce(a.client_port::text,'') from p left join pg_stat_activity a on a.pid::text = split_part(p.sessid, '.', 2)" 2>/dev/null)
     if [ "$?" -ne 0 ]; then
         printf '%s|error\n' "$ts" >> "$mlf"
     elif [ -z "$mout" ]; then
