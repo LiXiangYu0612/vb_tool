@@ -24144,6 +24144,41 @@ _awr_collect() {
     if [ -n "$_dpid" ] && [ -r "/proc/$_dpid/limits" ]; then
         { echo "user $(id -un 2>/dev/null)"; cat "/proc/$_dpid/limits"; } > "$osd/limits" 2>/dev/null
     fi
+    # open fd classification: SAME postmaster, SAME instant as status/limits
+    # above. VB is single-process multi-thread -- every backend's fd lives on
+    # the postmaster, so ONE /proc/<pid>/fd walk covers the whole instance.
+    # Deleted fds (symlink target suffixed " (deleted)") count PER CLASS as a
+    # second number: temp spills are commonly deleted-while-held (unlink at
+    # close), db files deleted-but-held are a DROP/TRUNCATE signal. Classes
+    # match on path SEGMENTS (base/<db>/<digits>, /pgsql_tmp/, /pg_xlog/ ...)
+    # so a split log deploy (logdir outside datadir) needs no data_dir
+    # knowledge here. Output: "<class>|<live>|<deleted>" in a fixed order,
+    # every class emitted (zeros included -- user 2026-09-17).
+    if [ -n "$_dpid" ] && [ -d "/proc/$_dpid/fd" ]; then
+        ls -l "/proc/$_dpid/fd" 2>/dev/null | awk '
+            { t = $0; sub(/^.* -> /, "", t)
+              dflag = 0
+              if (t ~ / \(deleted\)$/) { dflag = 1; sub(/ \(deleted\)$/, "", t) }
+              c = "other"
+              if (t ~ /^socket:\[/) c = "socket"
+              else if (t ~ /^pipe:\[/) c = "pipe"
+              else if (t ~ /^\/dev\//) c = "device"
+              else if (t ~ /\/pgsql_tmp\//) c = "temp files"
+              else if (t ~ /\/base\/[0-9]+\/t[0-9]/) c = "temp files"
+              else if (t ~ /\/pg_xlog\//) c = "wal segments"
+              else if (t ~ /\/pg_clog\/|\/pg_csnlog\/|\/pg_multixact\/|\/pg_twophase\//) c = "tx status"
+              else if (t ~ /\/pg_cbm\//) c = "cbm"
+              else if (t ~ /\/global\/pg_dw/) c = "double write"
+              else if (t ~ /\/base\/[0-9]+\/[0-9]+(_fsm|_vm|_init)?$/) c = "data files (base)"
+              else if (t ~ /\/global\/[0-9]+(_fsm|_vm|_init)?$/) c = "data files (global)"
+              else if (t ~ /\.lock$/) c = "lock files"
+              else if (t ~ /\/pg_log\/|\/pg_audit\/|\/asp_data\/|\/gs_profile\/|\/sql_monitor\/|gs_obs\./) c = "server logs"
+              live[c]++; if (dflag) dcount[c]++
+            }
+            END { n = split("data files (base)|data files (global)|temp files|wal segments|tx status|double write|cbm|server logs|lock files|socket|pipe|device|other", ord, "|")
+                  for (i = 1; i <= n; i++) print ord[i] "|" live[ord[i]]+0 "|" dcount[ord[i]]+0 }' \
+            > "$osd/db_fd_types" 2>/dev/null
+    fi
     # sysctl: FULL kernel parameter dump via `sysctl -a` (user 2026-09-17:
     # the complete set, not a curated list). Keys the collector user cannot
     # read are printed to stderr by sysctl and simply do not appear -- that
@@ -24909,7 +24944,7 @@ def load_window(d):
         except Exception:
             w["meta"] = {}
     for phase in ("begin", "end"):
-        for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi", "softnet_stat", "net_rtt", "df_fs", "file_nr", "db_proc", "limits", "sysctl", "dmesg"):
+        for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi", "softnet_stat", "net_rtt", "df_fs", "file_nr", "db_proc", "limits", "db_fd_types", "sysctl", "dmesg"):
             p = os.path.join(d, "os", phase, f)
             w["os"][(phase, f)] = _read_os_text(p) if os.path.isfile(p) else ""
         for t in ("statement", "wait_events", "instance_time", "database", "pagewriter",
@@ -24940,7 +24975,7 @@ def load_snap(d, tables=None):
             s["meta"] = json.load(open(mp))
         except Exception:
             s["meta"] = {}
-    for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi", "softnet_stat", "net_rtt", "df_fs", "file_nr", "db_proc", "limits", "sysctl", "dmesg"):
+    for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi", "softnet_stat", "net_rtt", "df_fs", "file_nr", "db_proc", "limits", "db_fd_types", "sysctl", "dmesg"):
         p = os.path.join(d, "os", f)
         s["os"][f] = _read_os_text(p) if os.path.isfile(p) else ""
     _DB_TABLES = ("statement", "wait_events", "instance_time", "database", "pagewriter",
@@ -25043,7 +25078,7 @@ def build_window_from_snaps(begin_dir, end_dir, sqltext_root=None, load_sqltext=
     b = load_snap(begin_dir, db_tables)
     e = load_snap(end_dir, db_tables)
     win = {"meta": {}, "os": {}, "db": {}}
-    for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi", "softnet_stat", "net_rtt", "df_fs", "file_nr", "db_proc", "limits", "sysctl", "dmesg"):
+    for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi", "softnet_stat", "net_rtt", "df_fs", "file_nr", "db_proc", "limits", "db_fd_types", "sysctl", "dmesg"):
         win["os"][("begin", f)] = b["os"].get(f, "")
         win["os"][("end", f)] = e["os"].get(f, "")
     for t in ("statement", "wait_events", "instance_time", "database", "pagewriter",
@@ -28252,6 +28287,41 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                              % (esc(_lk), _tag,
                                 esc(_lb[_ix]) if _lb else "-",
                                 esc(_le[_ix]) if _le else "-"))
+        # Open FDs by type: fixed class order, EVERY class carries a deleted
+        # sub-row even at zero (user 2026-09-17: always display, 0 included).
+        # Deleted = symlink target suffixed " (deleted)": temp spills are
+        # routinely deleted-while-held, db files deleted-but-held point at
+        # DROP/TRUNCATE. Whole block hidden on old snaps / unreadable fd dir.
+        def _fdmap(txt):
+            out = {}
+            for ln in (txt or "").splitlines():
+                f = ln.split("|")
+                if len(f) == 3:
+                    try:
+                        out[f[0]] = (int(f[1]), int(f[2]))
+                    except ValueError:
+                        pass
+            return out
+        _fdb = _fdmap(win["os"].get(("begin", "db_fd_types"), ""))
+        _fde = _fdmap(win["os"].get(("end", "db_fd_types"), ""))
+        if _fdb or _fde:
+            parts.append('<tr><td colspan="4"><b>Open FDs by type</b></td></tr>')
+            _tb = _te = 0
+            for _fc in ("data files (base)", "data files (global)", "temp files",
+                        "wal segments", "tx status", "double write", "cbm",
+                        "server logs", "lock files", "socket", "pipe",
+                        "device", "other"):
+                _b = _fdb.get(_fc, (0, 0)); _e = _fde.get(_fc, (0, 0))
+                _tb += _b[0] + _b[1]; _te += _e[0] + _e[1]
+                for _lbl, _bi, _ei, _sub in ((_fc, _b[0], _e[0], False),
+                                             ("deleted", _b[1], _e[1], True)):
+                    parts.append('<tr><td%s>%s</td><td class="n">%d</td>'
+                                 '<td class="n">%d</td><td class="n">%+d</td></tr>'
+                                 % (' class="muted" style="padding-left:2em"' if _sub else "",
+                                    esc(_lbl), _bi, _ei, _ei - _bi))
+            parts.append('<tr><td><b>total open fds</b></td><td class="n"><b>%d</b></td>'
+                         '<td class="n"><b>%d</b></td><td class="n"><b>%+d</b></td></tr>'
+                         % (_tb, _te, _te - _tb))
         parts.append('</table>')
         if _lmb or _lme:
             _usr = ""
