@@ -10400,6 +10400,12 @@ run_collect_log_nodes_info() {
         # heredoc build time (local node eval sees the caller's locals anyway)
         begin_time='$begin_time'
         end_time='$end_time'
+        vb_tool_path='$0'
+        if [ ! -x "\$vb_tool_path" ]; then
+            for _vt_cand in "\$HOME/vb_tool_dev" "/home/vastbase/vb_tool_dev" "\$(command -v vb_tool 2>/dev/null)"; do
+                [ -x "\$_vt_cand" ] && vb_tool_path="\$_vt_cand" && break
+            done
+        fi
 	    mkdir -p $nd/{osinfo,dbinfo,pglog,cmlog,dbconf,ffic_log}
 
         # 1. OSWatcher Collection
@@ -10490,7 +10496,43 @@ run_collect_log_nodes_info() {
             safe_exec "Wal Segments Backup" "run_collect_log_xlog '$begin_time' '$end_time' '$max_xlog' '$nd'" "1800s"
         fi
 
-        # 10. Done -- NO per-node tar: raw files stay under <node>/ and the
+        # 10. AWR reports: if AWR is deployed on this node for the CURRENT
+        # port, generate one awrrpt per consecutive snapshot pair within the
+        # collect_log time range (user 2026-09-17: 5 snaps in range = 4
+        # reports; standby included -- the snapshots are per-port regardless
+        # of role). Reports go into <node>/awr/.
+        # 10. AWR reports per snapshot interval in the time range
+        mkdir -p "$nd/awr"
+        if [ -n "\$vb_tool_path" ] && [ -x "\$vb_tool_path" ]; then
+            _awr_port="\${PGPORT:-5432}"
+            _awr_root="\$HOME/.vb_tool/awrs/\$_awr_port"
+            if [ -d "\$_awr_root" ]; then
+                _b_ep=\$(date -d "$begin_time" +%s 2>/dev/null)
+                _e_ep=\$(date -d "$end_time" +%s 2>/dev/null)
+                _snap_list=""
+                for _sd in \$(ls -d "\$_awr_root"/snap_* 2>/dev/null | sort -t_ -k2 -n); do
+                    [ -f "\$_sd/meta.json" ] || continue
+                    _ts=\$(sed -n 's/.*"ts" *: *"\([^"]*\)".*/\1/p' "\$_sd/meta.json" 2>/dev/null)
+                    _tep=\$(date -d "\$_ts" +%s 2>/dev/null)
+                    [ -z "\$_tep" ] && continue
+                    if [ "\$_tep" -ge "\$_b_ep" ] 2>/dev/null && [ "\$_tep" -le "\$_e_ep" ] 2>/dev/null; then
+                        _snap_list="\$_snap_list \$(basename "\$_sd" | sed 's/snap_//')"
+                    fi
+                done
+                _snaps=(\$_snap_list)
+                if [ \${#_snaps[@]} -ge 2 ]; then
+                    echo "[INFO ] AWR: \${#_snaps[@]} snapshots in range -> \$(( \${#_snaps[@]} - 1 )) report(s)" >&2
+                    for ((i=0; i<\${#_snaps[@]}-1; i++)); do
+                        "\$vb_tool_path" awr awrrpt begin "\${_snaps[\$i]}" end "\${_snaps[\$((i+1))]}" >/dev/null 2>&1
+                        _rpt=\$(ls -t "\$HOME/.vb_tool/awr_reports"/*.html 2>/dev/null | head -1)
+                        [ -n "\$_rpt" ] && [ -f "\$_rpt" ] && cp "\$_rpt" "$nd/awr/"
+                    done
+                    echo "[INFO ] AWR: \$(ls "$nd/awr"/*.html 2>/dev/null | wc -l) report(s) saved to $nd/awr" >&2
+                fi
+            fi
+        fi
+
+        # 11. Done -- NO per-node tar: raw files stay under <node>/ and the
         # outermost bundle tar is the single packaging step (remote nodes are
         # pulled as an uncompressed tar stream by the caller)
         if [ -d "$nd" ]; then
