@@ -1,13 +1,13 @@
 #!/bin/bash
 #--------------------------------------------------------------------------------
 #-- File name:   vb_tool
-#-- Version  ：  v2.4.9
-#-- Commit at： 2026-09-16 22:40:00
+#-- Version  ：  v2.5.0
+#-- Commit at： 2026-09-17 09:00:00
 #-- Purpose:     Vastbase Script Tool
 #-- Author:      MVS & Second-line Team 
 #--------------------------------------------------------------------------------
 set -o pipefail
-export VB_TOOL_VERSION="v2.4.9"
+export VB_TOOL_VERSION="v2.5.0"
 show_help() {
     echo "Vastbase Script Tool (vb_tool)"
     echo ""
@@ -24035,6 +24035,81 @@ _awr_collect() {
     if [ -r /proc/net/snmp ]; then cp /proc/net/snmp "$osd/net_snmp" 2>/dev/null; fi
     if [ -r /proc/net/netstat ]; then cp /proc/net/netstat "$osd/net_netstat" 2>/dev/null; fi
     if [ -r /proc/net/softnet_stat ]; then cp /proc/net/softnet_stat "$osd/softnet_stat" 2>/dev/null; fi
+    # file-nr: "<allocated> <unused> <max>" handle gauge -> System Activity
+    # Begin/End column; absent on odd systems -> no file -> renderer hides it
+    if [ -r /proc/sys/fs/file-nr ]; then cp /proc/sys/fs/file-nr "$osd/file_nr" 2>/dev/null; fi
+    # db_proc: identity of THIS instance's postmaster. The awr context
+    # already guarantees the right port ($PGPORT: -P export / cron pin; the
+    # storage root awrs/<port>/ and every \copy above use it) -- so map
+    # port -> listener pid via ss (listener socket owned by vastbase itself,
+    # same-user /proc visibility). pid|VmSize(kB)|VmRSS(kB)|Threads plus the
+    # kernel's EFFECTIVE affinity (Cpus_allowed_list: cpuset cgroup + any
+    # taskset pinning, already merged) from the same status file.
+    _dpid=$(ss -lntp 2>/dev/null | grep -oP ":${PGPORT:-5432}\b.*pid=\K[0-9]+" | head -1)
+    if [ -n "$_dpid" ] && [ -r "/proc/$_dpid/status" ]; then
+        awk -v p="$_dpid" '/^VmSize:/{v=$2} /^VmRSS:/{r=$2} /^Threads:/{t=$2} \
+                /^Cpus_allowed_list:/{c=$2} END{print p"|"v+0"|"r+0"|"t+0; if (c != "") print "cpuset " c}' \
+                "/proc/$_dpid/status" > "$osd/db_proc" 2>/dev/null
+    fi
+    # limits: the POSTMASTER's ACTUAL rlimits (/proc/<pid>/limits, world-
+    # readable) -- deliberately NOT a fresh login shell's `ulimit -a`: the
+    # running process's limits are the authoritative ones (limits.conf,
+    # systemd overrides and inherited env all already resolved at start; the
+    # DB user's name is irrelevant and need not be guessed). First line =
+    # "user <name>" for context; the rest is the proc file verbatim.
+    if [ -n "$_dpid" ] && [ -r "/proc/$_dpid/limits" ]; then
+        { echo "user $(id -un 2>/dev/null)"; cat "/proc/$_dpid/limits"; } > "$osd/limits" 2>/dev/null
+    fi
+    # sysctl: FULL kernel parameter dump via `sysctl -a` (user 2026-09-17:
+    # the complete set, not a curated list). Keys the collector user cannot
+    # read are printed to stderr by sysctl and simply do not appear -- that
+    # IS the permission filter. Split at the FIRST " = " so values may
+    # themselves contain " = ". "key|value" lines; renderer hides old snaps.
+    if command -v sysctl >/dev/null 2>&1; then
+        LC_ALL=C sysctl -a 2>/dev/null | sed -E 's/^([^=]+) = (.*)$/\1|\2/' > "$osd/sysctl"
+        [ -s "$osd/sysctl" ] || rm -f "$osd/sysctl"
+    fi
+    # dmesg: INCREMENTAL kernel capture -- only lines NEWER than the last
+    # line of the PREVIOUS snapshot's os/dmesg (first snapshot = full dump;
+    # no blind tail: window coverage is by construction). Each snap stores
+    # its own chunk; the renderer unions the chunks of every snap with ts in
+    # (begin, end] -- the same tiling as the ASH flush. gawk mktime()
+    # converts the "Thu Sep 17 00:53:07 2026" prefix (LC_ALL=C keeps it
+    # English) for the floor comparison; untimestamped continuation lines
+    # ride their parent's decision. dmesg_restrict=1 -> "status denied".
+    _dmout=$(LC_ALL=C timeout 10 dmesg -T 2>&1); _dmrc=$?
+    # "denied" ONLY on a real auth failure (restrict=1) or an EMPTY failed
+    # read; a timeout kill (rc=124) that already yielded timestamped lines
+    # is still usable partial data, not "denied"
+    if printf '%s' "$_dmout" | head -1 | grep -qi "read kernel buffer failed\|permission denied" \
+       || { [ "$_dmrc" -ne 0 ] && ! printf '%s' "$_dmout" | grep -q '^\['; }; then
+        echo "status denied" > "$osd/dmesg"
+    else
+        # floor = LAST line of the CHRONOLOGICALLY newest previous snap's
+        # chunk: ls -dt (mtime) newest-first + break (glob order is
+        # lexicographic -- snap_999 sorts AFTER snap_1172 and would feed a
+        # stale floor -> duplicate lines; the break also avoids reading all
+        # history chunks every create)
+        _dmfloor=""
+        for _d in $(ls -dt "${target%/*}"/snap_* 2>/dev/null); do
+            [ -f "$_d/os/dmesg" ] && [ "$_d" != "$target" ] || continue
+            _lts=$(sed -n 's/^\[\([A-Z][a-z][a-z] [A-Z][a-z][a-z] [ 0-9][0-9] [0-9:]* [0-9]*\)\].*/\1/p' "$_d/os/dmesg" | tail -1)
+            [ -n "$_lts" ] && { _dmfloor=$(date -d "$_lts" +%s 2>/dev/null); break; }
+        done
+        printf 'status ok\n' > "$osd/dmesg"
+        # cap the FIRST full dump on noisy hosts (an 8MB ring can be ~50K
+        # lines; incremental chunks afterwards are tiny)
+        printf '%s\n' "$_dmout" | awk -v floor="$_dmfloor" '
+            BEGIN { n = split("Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec", mo, " ")
+                    for (i = 1; i <= n; i++) M[mo[i]] = i
+                    laste = -1 }
+            { if (match($0, /^\[[A-Z][a-z][a-z] ([A-Z][a-z][a-z]) +([0-9]+) ([0-9][0-9]:[0-9][0-9]:[0-9][0-9]) ([0-9]{4})\]/, m)) {
+                  split(m[3], T, ":")
+                  e = mktime(m[4] " " M[m[1]] " " m[2] " " T[1] " " T[2] " " T[3])
+                  laste = e
+                  if (floor == "" || e > floor) print
+              } else if (laste >= 0 && (floor == "" || laste > floor)) print }' | tail -5000 >> "$osd/dmesg"
+    fi
     # net_rtt: raw `ss -tin state established` (END-snap instantaneous per-conn
     # tcp_info: rtt/cwnd/retrans/send-q; loopback included here, the renderer
     # filters). Capped at 512 KB so a many-thousand-conn instance cannot bloat
@@ -24700,6 +24775,18 @@ def fetch_meminfo():
         pass
     return fields
 
+def parse_file_nr(txt):
+    """/proc/sys/fs/file-nr = "<allocated> <unused> <max>" (one line).
+    Returns (used, max) or None when absent/unparseable (old snaps)."""
+    for ln in (txt or "").splitlines():
+        f = ln.split()
+        if len(f) >= 3:
+            try:
+                return int(f[0]), int(f[2])
+            except ValueError:
+                return None
+    return None
+
 def parse_meminfo(txt):
     """Parse /proc/meminfo text into {field: kB_int}."""
     fields = {}
@@ -24732,7 +24819,7 @@ def load_window(d):
         except Exception:
             w["meta"] = {}
     for phase in ("begin", "end"):
-        for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi", "softnet_stat", "net_rtt", "df_fs"):
+        for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi", "softnet_stat", "net_rtt", "df_fs", "file_nr", "db_proc", "limits", "sysctl", "dmesg"):
             p = os.path.join(d, "os", phase, f)
             w["os"][(phase, f)] = _read_os_text(p) if os.path.isfile(p) else ""
         for t in ("statement", "wait_events", "instance_time", "database", "pagewriter",
@@ -24763,7 +24850,7 @@ def load_snap(d, tables=None):
             s["meta"] = json.load(open(mp))
         except Exception:
             s["meta"] = {}
-    for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi", "softnet_stat", "net_rtt", "df_fs"):
+    for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi", "softnet_stat", "net_rtt", "df_fs", "file_nr", "db_proc", "limits", "sysctl", "dmesg"):
         p = os.path.join(d, "os", f)
         s["os"][f] = _read_os_text(p) if os.path.isfile(p) else ""
     _DB_TABLES = ("statement", "wait_events", "instance_time", "database", "pagewriter",
@@ -24866,7 +24953,7 @@ def build_window_from_snaps(begin_dir, end_dir, sqltext_root=None, load_sqltext=
     b = load_snap(begin_dir, db_tables)
     e = load_snap(end_dir, db_tables)
     win = {"meta": {}, "os": {}, "db": {}}
-    for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi", "softnet_stat", "net_rtt", "df_fs"):
+    for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi", "softnet_stat", "net_rtt", "df_fs", "file_nr", "db_proc", "limits", "sysctl", "dmesg"):
         win["os"][("begin", f)] = b["os"].get(f, "")
         win["os"][("end", f)] = e["os"].get(f, "")
     for t in ("statement", "wait_events", "instance_time", "database", "pagewriter",
@@ -25251,6 +25338,88 @@ def _fs_otype(r):
     if r.get("parttype") in ("p", "s"):
         return "partitioned table"
     return "table"
+
+# ---- Kernel messages (dmesg) ---- pattern categories merged from the
+# first-pass list AND kernel-source-verified strings (arch/x86/mm/fault.c
+# "segfault at", sch_generic.c "NETDEV WATCHDOG", tcp_input.c "Possible SYN
+# flooding", mm/oom_kill.c "Killed process", watchdog.c "BUG: soft lockup",
+# rcu/tree_stall.h "self-detected stall", therm_throt "clock throttled");
+# 204 live-buffer tested: zero false positives on a healthy 975-line buffer.
+_DMESG_PATTERNS = [
+    ("Kernel crash", r"kernel panic|oops:|kernel bug|general protection fault|unable to handle kernel|call trace"),
+    ("Memory/OOM", r"out of memory|oom-killer|killed process|memory cgroup out of memory|page allocation failure|bad page state|slab out of memory|oom_reaper"),
+    ("Process crash", r"segfault at|traps:|core dump"),
+    ("Storage", r"i/o error|medium error|critical (target|medium) error|device offline|rejecting i/o|timeout.*(abort|reset)|task abort|scsi.*(error|reset|abort)|nvme.*(timeout|resetting)|(mpt3sas|megaraid|qla2xxx|aacraid|hpsa).*(error|fail|down)|write same failed|lost page write|device-mapper.*(error|fail)"),
+    ("Multipath", r"path (failed|reinstate)|multipath.*(fail|error)"),
+    ("Filesystem", r"ext4-fs (error|warning)|xfs.*(error|corrupt|log_force)|journal has aborted|metadata corruption|(remounting|filesystem).*read-only|overlayfs.*error"),
+    ("CPU/Sched", r"soft lockup|hard lockup|nmi watchdog|rcu.*stall|detected stall|blocked for more than|hung task|scheduling while atomic|stuck on cpu"),
+    ("Network", r"netdev watchdog|transmit (queue .*timed|timed)|syn flooding|orphaned sockets|tcp: out of memory|conntrack.*(full|dropping)|nic link is down|link is (down|not ready)|reset adapter|link status definitely|bond.*(down|up)"),
+    ("Power/HW", r"machine check|mce:|hardware error|edac|ecc.*(error|corrected|uncorrected)|temperature above threshold|clock throttled|power limit|thermal|clocksource.*unstable"),
+]
+_DMESG_EXCLUDE = re.compile(r"^(audit:|selinux:|systemd\[|type=1400)", re.I)
+# context lines that ride the previous matched event even when the kernel
+# split the dump into separately-timestamped printks (newer kernels do):
+# stack frames (" func+0x1a/0x30"), register/code dumps, trace headers
+_DMESG_CONTEXT = re.compile(
+    r"^\s*[\w.\[\]:]+\+0x[0-9a-fA-F]+/"
+    r"|^(Code|RSP|RIP|Call Trace|CPU|PGD|P4D|Oops|Hardware name|Comm|Tainted|Mem-Info|Modules|CR2|DS|ES|FS|GS):?"
+    r"|^\s*\?+$|^---+ cut here ---")
+_DMESG_REBOOT = re.compile(r"^Linux version ", re.I)
+_DMESG_TS = re.compile(r"^\[([A-Z][a-z]{2} [A-Z][a-z]{2} +\d+ \d\d:\d\d:\d\d \d{4})\] ?(.*)$")
+
+def load_dmesg_chunks(win, repl_dir):
+    """Union the INCREMENTAL os/dmesg chunks of every snap with ts in
+    (begin_ts, end_ts] -- the collector stores only lines newer than the
+    previous snap's last line, so the union tiles the window exactly (same
+    model as the ASH flush). Returns ([(epoch, text)], status) with status
+    in {"ok", "denied", None}."""
+    if not repl_dir:
+        return [], None
+    from datetime import datetime
+    bts = str(win["meta"].get("begin_ts", ""))
+    ets = str(win["meta"].get("end_ts", ""))
+    lines, status = [], None
+    for d in sorted(glob.glob(os.path.join(repl_dir, "snap_*"))):
+        mp = os.path.join(d, "meta.json")
+        f = os.path.join(d, "os", "dmesg")
+        if not os.path.isfile(mp) or not os.path.isfile(f):
+            continue
+        try:
+            ts = json.load(open(mp)).get("ts", "")
+        except Exception:
+            continue
+        if not (bts < ts <= ets):
+            continue
+        try:
+            txt = open(f, encoding="utf-8", errors="replace").read()
+        except OSError:
+            continue
+        _last_e = None
+        for ln in txt.splitlines():
+            if ln.startswith("status "):
+                st = ln[7:].strip()
+                status = st if status is None or st == "denied" else status
+                continue
+            m = _DMESG_TS.match(ln)
+            if m:
+                try:
+                    e = datetime.strptime(m.group(1), "%a %b %d %H:%M:%S %Y").timestamp()
+                except ValueError:
+                    continue
+                _last_e = e
+                lines.append((e, m.group(2), False))
+            elif _last_e is not None:
+                # continuation line (call-trace stack frames, Code:/RSP:
+                # dumps carry no timestamp of their own) rides the parent
+                lines.append((_last_e, ln, True))
+    # dedupe insurance: overlapping chunk boundaries (manual snaps / floor
+    # races) must not duplicate an event row -- preserve first-seen order,
+    # then a STABLE sort on epoch only: intra-event line order (trace
+    # frames!) must survive, sorting by text would alphabetize the stack
+    seen = set()
+    lines = [l for l in lines if not (l in seen or seen.add(l))]
+    lines.sort(key=lambda t: t[0])
+    return lines, status
 
 def loadprofile_iostat_rows(win, duration):
     """(label, begin, end, delta, per_sec, mode, ok) rows from rel_iostat.csv --
@@ -25800,7 +25969,7 @@ def os_minute_mem_gauges(samples):
     return out
 
 def os_minute_disk_series(samples):
-    """({dev: [(ts, rates, r_await_ms, w_await_ms)]}, discard_supported).
+    """({dev: [(ts, rates, r_await_ms, w_await_ms, util_pct)]}, discard_supported).
     Consecutive same-device samples give the per-minute delta (idle
     device-minutes skipped, like the whole-window table skips idle devs)."""
     per_dev = {}
@@ -25828,6 +25997,8 @@ def os_minute_disk_series(samples):
             rd_tick = max(0, b.get("rd_ticks", 0) - a.get("rd_ticks", 0))
             wr_tick = max(0, b.get("wr_ticks", 0) - a.get("wr_ticks", 0))
             wtick = max(0, b.get("weighted_ticks", 0) - a.get("weighted_ticks", 0))
+            iotick = max(0, b.get("io_ticks", 0) - a.get("io_ticks", 0))
+            util_pct = (iotick / (dt * 1000.0) * 100.0) if dt else None
             dc_ios = _dd(b, a, "dc_ios")
             fl_ios = _dd(b, a, "fl_ios")
             if rd_sec == 0 and wr_sec == 0 and rd_ios + wr_ios == 0:
@@ -25838,7 +26009,7 @@ def os_minute_disk_series(samples):
                 "discard_iops": (dc_ios / dt) if dc_ios is not None else None,
                 "flush_iops": (fl_ios / dt) if fl_ios is not None else None,
             }, (rd_tick / rd_ios) if rd_ios > 0 else None,
-               (wr_tick / wr_ios) if wr_ios > 0 else None))
+               (wr_tick / wr_ios) if wr_ios > 0 else None, util_pct))
     return out, discard_supported
 
 def os_minute_net_series(samples):
@@ -26005,8 +26176,8 @@ def osmin_cpu_table(samples, begin_ts):
 
 def osmin_disk_table(samples, begin_ts):
     per, dsup = os_minute_disk_series(samples)
-    rows = sorted((ts, dev, rt, ra, wa)
-                  for dev, lst in per.items() for ts, rt, ra, wa in lst
+    rows = sorted((ts, dev, rt, ra, wa, ut)
+                  for dev, lst in per.items() for ts, rt, ra, wa, ut in lst
                   if not begin_ts or ts >= str(begin_ts))
     if not rows:
         return _osmin_note(samples)
@@ -26014,9 +26185,9 @@ def osmin_disk_table(samples, begin_ts):
             '<th>Read B/s</th><th>Write B/s</th>')
     if dsup:
         head += '<th>Dscrd/s</th><th>Flush/s</th>'
-    head += '<th>r_await (ms)</th><th>w_await (ms)</th></tr>'
+    head += '<th>r_await (ms)</th><th>w_await (ms)</th><th>%util</th></tr>'
     h = [head]
-    for ts, dev, rt, ra, wa in rows:
+    for ts, dev, rt, ra, wa, ut in rows:
         cells = ('<td>%s</td><td>%s</td><td class="n">%.1f</td><td class="n">%.1f</td>'
                  '<td class="n">%s</td><td class="n">%s</td>' % (
                      esc(ts), esc(dev), rt["read_iops"], rt["write_iops"],
@@ -26028,6 +26199,7 @@ def osmin_disk_table(samples, begin_ts):
         cells += '<td class="n%s">%s</td><td class="n%s">%s</td>' % (
             lat_cell_cls(ra), ("%.1f" % ra) if ra is not None else "-",
             lat_cell_cls(wa), ("%.1f" % wa) if wa is not None else "-")
+        cells += '<td class="n">%s</td>' % (("%.1f%%" % ut) if ut is not None else "-")
         h.append('<tr>' + cells + '</tr>')
     h.append('</table>')
     return _fold("Per-minute detail", "".join(h))
@@ -26389,8 +26561,8 @@ def proc_net_ifaces(txt):
     return out
 
 def proc_disk_devs(txt):
-    """Per-device diskstats: rd_ios/rd_sectors/rd_ticks/wr_ios/wr_sectors/wr_ticks/weighted_ticks (ms)
-    + discard/flush counters (kernel 4.18+; None on older kernels)."""
+    """Per-device diskstats: rd_ios/rd_sectors/rd_ticks/wr_ios/wr_sectors/wr_ticks/io_ticks/
+    weighted_ticks (ms) + discard/flush counters (kernel 4.18+; None on older kernels)."""
     out = []
     for line in (txt or "").splitlines():
         f = line.split()
@@ -26401,6 +26573,7 @@ def proc_disk_devs(txt):
                 "name": f[2],
                 "rd_ios": to_num(f[3]), "rd_sectors": to_num(f[5]), "rd_ticks": to_num(f[6]),
                 "wr_ios": to_num(f[7]), "wr_sectors": to_num(f[9]), "wr_ticks": to_num(f[10]),
+                "io_ticks": to_num(f[12]),
                 "weighted_ticks": to_num(f[13]),
                 # kernel 4.18+ extra fields; None when the kernel does not report them
                 "dc_ios": to_num(f[14]) if len(f) > 14 else None,
@@ -26967,6 +27140,11 @@ def os_window_deltas(win):
         rd_tick_d = max(0, e.get("rd_ticks",0) - b.get("rd_ticks",0))
         wr_tick_d = max(0, e.get("wr_ticks",0) - b.get("wr_ticks",0))
         wtick_d  = max(0, e.get("weighted_ticks",0) - b.get("weighted_ticks",0))
+        iotick_d = max(0, e.get("io_ticks",0) - b.get("io_ticks",0))
+        # %util = busy-ms / wall-ms (dm stacks may exceed 100 -- honest as-is);
+        # avgqu-sz = weighted-ms / wall-ms (avg queue length, iostat formulas)
+        util_pct = (iotick_d / (dur * 1000.0) * 100.0) if dur else None
+        avgqu_sz = (wtick_d / (dur * 1000.0)) if dur else None
         dc_ios_d  = _dd(e, b, "dc_ios")
         dc_sec_d  = _dd(e, b, "dc_sectors")
         fl_ios_d  = _dd(e, b, "fl_ios")
@@ -26988,6 +27166,8 @@ def os_window_deltas(win):
             "discard_iops":  (dc_ios_d / dur) if dc_ios_d is not None else None,
             "discard_bytes": (dc_sec_d * 512) if dc_sec_d is not None else None,
             "flush_iops":    (fl_ios_d / dur) if fl_ios_d is not None else None,
+            "util_pct": util_pct,
+            "avgqu_sz": avgqu_sz,
         })
         rd_bytes += rd_sec_d * 512
         wr_bytes += wr_sec_d * 512
@@ -27896,6 +28076,13 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         if _t.get("currestab_begin") is not None:
             _th.append('<th class="n">TCP CurrEstab (Begin/End)</th>')
             _td.append('<td class="n">%d / %d</td>' % (_t["currestab_begin"], _t["currestab_end"]))
+    _fnb = parse_file_nr(win["os"].get(("begin", "file_nr"), ""))
+    _fne = parse_file_nr(win["os"].get(("end", "file_nr"), ""))
+    if _fnb and _fne:
+        _th.append('<th class="n">File Handles (used, max) Begin/End</th>')
+        _td.append('<td class="n">(%s, %s) / (%s, %s)</td>'
+                   % (fmt_int(_fnb[0]), fmt_int(_fnb[1]),
+                      fmt_int(_fne[0]), fmt_int(_fne[1])))
     if _t.get("opens_per_sec") is not None:
         note("TCP Opens/s = active+passive connections opened (host-aggregate "
              "/proc/net/snmp window delta).\n"
@@ -27904,6 +28091,88 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
              "TCP CurrEstab = established connections at the begin/end snap.")
     parts.append('<table class="t"><tr>%s</tr><tr>%s</tr></table>'
                  % ("".join(_th), "".join(_td)))
+    # DB Process: the postmaster listening on THIS awr's port (multi-instance
+    # safe), its cpuset pinning and its EFFECTIVE rlimits (/proc/<pid>/limits,
+    # world-readable) -- the running process's limits are the authoritative
+    # ones (limits.conf/systemd/inherited already resolved at start; the DB
+    # user's name is irrelevant). Hidden on old snaps.
+    def _dbproc(phase):
+        for ln in win["os"].get((phase, "db_proc"), "").splitlines():
+            f = ln.strip().split("|")
+            if len(f) == 4:
+                try:
+                    return int(f[0]), int(f[1]), int(f[2]), int(f[3])
+                except ValueError:
+                    return None
+        return None
+    def _dbpcs(phase):
+        for ln in win["os"].get((phase, "db_proc"), "").splitlines():
+            if ln.startswith("cpuset "):
+                return ln[7:].strip() or None
+        return None
+    _dbp, _dbe = _dbproc("begin"), _dbproc("end")
+    if _dbp and _dbe:
+        sub("DB Process")
+        parts.append('<table class="t"><tr><th></th><th class="n">Begin</th>'
+                     '<th class="n">End</th><th class="n">Δ</th></tr>')
+        parts.append('<tr><td>postmaster pid (port %s)</td><td class="n">%s</td>'
+                     '<td class="n">%s</td><td class="n">-</td></tr>'
+                     % (esc(str(m.get("port", "") or "-")), fmt_int(_dbp[0]), fmt_int(_dbe[0])))
+        parts.append('<tr><td>RSS</td><td class="n">%s</td><td class="n">%s</td>'
+                     '<td class="n">%s</td></tr>'
+                     % (fmt_bytes(_dbp[2] * 1024), fmt_bytes(_dbe[2] * 1024),
+                        fmt_bytes((_dbe[2] - _dbp[2]) * 1024)))
+        parts.append('<tr><td>VSZ</td><td class="n">%s</td><td class="n">%s</td>'
+                     '<td class="n">%s</td></tr>'
+                     % (fmt_bytes(_dbp[1] * 1024), fmt_bytes(_dbe[1] * 1024),
+                        fmt_bytes((_dbe[1] - _dbp[1]) * 1024)))
+        parts.append('<tr><td>threads</td><td class="n">%s</td><td class="n">%s</td>'
+                     '<td class="n">%+d</td></tr>'
+                     % (fmt_int(_dbp[3]), fmt_int(_dbe[3]), _dbe[3] - _dbp[3]))
+        _csb_, _cse_ = _dbpcs("begin"), _dbpcs("end")
+        if _csb_ is not None or _cse_ is not None:
+            parts.append('<tr><td>cpuset</td><td class="n">%s</td><td class="n">%s</td>'
+                         '<td class="n">-</td></tr>'
+                         % (esc(_csb_ or "-"), esc(_cse_ or "-")))
+        # effective rlimits as ROWS in the same table (name tagged
+        # "(soft)"/"(hard)", reusing the Begin/End columns); static per
+        # process lifetime -> Δ '-'. Unit-less rows ("Max nice priority 0
+        # 0") and space-bearing names ("Max open files") handled via the
+        # known-unit wordlist.
+        def _limits_map(txt):
+            out = {}
+            for ln in (txt or "").splitlines():
+                f = ln.split()
+                if not f or f[0] in ("user", "Limit"):
+                    continue
+                _UNITS = ("seconds", "bytes", "files", "processes", "locks", "signals", "us")
+                if f[-1] in _UNITS:
+                    unit, vals = f[-1], f[:-1]
+                else:
+                    unit, vals = "", f
+                if len(vals) >= 3:
+                    out[" ".join(vals[:-2])] = (vals[-2], vals[-1], unit)
+            return out
+        _lmb = _limits_map(win["os"].get(("begin", "limits"), ""))
+        _lme = _limits_map(win["os"].get(("end", "limits"), ""))
+        for _lk in list(_lme) + [x for x in _lmb if x not in _lme]:
+            _lb = _lmb.get(_lk); _le = _lme.get(_lk)
+            for _tag, _ix in (("soft", 0), ("hard", 1)):
+                parts.append('<tr><td>%s (%s)</td><td class="n">%s</td><td class="n">%s</td>'
+                             '<td class="n">-</td></tr>'
+                             % (esc(_lk), _tag,
+                                esc(_lb[_ix]) if _lb else "-",
+                                esc(_le[_ix]) if _le else "-"))
+        parts.append('</table>')
+        if _lmb or _lme:
+            _usr = ""
+            for ln in (win["os"].get(("end", "limits"), "") or
+                       win["os"].get(("begin", "limits"), "")).splitlines():
+                if ln.startswith("user "):
+                    _usr = ln[5:].strip()
+            parts.append('<div class="note">effective limits of the running postmaster (pid %s)%s</div>'
+                         % (fmt_int(_dbe[0]),
+                            (", os user: %s" % esc(_usr)) if _usr else ""))
     sub("OS Memory Usage")
     _bm = parse_meminfo(win["os"].get(("begin", "meminfo"), ""))
     _em = parse_meminfo(win["os"].get(("end", "meminfo"), ""))
@@ -27950,12 +28219,13 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             '<th class="n">Write B per Sec</th>')
     if osd.get("discard_supported"):
         _dh += '<th class="n">Dscrd per Sec</th><th class="n">Dscrd B per Sec</th><th class="n">Flush per Sec</th>'
-    _dh += '<th class="n">avg r_await (ms)</th><th class="n">avg w_await (ms)</th></tr>'
+    _dh += ('<th class="n">avg r_await (ms)</th><th class="n">avg w_await (ms)</th>'
+            '<th class="n">avgqu-sz</th><th class="n">%util</th></tr>')
     parts.append('<table class="t"><tr>' + _dh)
     disks = osd.get("disks", [])
     ddur = osd.get("dur", 1.0) or 1.0
     if not disks:
-        _ncols = 1 + (7 if _dmeta else 0) + 4 + (3 if osd.get("discard_supported") else 0) + 2
+        _ncols = 1 + (7 if _dmeta else 0) + 4 + (3 if osd.get("discard_supported") else 0) + 4
         parts.append('<tr><td colspan="%d" class="note">no active disk devices</td></tr>' % _ncols)
     for d in disks:
         _rav = d.get("r_await_ms", 0.0) if d.get("read_iops", 0) > 0 else None
@@ -27972,7 +28242,11 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             row += '<td class="n">%.1f</td><td class="n">%s</td><td class="n">%.1f</td>' % (
                    d.get("discard_iops") or 0.0, fmt_bytes((d.get("discard_bytes") or 0) / ddur),
                    d.get("flush_iops") or 0.0)
-        row += '<td class="n%s">%s</td><td class="n%s">%s</td></tr>' % (lat_cell_cls(_rav), ra, lat_cell_cls(_wav), wa)
+        row += '<td class="n%s">%s</td><td class="n%s">%s</td>' % (lat_cell_cls(_rav), ra, lat_cell_cls(_wav), wa)
+        _u = d.get("util_pct"); _q = d.get("avgqu_sz")
+        row += '<td class="n">%s</td><td class="n">%s</td></tr>' % (
+            ("%.2f" % _q) if _q is not None else "-",
+            ("%.1f%%" % _u) if _u is not None else "-")
         parts.append(row)
     parts.append('</table>')
     if os_smp is not None:
@@ -28190,6 +28464,72 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             parts.append('<tr><td>%s</td><td>%s</td><td%s>%+.0f</td><td%s>%.3f</td></tr>'
                          % (esc(r["proto"]), esc(r["name"]), _m, r["delta"], _m, r["per_sec"]))
         parts.append('</table>')
+
+    # ================= Kernel Messages (dmesg) =================
+    # LAST SUB of OS Statistics (user 2026-09-17: not a standalone section).
+    # Union of the window's incremental chunks, pattern-categorized (nine
+    # layers). Constant rendering: events table / "no kernel errors" note /
+    # "unavailable" (dmesg_restrict) note.
+    _dml, _dmst = load_dmesg_chunks(win, repl_dir)
+    if _dmst is not None:
+        sub("Kernel Messages (dmesg)")
+        if _dmst == "denied":
+            note("unavailable (kernel.dmesg_restrict=1 -- the collector user "
+                 "cannot read the ring buffer; ask the OS admin or relax the sysctl)")
+        else:
+            from datetime import datetime as _dt
+            # NO per-line epoch window filter: the CHUNK TILING already
+            # defines the window exactly (floor keeps chunks disjoint, snap
+            # ts in (begin,end] selects members). dmesg -T times derive
+            # from boottime+offset and go stale after ANY wall-clock step
+            # (observed 204: +2min NTP correction silently dropped every
+            # event); the displayed Time column keeps its native skew.
+            _rows = []
+            _prev_cat = None
+            for _e, _text, _cont in _dml:
+                if _DMESG_EXCLUDE.search(_text):
+                    _prev_cat = None
+                    continue
+                if _cont:
+                    # continuation of the previous event (stack frames,
+                    # register dumps): render ONLY when the parent matched,
+                    # inheriting its category -- a call trace must come out
+                    # complete, frames carry no matchable keywords of their own
+                    if _prev_cat is None:
+                        continue
+                    _rows.append((_e, _prev_cat, _text))
+                    continue
+                if _DMESG_REBOOT.match(_text):
+                    _cat, _text = "Kernel crash", "SYSTEM REBOOT: " + _text[:90]
+                else:
+                    _cat = None
+                    for _c, _pat in _DMESG_PATTERNS:
+                        if re.search(_pat, _text, re.I):
+                            _cat = _c
+                            break
+                if _cat is None and _prev_cat is not None \
+                        and _DMESG_CONTEXT.search(_text):
+                    # separately-timestamped continuation of the previous
+                    # crash/hang dump (frames, registers) -- ride its category
+                    _rows.append((_e, _prev_cat, _text))
+                    continue
+                _prev_cat = _cat
+                if _cat is None:
+                    continue
+                _rows.append((_e, _cat, _text))
+            if _rows:
+                parts.append('<table class="t"><tr><th>Time</th><th>Category</th>'
+                             '<th>Message</th></tr>')
+                for _e, _c, _t in _rows[:50]:
+                    parts.append('<tr><td>%s</td><td>%s</td><td>%s</td></tr>'
+                                 % (_dt.fromtimestamp(_e).strftime("%Y-%m-%d %H:%M:%S"),
+                                    esc(_c), esc(_t[:200])))
+                parts.append('</table>')
+                if len(_rows) > 50:
+                    note("%d more matching kernel messages suppressed (window total %d)"
+                         % (len(_rows) - 50, len(_rows)))
+            else:
+                note("no kernel errors in this window")
 
     # ================= Time Model System Stats =================
     sec("Time Model System Stats")
@@ -28793,6 +29133,28 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             parts.append('<tr><td title="%s">%s</td><td title="%s">%s</td><td>%s</td><td class="wrap">%s</td></tr>'
                          % (esc(_n), esc(_n), esc(_s), esc(_s), esc(_c), esc(_d)))
     parts.append('</table>')
+    # ================= OS Kernel Parameters =================
+    # curated sysctl set captured as vastbase (unreadable/absent entries were
+    # filtered at collection); single Value column from END, a mid-window
+    # change shows as "old -> new"
+    def _sysctl_map(txt):
+        out = {}
+        for ln in (txt or "").splitlines():
+            if "|" in ln:
+                k, v = ln.split("|", 1)
+                out[k.strip()] = v.strip()
+        return out
+    _syb = _sysctl_map(win["os"].get(("begin", "sysctl"), ""))
+    _sye = _sysctl_map(win["os"].get(("end", "sysctl"), ""))
+    if _sye or _syb:
+        sec("OS Kernel Parameters", fold=True)
+        parts.append('<table class="t"><tr><th>Parameter</th>'
+                     '<th>Begin</th><th>End</th></tr>')
+        for k in (list(_sye) + [x for x in _syb if x not in _sye]):
+            parts.append('<tr><td>%s</td><td>%s</td><td>%s</td></tr>'
+                         % (esc(k), esc(_syb.get(k, "-")), esc(_sye.get(k, "-"))))
+        parts.append('</table>')
+        _close_foldsec()
 
     _toc_html = ('<div class="toc" id="toc"><b>Contents</b><ul>' + "".join(
         '<li><a href="#%s">%s</a>%s</li>' % (_id, esc(t),
@@ -29145,11 +29507,11 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     if _dsup:
         _dh += ('<th class="n">P1 Dscrd</th><th class="n">P2 Dscrd</th>'
                 '<th class="n">P1 Flush</th><th class="n">P2 Flush</th>')
-    _dh += '</tr>'
+    _dh += '<th class="n">P1 %util</th><th class="n">P2 %util</th></tr>'
     parts.append('<table class="t"><tr>' + _dh)
     _dnames = sorted(set(_d1) | set(_d2))
     if not _dnames:
-        _ncols = 1 + (7 if _dmeta else 0) + 8 + (4 if _dsup else 0)
+        _ncols = 1 + (7 if _dmeta else 0) + 8 + (4 if _dsup else 0) + 2
         parts.append('<tr><td colspan="%d" class="note">no active disk devices</td></tr>' % _ncols)
     ddur1 = osd1.get("dur", 1.0) or 1.0; ddur2 = osd2.get("dur", 1.0) or 1.0
     for name in _dnames:
@@ -29167,7 +29529,10 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             row += ('<td class="n">%.1f</td><td class="n">%.1f</td><td class="n">%.1f</td><td class="n">%.1f</td>'
                     % (a.get("discard_iops") or 0.0, b.get("discard_iops") or 0.0,
                        a.get("flush_iops") or 0.0, b.get("flush_iops") or 0.0))
-        row += '</tr>'
+        _ua, _ub = a.get("util_pct"), b.get("util_pct")
+        row += '<td class="n">%s</td><td class="n">%s</td></tr>' % (
+            ("%.1f%%" % _ua) if _ua is not None else "-",
+            ("%.1f%%" % _ub) if _ub is not None else "-")
         parts.append(row)
     parts.append('</table>')
     sub("Network per interface")
@@ -30058,8 +30423,8 @@ def text_io(win, repl_dir=None):
         return 0, "\n".join(lines)
     bts = str(m.get("begin_ts", ""))
     per, dsup = os_minute_disk_series(samples)
-    rows = sorted((ts, dev, rt, ra, wa)
-                  for dev, lst in per.items() for ts, rt, ra, wa in lst
+    rows = sorted((ts, dev, rt, ra, wa, ut)
+                  for dev, lst in per.items() for ts, rt, ra, wa, ut in lst
                   if (not bts or ts >= bts))
     if not rows:
         lines.append("(no active disk device-minutes in this period)")
@@ -30069,17 +30434,18 @@ def text_io(win, repl_dir=None):
     if dsup:
         headers += ["dc/s", "flush/s"]
         align += "rr"
-    headers += ["r_await (ms)", "w_await (ms)"]
-    align += "rr"
+    headers += ["r_await (ms)", "w_await (ms)", "%util"]
+    align += "rrr"
     out = []
-    for ts, dev, rt, ra, wa in rows:
+    for ts, dev, rt, ra, wa, ut in rows:
         row = [ts, dev, "%.1f" % rt["read_iops"], "%.1f" % rt["write_iops"],
                fmt_bytes(rt["read_bytes_s"]), fmt_bytes(rt["write_bytes_s"])]
         if dsup:
             row += [("%.1f" % rt["discard_iops"]) if rt["discard_iops"] is not None else "-",
                     ("%.1f" % rt["flush_iops"]) if rt["flush_iops"] is not None else "-"]
         row += [("%.1f" % ra) if ra is not None else "-",
-                ("%.1f" % wa) if wa is not None else "-"]
+                ("%.1f" % wa) if wa is not None else "-",
+                ("%.1f" % ut) if ut is not None else "-"]
         out.append(row)
     lines.append(_text_table(headers, out, align=align))
     return 0, "\n".join(lines)
