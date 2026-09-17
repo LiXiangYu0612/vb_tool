@@ -28287,11 +28287,13 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                              % (esc(_lk), _tag,
                                 esc(_lb[_ix]) if _lb else "-",
                                 esc(_le[_ix]) if _le else "-"))
-        # Open FDs by type: fixed class order, EVERY class carries a deleted
-        # sub-row even at zero (user 2026-09-17: always display, 0 included).
-        # Deleted = symlink target suffixed " (deleted)": temp spills are
-        # routinely deleted-while-held, db files deleted-but-held point at
-        # DROP/TRUNCATE. Whole block hidden on old snaps / unreadable fd dir.
+        # fd classification rows (user 2026-09-17: no separate sub-header --
+        # each row simply reads "fd <class>", plus "fd total"); fixed class
+        # order, EVERY class carries a deleted sub-row even at zero (user:
+        # always display, 0 included). Deleted = symlink target suffixed
+        # " (deleted)": temp spills are routinely deleted-while-held, db
+        # files deleted-but-held point at DROP/TRUNCATE. Whole block hidden
+        # on old snaps / unreadable fd dir.
         def _fdmap(txt):
             out = {}
             for ln in (txt or "").splitlines():
@@ -28305,7 +28307,6 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         _fdb = _fdmap(win["os"].get(("begin", "db_fd_types"), ""))
         _fde = _fdmap(win["os"].get(("end", "db_fd_types"), ""))
         if _fdb or _fde:
-            parts.append('<tr><td colspan="4"><b>Open FDs by type</b></td></tr>')
             _tb = _te = 0
             for _fc in ("data files (base)", "data files (global)", "temp files",
                         "wal segments", "tx status", "double write", "cbm",
@@ -28313,13 +28314,13 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                         "device", "other"):
                 _b = _fdb.get(_fc, (0, 0)); _e = _fde.get(_fc, (0, 0))
                 _tb += _b[0] + _b[1]; _te += _e[0] + _e[1]
-                for _lbl, _bi, _ei, _sub in ((_fc, _b[0], _e[0], False),
+                for _lbl, _bi, _ei, _sub in (("fd " + _fc, _b[0], _e[0], False),
                                              ("deleted", _b[1], _e[1], True)):
                     parts.append('<tr><td%s>%s</td><td class="n">%d</td>'
                                  '<td class="n">%d</td><td class="n">%+d</td></tr>'
                                  % (' class="muted" style="padding-left:2em"' if _sub else "",
                                     esc(_lbl), _bi, _ei, _ei - _bi))
-            parts.append('<tr><td><b>total open fds</b></td><td class="n"><b>%d</b></td>'
+            parts.append('<tr><td><b>fd total</b></td><td class="n"><b>%d</b></td>'
                          '<td class="n"><b>%d</b></td><td class="n"><b>%+d</b></td></tr>'
                          % (_tb, _te, _te - _tb))
         parts.append('</table>')
