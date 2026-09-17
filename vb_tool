@@ -1,13 +1,13 @@
 #!/bin/bash
 #--------------------------------------------------------------------------------
 #-- File name:   vb_tool
-#-- Version  ：  v2.5.0
-#-- Commit at： 2026-09-17 09:00:00
+#-- Version  ：  v2.5.1
+#-- Commit at： 2026-09-17 11:00:00
 #-- Purpose:     Vastbase Script Tool
 #-- Author:      MVS & Second-line Team 
 #--------------------------------------------------------------------------------
 set -o pipefail
-export VB_TOOL_VERSION="v2.5.0"
+export VB_TOOL_VERSION="v2.5.1"
 show_help() {
     echo "Vastbase Script Tool (vb_tool)"
     echo ""
@@ -22653,6 +22653,44 @@ print(','.join(pairs))
         echo "Warning: no tables found, skip statistics query" >&2
         return 0
     fi
+
+    # ---- recursive view expansion: when the SQL references a VIEW (or a
+    # view-on-view chain), the statistics sections must carry the BASE
+    # tables all the way down. The old inline fallback
+    # (information_schema.view_table_usage) is single-level AND only lists
+    # relations that are tables -- a nested view breaks the chain there and
+    # the base tables never surface. Walk pg_rewrite+pg_depend transitively
+    # ONCE here; every consumer of tables_in_clause inherits the superset.
+    # Expansion failure (old kernel / no permission) keeps the original list.
+    local _expanded
+    _expanded=$(PGCONNECT_TIMEOUT=5 psql -d "$db_name" -X -tA -F'|' -c "
+WITH RECURSIVE seed AS (
+    SELECT c.oid AS relid
+    FROM pg_catalog.pg_class c
+    JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+    WHERE (n.nspname, c.relname) IN (${tables_in_clause})
+), expand AS (
+    SELECT relid FROM seed
+    UNION
+    SELECT d.refobjid
+    FROM expand e
+    JOIN pg_catalog.pg_class c ON c.oid = e.relid AND c.relkind IN ('v','m')
+    JOIN pg_catalog.pg_rewrite rw ON rw.ev_class = c.oid
+    JOIN pg_catalog.pg_depend d ON d.objid = rw.oid
+      AND d.refclassid = 'pg_catalog.pg_class'::pg_catalog.regclass
+) SELECT DISTINCT n.nspname, c.relname
+  FROM pg_catalog.pg_class c
+  JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+  JOIN expand ON expand.relid = c.oid" 2>/dev/null | python3 -c "
+import sys
+pairs = []
+for ln in sys.stdin:
+    p = ln.strip().split('|')
+    if len(p) == 2 and p[0]:
+        pairs.append(\"('%s','%s')\" % (p[0], p[1]))
+print(','.join(pairs))
+")
+    [[ -n "$_expanded" ]] && tables_in_clause="$_expanded"
 
     echo ""
     PGCONNECT_TIMEOUT=5 psql -d "$db_name" -X -P footer=off << PSQLEOF
