@@ -1,13 +1,13 @@
 #!/bin/bash
 #--------------------------------------------------------------------------------
 #-- File name:   vb_tool
-#-- Version  ：  v2.5.1
+#-- Version  ：  v2.5.3
 #-- Commit at： 2026-09-17 11:00:00
 #-- Purpose:     Vastbase Script Tool
 #-- Author:      MVS & Second-line Team 
 #--------------------------------------------------------------------------------
 set -o pipefail
-export VB_TOOL_VERSION="v2.5.1"
+export VB_TOOL_VERSION="v2.5.3"
 show_help() {
     echo "Vastbase Script Tool (vb_tool)"
     echo ""
@@ -30808,11 +30808,87 @@ def _fmt_duration(seconds):
 
 
 
-def text_sqlhist(win, sql_id="", detail_wins=None):
-    """Per-interval execution history for ONE SQL (unique_sql_id). Whole-window
-    row first + one row per consecutive snapshot pair; columns: time_range |
-    calls | dbtime | avg_dbtime | cpu | io | cr | pr | plan | rows."""
-    lines = _text_banner("awr sql history", win, extra="sql_id: %s" % sql_id)
+def text_sqlhist(win, sql_id="", detail_wins=None, sqltext_root=None):
+    """Per-interval execution history for ONE SQL (unique_sql_id). Shows the
+    SQL text (flattened) from the shared sql_text store before the table;
+    whole-window row + one row per consecutive snapshot pair."""
+    # SQL text lookup: scan the shared multi-member gzip store for this
+    # unique_sql_id. The store is keyed (user_name, unique_sql_id) -- one uid
+    # commonly has rows for SEVERAL users (uid is text-derived, the counters
+    # are per-user) -- so collect EVERY match: text from the first non-empty
+    # query (all rows of one uid carry the same text), and the user set
+    # decides what the banner may claim. A first-match-only user_name (the
+    # old code) could name someone who never ran it in this window.
+    sql_text = ""
+    store_users = []
+    if sqltext_root:
+        import gzip as _gz
+        _store = os.path.join(sqltext_root, "sql_text.csv.gz")
+        if os.path.isfile(_store):
+            try:
+                with _gz.open(_store, "rt", encoding="utf-8", errors="replace") as f:
+                    for r in csv.DictReader(f):
+                        if r.get("unique_sql_id") == sql_id:
+                            u = (r.get("user_name") or "").strip()
+                            if u and u not in store_users:
+                                store_users.append(u)
+                            if not sql_text:
+                                sql_text = (r.get("query") or "").strip()
+            except Exception:
+                pass
+    # Group rows by (user_name, sql_id): different users on the same sql_id
+    # are common (same SQL text in a shared pool) and must NOT be merged --
+    # they represent distinct sessions and distinct accumulated counters.
+    # THIS report is for ONE sql_id: bucket only its rows (the unfiltered
+    # version keyed every sql in the statement table, and the per-user rows
+    # below inherited rows -- and users -- that were never asked for)
+    def _by_user(rows):
+        buckets = {}
+        for r in rows:
+            if str(r.get("unique_sql_id", "")) != sql_id:
+                continue
+            u = r.get("user_name", "") or ""
+            k = (u, sql_id)
+            if k not in buckets:
+                buckets[k] = {"__row": r}
+                for c in ("n_calls","db_time","cpu_time","data_io_time",
+                          "plan_time","sort_time","hash_time",
+                          "n_blocks_fetched","n_blocks_hit","n_returned_rows"):
+                    buckets[k][c] = 0.0
+            for c in ("n_calls","db_time","cpu_time","data_io_time",
+                      "plan_time","sort_time","hash_time",
+                      "n_blocks_fetched","n_blocks_hit","n_returned_rows"):
+                buckets[k][c] += to_num(r.get(c, 0))
+        return buckets
+    begin_bu = _by_user(win["db"][("begin", "statement")])
+    end_bu = _by_user(win["db"][("end", "statement")])
+    # banner user: claim a user ONLY when unambiguous -- exactly one user ran
+    # this uid in the window (or, with no executions at all, the store knows
+    # just one). Several users -> no user in the banner; the table below has
+    # a user column carrying every one of them.
+    window_users = sorted({k[0] for k in set(begin_bu) | set(end_bu) if k[0]})
+    if len(window_users) == 1:
+        banner_user = window_users[0]
+    elif not window_users and len(store_users) == 1:
+        banner_user = store_users[0]
+    else:
+        banner_user = ""
+    # banner first, then the sql text as a psql-style one-column table --
+    # same header/rule look as every other table in the report (user
+    # 2026-09-17: the old '===== awr sqltext =====' bar sat ABOVE the banner
+    # and matched no other section)
+    lines = _text_banner("awr sql history", win,
+                         extra="sql_id: %s%s" % (sql_id,
+                                 ("  user: " + banner_user) if banner_user else ""))
+    flat = re.sub(r"\s+", " ", sql_text).strip() if sql_text else ""
+    lines += ["", "sql_text", "-" * 90]
+    if flat:
+        for i in range(0, len(flat), 90):
+            lines.append(flat[i:i+90])
+        if len(flat) > 90:
+            lines.append("  (%d chars total)" % len(flat))
+    else:
+        lines.append("(sql text not found in the shared sql_text store)")
     def _hist_rows(w):
         ST = delta_rows(w, "statement", "unique_sql_id",
                         ["n_calls", "db_time", "cpu_time", "data_io_time",
@@ -30845,24 +30921,66 @@ def text_sqlhist(win, sql_id="", detail_wins=None):
                 "%.1f" % (fetched / calls) if calls > 0 and fetched >= 0 else "-",
                 "%.1f" % ((fetched - hit) / calls) if calls > 0 and fetched - hit >= 0 else "-",
                 "%.1f" % (to_num(d.get("n_returned_rows", 0)) / calls) if calls > 0 else "-"]
-    row = _hist_rows(win)
-    if not row:
-        lines.append("sql_id %s: no executions in this window" % sql_id)
-        return 1, "\n".join(lines)
     headers = ["time_range", "calls", "dbtime", "avg_dbtime", "avg_cpu", "avg_io",
                "avg_sort", "avg_hash", "avg_plan", "avg_cr", "avg_pr", "avg_rows"]
-    all_rows = [["whole"] + row]
+    def _hist_rows_ui(w):
+        bw = _by_user(w["db"][("begin", "statement")])
+        ew = _by_user(w["db"][("end", "statement")])
+        rs = []
+        for k in set(bw) | set(ew):
+            b = bw.get(k, {})
+            e = ew.get(k, {})
+            calls = to_num(e.get("n_calls", 0)) - to_num(b.get("n_calls", 0))
+            if calls <= 0:
+                continue
+            fetched = to_num(e.get("n_blocks_fetched", 0)) - to_num(b.get("n_blocks_fetched", 0))
+            hit = to_num(e.get("n_blocks_hit", 0)) - to_num(b.get("n_blocks_hit", 0))
+            db_t = to_num(e.get("db_time",0)) - to_num(b.get("db_time",0))
+            cpu = to_num(e.get("cpu_time",0)) - to_num(b.get("cpu_time",0))
+            io  = to_num(e.get("data_io_time",0)) - to_num(b.get("data_io_time",0))
+            sort = to_num(e.get("sort_time",0)) - to_num(b.get("sort_time",0))
+            hash_ = to_num(e.get("hash_time",0)) - to_num(b.get("hash_time",0))
+            plan = to_num(e.get("plan_time",0)) - to_num(b.get("plan_time",0))
+            rows = to_num(e.get("n_returned_rows",0)) - to_num(b.get("n_returned_rows",0))
+            rs.append([k[0], k[1],
+                       "%d" % calls,
+                       "%.2f" % (db_t / 1e3) if db_t >= 0 else "-",
+                       "%.2f" % ((db_t / 1e3) / calls) if db_t >= 0 and calls > 0 else "-",
+                       "%.2f" % (cpu / 1e3), "%.2f" % (io / 1e3),
+                       "%.2f" % (sort / 1e3), "%.2f" % (hash_ / 1e3),
+                       "%.2f" % (plan / 1e3),
+                       "%.1f" % (fetched / calls), "%.1f" % ((fetched - hit) / calls),
+                       "%.1f" % (rows / calls)])
+        rs.sort(key=lambda r: -int(r[2]))
+        return rs or None
+
+    all_rows = _hist_rows_ui(win) or []
+    # prefix whole-window label so detail rows stand apart
+    labeled = [["whole window"] + r for r in all_rows] if all_rows else []
     if detail_wins:
         for dw in detail_wins:
             m = dw["meta"]
             tr = "%s-%s" % (_short_ts(m.get("begin_ts", "")),
                             _short_ts(m.get("end_ts", ""))[-5:])
-            r = _hist_rows(dw)
-            if r:
-                all_rows.append([tr] + r)
-    lines.append(_text_table(headers, all_rows,
-                             align="l" + "r" * 11))
-    # first row = whole window (no time_range prefix needed, but keep format)
+            for r in (_hist_rows_ui(dw) or []):
+                labeled.append([tr] + r)
+    if not labeled:
+        lines.append("sql_id %s: no executions in this window" % sql_id)
+        return 1, "\n".join(lines)
+    # user column: redundant when ONE user owns every row -- the banner right
+    # above already names them (user 2026-09-17) -- so strip it; several users
+    # -> the banner deliberately stays silent, the column is the only thing
+    # telling them apart, keep it
+    if len({r[1] for r in labeled}) == 1:
+        labeled = [[r[0]] + r[2:] for r in labeled]
+        cols, align = ["time_range", "sql_id"] + headers[1:], "l" * 2 + "r" * 11
+    else:
+        cols, align = ["time_range", "user", "sql_id"] + headers[1:], "l" * 3 + "r" * 11
+    # rows carry [time_range, (user,) sql_id, calls, ...] -- keep 'calls' in
+    # the header (headers[1:]); the old headers[2:] dropped it, shifting every
+    # numeric one column right and silently losing the last cell
+    lines.append("")
+    lines.append(_text_table(cols, labeled, align=align))
     return 0, "\n".join(lines)
 
 def _short_ts(ts):
@@ -31109,7 +31227,8 @@ def main():
             elif text_section == "ltx":
                 return text_ltx(w, repl_dir)
             elif text_section == "sqlhist":
-                return text_sqlhist(w, sql_id=text_sql_id, detail_wins=dw)
+                return text_sqlhist(w, sql_id=text_sql_id, detail_wins=dw,
+                                    sqltext_root=sqltext_root)
             else:
                 return text_tabstat(w, text_db, text_schema, text_table, detail_wins=dw)
 
