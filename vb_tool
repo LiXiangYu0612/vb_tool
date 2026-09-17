@@ -1,13 +1,13 @@
 #!/bin/bash
 #--------------------------------------------------------------------------------
 #-- File name:   vb_tool
-#-- Version  ：  v2.5.4
+#-- Version  ：  v2.5.5
 #-- Commit at： 2026-09-17 11:00:00
 #-- Purpose:     Vastbase Script Tool
 #-- Author:      MVS & Second-line Team 
 #--------------------------------------------------------------------------------
 set -o pipefail
-export VB_TOOL_VERSION="v2.5.4"
+export VB_TOOL_VERSION="v2.5.5"
 show_help() {
     echo "Vastbase Script Tool (vb_tool)"
     echo ""
@@ -26061,6 +26061,12 @@ def load_os_samples(sdir, begin_ts, end_ts):
     return out
 
 _CPUF = ("busy", "user", "nice", "system", "iowait", "irq", "softirq", "steal", "idle")
+# display names for the cpu component columns (user 2026-09-17: OS-section
+# metric labels unified to first-letter capitals, standard abbreviations
+# stay all-caps -- data KEYS stay lowercase, only the label changes)
+_CPU_DISP = {"busy": "Busy", "user": "User", "nice": "Nice", "system": "System",
+             "iowait": "Iowait", "irq": "IRQ", "softirq": "Softirq",
+             "steal": "Steal", "idle": "Idle"}
 _PGK = ("pgpgin", "pgpgout", "pswpin", "pswpout", "pgfault", "pgmajfault")
 _NETK = ("rx_bytes", "rx_packets", "rx_errs", "rx_drop",
          "tx_bytes", "tx_packets", "tx_errs", "tx_drop")
@@ -26306,7 +26312,7 @@ def osmin_cpu_table(samples, begin_ts):
     if not series:
         return _osmin_note(samples)
     h = ['<table class="t"><tr><th>Time</th>' +
-         ''.join('<th>%s</th>' % f for f in _CPUF) + '<th>r</th><th>b</th></tr>']
+         ''.join('<th>%s</th>' % _CPU_DISP[f] for f in _CPUF) + '<th>r</th><th>b</th></tr>']
     for ts, d, r, b in series:
         h.append('<tr><td>%s</td>%s<td class="n">%d</td><td class="n">%d</td></tr>'
                  % (esc(ts), ''.join('<td class="n%s">%.1f</td>' % (busy_cell_cls(d[f]) if f == "busy" else "", d[f])
@@ -26614,7 +26620,7 @@ def numa_html_table(topology, stats_delta_factory):
     nodes = topology.get("nodes", {})
     parts.append('<table class="t"><tr><th>NUMA Nodes</th><th class="n">%d</th></tr></table>'
                  % len(nodes))
-    parts.append('<table class="t"><tr><th>Node</th><th>CPU list</th><th class="n">MemTotal</th>'
+    parts.append('<table class="t"><tr><th>Node</th><th>CPU List</th><th class="n">MemTotal</th>'
                  '<th class="n">MemFree</th><th class="n">Distance</th></tr>')
     for nid in sorted(nodes, key=lambda x: int(x) if x.isdigit() else 0):
         nd = nodes[nid]
@@ -26624,9 +26630,9 @@ def numa_html_table(topology, stats_delta_factory):
                          fmt_kb(nd["mem_total_kb"]), fmt_kb(nd["mem_free_kb"]),
                          esc(nd["distance"])))
     parts.append('</table>')
-    parts.append('<table class="t"><tr><th>Node</th><th class="n">numa_hit</th><th class="n">numa_miss</th>'
-                 '<th class="n">interleave_hit</th><th class="n">local_node</th><th class="n">other_node</th>'
-                 '<th class="n">local ratio</th></tr>')
+    parts.append('<table class="t"><tr><th>Node</th><th class="n">Numa Hit</th><th class="n">Numa Miss</th>'
+                 '<th class="n">Interleave Hit</th><th class="n">Local Node</th><th class="n">Other Node</th>'
+                 '<th class="n">Local Ratio</th></tr>')
     any_stat = False
     for nid in sorted(nodes, key=lambda x: int(x) if x.isdigit() else 0):
         hit = stats_delta_factory(nid, "numa_hit")
@@ -26888,6 +26894,23 @@ def parse_softnet(txt):
         except ValueError:
             continue
     return t, d, s
+
+# display names for /proc/<pid>/limits rows (kernel file spells them all
+# lowercase after "Max"; show them with the 2026-09-17 OS-label rule --
+# first-letter capitals, abbreviations all-caps)
+_LIM_DISP = {"Max cpu time": "Max CPU Time", "Max file size": "Max File Size",
+             "Max data size": "Max Data Size", "Max stack size": "Max Stack Size",
+             "Max core file size": "Max Core File Size",
+             "Max resident set": "Max Resident Set", "Max processes": "Max Processes",
+             "Max open files": "Max Open Files",
+             "Max locked memory": "Max Locked Memory",
+             "Max address space": "Max Address Space",
+             "Max file locks": "Max File Locks",
+             "Max pending signals": "Max Pending Signals",
+             "Max msgqueue size": "Max Msgqueue Size",
+             "Max nice priority": "Max Nice Priority",
+             "Max realtime priority": "Max Realtime Priority",
+             "Max realtime timeout": "Max Realtime Timeout"}
 
 # pseudo / kernel filesystem types filtered from the Filesystem Usage table
 # (they carry no meaningful capacity for a DBA; df itself already hides the
@@ -28181,7 +28204,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     # horizontal layout: components as columns, one value row (busy bold >50%, red+bold >80%)
     _cf = ("busy", "user", "nice", "system", "iowait", "irq", "softirq", "steal", "idle")
     parts.append('<table class="t"><tr>' +
-                 ''.join('<th class="n">%s</th>' % f for f in _cf) + '</tr>')
+                 ''.join('<th class="n">%s</th>' % _CPU_DISP[f] for f in _cf) + '</tr>')
     parts.append('<tr>' + ''.join(
         '<td class="n%s">%.1f</td>' % (busy_cell_cls(osd["cpu"].get(f, 0.0)) if f == "busy" else '',
                                        osd["cpu"].get(f, 0.0)) for f in _cf) + '</tr>')
@@ -28255,7 +28278,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         sub("DB Process")
         parts.append('<table class="t"><tr><th></th><th class="n">Begin</th>'
                      '<th class="n">End</th><th class="n">Δ</th></tr>')
-        parts.append('<tr><td>postmaster pid (port %s)</td><td class="n">%s</td>'
+        parts.append('<tr><td>Postmaster PID (port %s)</td><td class="n">%s</td>'
                      '<td class="n">%s</td><td class="n">-</td></tr>'
                      % (esc(str(m.get("port", "") or "-")), fmt_int(_dbp[0]), fmt_int(_dbe[0])))
         parts.append('<tr><td>RSS</td><td class="n">%s</td><td class="n">%s</td>'
@@ -28266,12 +28289,12 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                      '<td class="n">%s</td></tr>'
                      % (fmt_bytes(_dbp[1] * 1024), fmt_bytes(_dbe[1] * 1024),
                         fmt_bytes((_dbe[1] - _dbp[1]) * 1024)))
-        parts.append('<tr><td>threads</td><td class="n">%s</td><td class="n">%s</td>'
+        parts.append('<tr><td>Threads</td><td class="n">%s</td><td class="n">%s</td>'
                      '<td class="n">%+d</td></tr>'
                      % (fmt_int(_dbp[3]), fmt_int(_dbe[3]), _dbe[3] - _dbp[3]))
         _csb_, _cse_ = _dbpcs("begin"), _dbpcs("end")
         if _csb_ is not None or _cse_ is not None:
-            parts.append('<tr><td>cpuset</td><td class="n">%s</td><td class="n">%s</td>'
+            parts.append('<tr><td>Cpuset</td><td class="n">%s</td><td class="n">%s</td>'
                          '<td class="n">-</td></tr>'
                          % (esc(_csb_ or "-"), esc(_cse_ or "-")))
         # effective rlimits as ROWS in the same table (name tagged
@@ -28300,7 +28323,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             for _tag, _ix in (("soft", 0), ("hard", 1)):
                 parts.append('<tr><td>%s (%s)</td><td class="n">%s</td><td class="n">%s</td>'
                              '<td class="n">-</td></tr>'
-                             % (esc(_lk), _tag,
+                             % (esc(_LIM_DISP.get(_lk, _lk)), _tag.capitalize(),
                                 esc(_lb[_ix]) if _lb else "-",
                                 esc(_le[_ix]) if _le else "-"))
         # fd classification rows (user 2026-09-17: no separate sub-header --
@@ -28348,10 +28371,19 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                         "fin-wait-1", "fin-wait-2", "time-wait",
                         "close-wait", "last-ack", "closing", "other"):
                 _b = _tsb.get(_ts, 0); _e = _tse.get(_ts, 0)
-                parts.append('<tr><td>tcp %s</td><td class="n">%d</td>'
+                parts.append('<tr><td>TCP %s</td><td class="n">%d</td>'
                              '<td class="n">%d</td><td class="n">%+d</td></tr>'
-                             % (esc(_ts), _b, _e, _e - _b))
+                             % (esc(_ts.title()), _b, _e, _e - _b))
         if _fdb or _fde:
+            # display names: first-letter capitals per word, abbreviations
+            # all-caps (WAL/TX/CBM/PG) -- same 2026-09-17 OS-label rule
+            _FD_DISP = {"data files (base)": "Data Files (Base)",
+                        "data files (global)": "Data Files (Global)",
+                        "temp files": "Temp Files", "wal segments": "WAL Segments",
+                        "tx status": "TX Status", "double write": "Double Write",
+                        "cbm": "CBM", "pg logs": "PG Logs",
+                        "lock files": "Lock Files", "socket": "Socket",
+                        "pipe": "Pipe", "device": "Device", "other": "Other"}
             _tb = _te = 0
             for _fc in ("data files (base)", "data files (global)", "temp files",
                         "wal segments", "tx status", "double write", "cbm",
@@ -28359,13 +28391,14 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                         "device", "other"):
                 _b = _fdb.get(_fc, (0, 0)); _e = _fde.get(_fc, (0, 0))
                 _tb += _b[0] + _b[1]; _te += _e[0] + _e[1]
-                for _lbl, _bi, _ei, _sub in (("fd " + _fc, _b[0], _e[0], False),
-                                             ("deleted", _b[1], _e[1], True)):
+                for _lbl, _bi, _ei, _sub in (("Fd " + _FD_DISP.get(_fc, _fc.title()),
+                                               _b[0], _e[0], False),
+                                              ("Deleted", _b[1], _e[1], True)):
                     parts.append('<tr><td%s>%s</td><td class="n">%d</td>'
                                  '<td class="n">%d</td><td class="n">%+d</td></tr>'
                                  % (' class="muted" style="padding-left:2em"' if _sub else "",
                                     esc(_lbl), _bi, _ei, _ei - _bi))
-            parts.append('<tr><td><b>fd total</b></td><td class="n"><b>%d</b></td>'
+            parts.append('<tr><td><b>Fd Total</b></td><td class="n"><b>%d</b></td>'
                          '<td class="n"><b>%d</b></td><td class="n"><b>%+d</b></td></tr>'
                          % (_tb, _te, _te - _tb))
         parts.append('</table>')
@@ -28396,12 +28429,12 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         parts.append('<tr><td>%s</td><td class="n">%s</td><td class="n%s">%s</td></tr>'
                      % (esc(label), fmt_num(_v * dur_os),
                         thr_cell_cls(_v, *_hi) if _hi else "", fmt_num(_v)))
-    vmrow("page in (pgpgin)", "pgpgin")
-    vmrow("page out (pgpgout)", "pgpgout")
-    vmrow("swap in (pswpin)", "pswpin")
-    vmrow("swap out (pswpout)", "pswpout")
-    vmrow("minor fault (pgfault)", "pgfault")
-    vmrow("major fault (pgmajfault)", "pgmajfault")
+    vmrow("Page In (pgpgin)", "pgpgin")
+    vmrow("Page Out (pgpgout)", "pgpgout")
+    vmrow("Swap In (pswpin)", "pswpin")
+    vmrow("Swap Out (pswpout)", "pswpout")
+    vmrow("Minor Fault (pgfault)", "pgfault")
+    vmrow("Major Fault (pgmajfault)", "pgmajfault")
     parts.append('</table>')
     if os_smp is not None:
         parts.append(osmin_mem_table(os_smp, m.get("begin_ts", "")))
@@ -28456,9 +28489,9 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     def nrate(it, key):
         return it.get(key, 0.0) / dur_os
     _nmeta = osd.get("net_meta") or {}
-    _nh = '<th>Interface</th><th class="n">RX B per Sec</th><th class="n">TX B per Sec</th><th class="n">RX Pkt per Sec</th><th class="n">TX Pkt per Sec</th><th class="n">rx/tx errs (Δ)</th><th class="n">rx/tx drop (Δ)</th>'
+    _nh = '<th>Interface</th><th class="n">RX B per Sec</th><th class="n">TX B per Sec</th><th class="n">RX Pkt per Sec</th><th class="n">TX Pkt per Sec</th><th class="n">RX/TX Errs (Δ)</th><th class="n">RX/TX Drop (Δ)</th>'
     if _nmeta:
-        _nh += '<th class="n">RX Util %</th><th class="n">TX Util %</th><th class="n">Speed</th><th class="n">Duplex</th><th class="n">Queues</th><th class="n">RX ring</th><th class="n">TX ring</th>'
+        _nh += '<th class="n">RX Util %</th><th class="n">TX Util %</th><th class="n">Speed</th><th class="n">Duplex</th><th class="n">Queues</th><th class="n">RX Ring</th><th class="n">TX Ring</th>'
     _nh += '</tr>'
     ifaces = osd.get("ifaces", [])
     if ifaces:
@@ -28580,14 +28613,14 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                                 _o3 if _o3 is not None else "-"))
                 return "".join(r)
             _phdr = ('<table class="t"><tr><th>Peer</th><th>Local Port</th><th>Peak Send-Q</th>'
-                     '<th>Peak Time</th><th>RTT at peak (ms)</th><th>cwnd</th><th>retr</th></tr>')
+                     '<th>Peak Time</th><th>RTT at peak (ms)</th><th>Cwnd</th><th>Retr</th></tr>')
             _bysq = [(k, d) for k, d in sorted(_peaks.items(), key=lambda kv: -kv[1]["max_sq"])
                      if d["max_sq"] > 0][:10]
             if _bysq:
                 parts.append('<div class="sub">Top 10 by Send-Q</div>')
                 parts.append(_phdr + _peak_rows(_bysq, "sq") + '</table>')
             _phdr2 = ('<table class="t"><tr><th>Peer</th><th>Local Port</th><th>Peak RTT (ms)</th>'
-                      '<th>Peak Time</th><th>Send-Q at peak</th><th>cwnd</th><th>retr</th></tr>')
+                      '<th>Peak Time</th><th>Send-Q at peak</th><th>Cwnd</th><th>Retr</th></tr>')
             _byrtt = sorted(_peaks.items(), key=lambda kv: -kv[1]["max_rtt"])[:10]
             if _byrtt:
                 parts.append('<div class="sub">Top 10 by RTT</div>')
@@ -28607,7 +28640,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                                 fmt_num(c["sendq"])))
                 return "".join(r)
             _phdr = ('<table class="t"><tr><th>Peer</th><th>Local Port</th><th>RTT (ms)</th>'
-                     '<th>RTTVar</th><th>cwnd</th><th>retr</th><th>Send-Q</th></tr>')
+                     '<th>RTTVar</th><th>Cwnd</th><th>Retr</th><th>Send-Q</th></tr>')
             parts.append('<div class="sub">Top 10 by Send-Q</div>')
             parts.append(_phdr + _peer_rows(sorted(_rttconns, key=lambda c: -c["sendq"])[:10]) + '</table>')
             parts.append('<div class="sub">Top 10 by RTT</div>')
@@ -28622,9 +28655,9 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
              "(consider RPS / IRQ affinity).")
         parts.append('<table class="t"><tr><th>Metric</th><th class="n">Total</th>'
                      '<th class="n">Per Second</th></tr>'
-                     '<tr><td>packets processed</td><td class="n">%s</td><td class="n">%s</td></tr>'
-                     '<tr><td>dropped (backlog full)</td><td class="n%s">%s</td><td class="n">%s</td></tr>'
-                     '<tr><td>time_squeeze (softirq starved)</td><td class="n%s">%s</td><td class="n">%s</td></tr>'
+                     '<tr><td>Packets Processed</td><td class="n">%s</td><td class="n">%s</td></tr>'
+                     '<tr><td>Dropped (Backlog Full)</td><td class="n%s">%s</td><td class="n">%s</td></tr>'
+                     '<tr><td>Time Squeeze (Softirq Starved)</td><td class="n%s">%s</td><td class="n">%s</td></tr>'
                      '</table>'
                      % (fmt_num(_sn["packets"]), fmt_num(_sn["packets"] / dur_os),
                         thr_cell_cls(_sn["dropped"], 0, 100), fmt_num(_sn["dropped"]),
@@ -29599,7 +29632,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     # horizontal layout: components as columns, P1 / P2 / delta as rows
     _cf = ("busy", "user", "nice", "system", "iowait", "irq", "softirq", "steal", "idle")
     parts.append('<table class="t"><tr><th></th>' +
-                 ''.join('<th class="n">%s</th>' % f for f in _cf) + '</tr>')
+                 ''.join('<th class="n">%s</th>' % _CPU_DISP[f] for f in _cf) + '</tr>')
     for _rl, _src in (("P1 %", osd1), ("P2 %", osd2)):
         parts.append('<tr><td class="k">%s</td>' % _rl + ''.join(
             '<td class="n%s">%.1f</td>' % (busy_cell_cls(_src["cpu"].get(f, 0.0)) if f == "busy" else '',
@@ -29623,7 +29656,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         _nodes = _ntop.get("nodes", {})
         parts.append('<table class="t"><tr><th>NUMA Nodes</th><th class="n">%d</th></tr></table>'
                      % len(_nodes))
-        parts.append('<table class="t"><tr><th>Node</th><th>CPU list</th><th class="n">MemTotal</th>'
+        parts.append('<table class="t"><tr><th>Node</th><th>CPU List</th><th class="n">MemTotal</th>'
                      '<th class="n">MemFree</th><th class="n">Distance</th></tr>')
         for nid in sorted(_nodes, key=lambda x: int(x) if x.isdigit() else 0):
             nd = _nodes[nid]
@@ -29759,7 +29792,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     _nmeta = osd2.get("net_meta") or osd1.get("net_meta") or {}
     _nh = '<th>Interface</th><th class="n">P1 RX B</th><th class="n">P2 RX B</th><th class="n">P1 TX B</th><th class="n">P2 TX B</th><th class="n">P1 errs</th><th class="n">P2 errs</th>'
     if _nmeta:
-        _nh += '<th class="n">Speed</th><th class="n">Duplex</th><th class="n">Queues</th><th class="n">RX ring</th><th class="n">TX ring</th>'
+        _nh += '<th class="n">Speed</th><th class="n">Duplex</th><th class="n">Queues</th><th class="n">RX Ring</th><th class="n">TX Ring</th>'
     _nh += '</tr>'
     parts.append('<table class="t"><tr>' + _nh)
     _inames = sorted(set(_i1) | set(_i2))
