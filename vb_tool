@@ -24084,6 +24084,11 @@ _awr_collect() {
     if printf '%s' "$_dmout" | head -1 | grep -qi "read kernel buffer failed\|permission denied" \
        || { [ "$_dmrc" -ne 0 ] && ! printf '%s' "$_dmout" | grep -q '^\['; }; then
         echo "status denied" > "$osd/dmesg"
+    elif ! awk 'BEGIN{print mktime("2026 1 1 0 0 0")}' 2>/dev/null | grep -q '^1[0-9]\{9\}$'; then
+        # mktime()/3-arg match() are GAWK extensions; mawk/busybox would
+        # print NOTHING (silent chunk loss, the worst failure mode) --
+        # make the incapacity explicit instead
+        echo "status nogawk" > "$osd/dmesg"
     else
         # floor = LAST line of the CHRONOLOGICALLY newest previous snap's
         # chunk: ls -dt (mtime) newest-first + break (glob order is
@@ -24097,8 +24102,9 @@ _awr_collect() {
             [ -n "$_lts" ] && { _dmfloor=$(date -d "$_lts" +%s 2>/dev/null); break; }
         done
         printf 'status ok\n' > "$osd/dmesg"
-        # cap the FIRST full dump on noisy hosts (an 8MB ring can be ~50K
-        # lines; incremental chunks afterwards are tiny)
+        # NO truncation (user 2026-09-17): only the FIRST-ever dump can be
+        # large (full ring, one-time per install); incremental chunks after
+        # it are naturally tiny -- completeness over size
         printf '%s\n' "$_dmout" | awk -v floor="$_dmfloor" '
             BEGIN { n = split("Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec", mo, " ")
                     for (i = 1; i <= n; i++) M[mo[i]] = i
@@ -24108,7 +24114,7 @@ _awr_collect() {
                   e = mktime(m[4] " " M[m[1]] " " m[2] " " T[1] " " T[2] " " T[3])
                   laste = e
                   if (floor == "" || e > floor) print
-              } else if (laste >= 0 && (floor == "" || laste > floor)) print }' | tail -5000 >> "$osd/dmesg"
+              } else if (laste >= 0 && (floor == "" || laste > floor)) print }' >> "$osd/dmesg"
     fi
     # net_rtt: raw `ss -tin state established` (END-snap instantaneous per-conn
     # tcp_info: rtt/cwnd/retrans/send-q; loopback included here, the renderer
@@ -25371,14 +25377,14 @@ def load_dmesg_chunks(win, repl_dir):
     """Union the INCREMENTAL os/dmesg chunks of every snap with ts in
     (begin_ts, end_ts] -- the collector stores only lines newer than the
     previous snap's last line, so the union tiles the window exactly (same
-    model as the ASH flush). Returns ([(epoch, text)], status) with status
-    in {"ok", "denied", None}."""
+    model as the ASH flush). Returns ([(epoch, text, cont)], statuses-set);
+    statuses in {"ok","denied","nogawk"} per contributing chunk."""
     if not repl_dir:
         return [], None
     from datetime import datetime
     bts = str(win["meta"].get("begin_ts", ""))
     ets = str(win["meta"].get("end_ts", ""))
-    lines, status = [], None
+    lines, statuses = [], set()
     for d in sorted(glob.glob(os.path.join(repl_dir, "snap_*"))):
         mp = os.path.join(d, "meta.json")
         f = os.path.join(d, "os", "dmesg")
@@ -25397,8 +25403,7 @@ def load_dmesg_chunks(win, repl_dir):
         _last_e = None
         for ln in txt.splitlines():
             if ln.startswith("status "):
-                st = ln[7:].strip()
-                status = st if status is None or st == "denied" else status
+                statuses.add(ln[7:].strip())
                 continue
             m = _DMESG_TS.match(ln)
             if m:
@@ -25419,7 +25424,7 @@ def load_dmesg_chunks(win, repl_dir):
     seen = set()
     lines = [l for l in lines if not (l in seen or seen.add(l))]
     lines.sort(key=lambda t: t[0])
-    return lines, status
+    return lines, statuses
 
 def loadprofile_iostat_rows(win, duration):
     """(label, begin, end, delta, per_sec, mode, ok) rows from rel_iostat.csv --
@@ -28470,12 +28475,14 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     # Union of the window's incremental chunks, pattern-categorized (nine
     # layers). Constant rendering: events table / "no kernel errors" note /
     # "unavailable" (dmesg_restrict) note.
-    _dml, _dmst = load_dmesg_chunks(win, repl_dir)
-    if _dmst is not None:
+    _dml, _dmsts = load_dmesg_chunks(win, repl_dir)
+    if _dmsts:
         sub("Kernel Messages (dmesg)")
-        if _dmst == "denied":
+        if "denied" in _dmsts and not _dml:
             note("unavailable (kernel.dmesg_restrict=1 -- the collector user "
                  "cannot read the ring buffer; ask the OS admin or relax the sysctl)")
+        elif "nogawk" in _dmsts and not _dml:
+            note("unavailable (this host's awk lacks mktime -- install gawk)")
         else:
             from datetime import datetime as _dt
             # NO per-line epoch window filter: the CHUNK TILING already
@@ -28484,52 +28491,72 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             # from boottime+offset and go stale after ANY wall-clock step
             # (observed 204: +2min NTP correction silently dropped every
             # event); the displayed Time column keeps its native skew.
-            _rows = []
+            # index-based two-pass: pass 1 = classification (keyword match /
+            # reboot / continuation / separately-timestamped trace context,
+            # same rules as before); pass 2 = +/-5 RAW-LINE CONTEXT around
+            # each KEYWORD match -- the cause lines (SCSI FAILED Result,
+            # sense data, memory state) carry no keywords of their own but
+            # are the forensic context (user 2026-09-17). The chunks store
+            # ALL lines, so this is render-only. Window-range guarantee
+            # (user 2026-09-17): _dml IS the window's line set by chunk
+            # tiling -- each incremental block holds only lines newer than
+            # the previous snap's last line -- so a +/-5 neighbour can never
+            # reach outside the snapshot window; the indices are bounded and
+            # no epoch math is involved (dmesg -T skew-proof). Only the
+            # first-ever FULL dump can predate its window (one-time edge).
+            _mark = {}      # idx -> (category, is_context, display_text)
             _prev_cat = None
-            for _e, _text, _cont in _dml:
+            for _i, (_e, _text, _cont) in enumerate(_dml):
                 if _DMESG_EXCLUDE.search(_text):
                     _prev_cat = None
                     continue
                 if _cont:
-                    # continuation of the previous event (stack frames,
-                    # register dumps): render ONLY when the parent matched,
-                    # inheriting its category -- a call trace must come out
-                    # complete, frames carry no matchable keywords of their own
-                    if _prev_cat is None:
-                        continue
-                    _rows.append((_e, _prev_cat, _text))
+                    if _prev_cat is not None:
+                        _mark[_i] = (_prev_cat, False, _text)
                     continue
                 if _DMESG_REBOOT.match(_text):
-                    _cat, _text = "Kernel crash", "SYSTEM REBOOT: " + _text[:90]
+                    _cat, _disp = "Kernel crash", "SYSTEM REBOOT: " + _text[:90]
                 else:
-                    _cat = None
+                    _cat, _disp = None, _text
                     for _c, _pat in _DMESG_PATTERNS:
                         if re.search(_pat, _text, re.I):
                             _cat = _c
                             break
                 if _cat is None and _prev_cat is not None \
                         and _DMESG_CONTEXT.search(_text):
-                    # separately-timestamped continuation of the previous
-                    # crash/hang dump (frames, registers) -- ride its category
-                    _rows.append((_e, _prev_cat, _text))
+                    _mark[_i] = (_prev_cat, False, _text)
                     continue
                 _prev_cat = _cat
-                if _cat is None:
-                    continue
-                _rows.append((_e, _cat, _text))
+                if _cat is not None:
+                    _mark[_i] = (_cat, False, _disp)
+            for _i in [k for k, v in _mark.items() if not v[1]]:
+                for _j in range(max(0, _i - 5), min(len(_dml), _i + 6)):
+                    if _j in _mark:
+                        continue
+                    _t = _dml[_j][1]
+                    if _DMESG_EXCLUDE.search(_t):
+                        continue
+                    _mark[_j] = (_mark[_i][0], True, _t)
+            _rows = [(_dml[_i][0], _c, _ctx, _t)
+                     for _i, (_c, _ctx, _t) in sorted(_mark.items())]
             if _rows:
                 parts.append('<table class="t"><tr><th>Time</th><th>Category</th>'
                              '<th>Message</th></tr>')
-                for _e, _c, _t in _rows[:50]:
-                    parts.append('<tr><td>%s</td><td>%s</td><td>%s</td></tr>'
-                                 % (_dt.fromtimestamp(_e).strftime("%Y-%m-%d %H:%M:%S"),
-                                    esc(_c), esc(_t[:200])))
+                for _e, _c, _ctx, _t in _rows[:50]:
+                    _cl = ' class="muted"' if _ctx else ''
+                    parts.append('<tr><td%s>%s</td><td%s>%s</td><td%s>%s</td></tr>'
+                                 % (_cl, _dt.fromtimestamp(_e).strftime("%Y-%m-%d %H:%M:%S"),
+                                    _cl, esc(_c), _cl, esc(_t[:200])))
                 parts.append('</table>')
                 if len(_rows) > 50:
                     note("%d more matching kernel messages suppressed (window total %d)"
                          % (len(_rows) - 50, len(_rows)))
             else:
                 note("no kernel errors in this window")
+            if _dml and ("denied" in _dmsts or "nogawk" in _dmsts):
+                note("partial: some snapshot(s) in this window could not read "
+                     "the kernel buffer (dmesg_restrict/awk) -- events from "
+                     "those intervals are missing")
 
     # ================= Time Model System Stats =================
     sec("Time Model System Stats")
