@@ -28300,6 +28300,10 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                 f = ln.split("|")
                 if len(f) == 3:
                     try:
+                        # snaps taken before the rename wrote this class as
+                        # "server logs" -- fold them into the current name
+                        if f[0] == "server logs":
+                            f[0] = "pg logs"
                         out[f[0]] = (int(f[1]), int(f[2]))
                     except ValueError:
                         pass
