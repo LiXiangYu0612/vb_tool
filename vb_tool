@@ -28328,15 +28328,6 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                          '<td class="n"><b>%d</b></td><td class="n"><b>%+d</b></td></tr>'
                          % (_tb, _te, _te - _tb))
         parts.append('</table>')
-        if _lmb or _lme:
-            _usr = ""
-            for ln in (win["os"].get(("end", "limits"), "") or
-                       win["os"].get(("begin", "limits"), "")).splitlines():
-                if ln.startswith("user "):
-                    _usr = ln[5:].strip()
-            parts.append('<div class="note">effective limits of the running postmaster (pid %s)%s</div>'
-                         % (fmt_int(_dbe[0]),
-                            (", os user: %s" % esc(_usr)) if _usr else ""))
     sub("OS Memory Usage")
     _bm = parse_meminfo(win["os"].get(("begin", "meminfo"), ""))
     _em = parse_meminfo(win["os"].get(("end", "meminfo"), ""))
