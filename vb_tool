@@ -24179,6 +24179,22 @@ _awr_collect() {
                   for (i = 1; i <= n; i++) print ord[i] "|" live[ord[i]]+0 "|" dcount[ord[i]]+0 }' \
             > "$osd/db_fd_types" 2>/dev/null
     fi
+    # TCP socket states on THIS port (kernel view; the fd socket row only
+    # counts fds the postmaster HOLDS -- time-wait/close-wait are kernel
+    # state and never appear there, yet they are the diagnostic gold:
+    # close-wait piling = server side not closing, time-wait surge = short
+    # connection storm). sport= filter: listener AND accepted connections
+    # both have local port = PGPORT; outbound sockets (walrcv, db links)
+    # match dport instead and stay out. No -p: the port filter alone runs
+    # fine as the DB user, root is not needed. Fixed state order, zeros
+    # included, same always-display rule as the fd classes.
+    ss -tanH "sport = :${PGPORT:-5432}" 2>/dev/null | awk '
+        { s = tolower($1)
+          if (s == "estab") s = "established"
+          cnt[s]++ }
+        END { n = split("listen|established|syn-recv|syn-sent|fin-wait-1|fin-wait-2|time-wait|close-wait|last-ack|closing|other", ord, "|")
+              for (i = 1; i <= n; i++) print ord[i] "|" cnt[ord[i]]+0 }' \
+        > "$osd/db_tcp_states" 2>/dev/null
     # sysctl: FULL kernel parameter dump via `sysctl -a` (user 2026-09-17:
     # the complete set, not a curated list). Keys the collector user cannot
     # read are printed to stderr by sysctl and simply do not appear -- that
@@ -24944,7 +24960,7 @@ def load_window(d):
         except Exception:
             w["meta"] = {}
     for phase in ("begin", "end"):
-        for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi", "softnet_stat", "net_rtt", "df_fs", "file_nr", "db_proc", "limits", "db_fd_types", "sysctl", "dmesg"):
+        for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi", "softnet_stat", "net_rtt", "df_fs", "file_nr", "db_proc", "limits", "db_fd_types", "db_tcp_states", "sysctl", "dmesg"):
             p = os.path.join(d, "os", phase, f)
             w["os"][(phase, f)] = _read_os_text(p) if os.path.isfile(p) else ""
         for t in ("statement", "wait_events", "instance_time", "database", "pagewriter",
@@ -24975,7 +24991,7 @@ def load_snap(d, tables=None):
             s["meta"] = json.load(open(mp))
         except Exception:
             s["meta"] = {}
-    for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi", "softnet_stat", "net_rtt", "df_fs", "file_nr", "db_proc", "limits", "db_fd_types", "sysctl", "dmesg"):
+    for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi", "softnet_stat", "net_rtt", "df_fs", "file_nr", "db_proc", "limits", "db_fd_types", "db_tcp_states", "sysctl", "dmesg"):
         p = os.path.join(d, "os", f)
         s["os"][f] = _read_os_text(p) if os.path.isfile(p) else ""
     _DB_TABLES = ("statement", "wait_events", "instance_time", "database", "pagewriter",
@@ -25078,7 +25094,7 @@ def build_window_from_snaps(begin_dir, end_dir, sqltext_root=None, load_sqltext=
     b = load_snap(begin_dir, db_tables)
     e = load_snap(end_dir, db_tables)
     win = {"meta": {}, "os": {}, "db": {}}
-    for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi", "softnet_stat", "net_rtt", "df_fs", "file_nr", "db_proc", "limits", "db_fd_types", "sysctl", "dmesg"):
+    for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi", "softnet_stat", "net_rtt", "df_fs", "file_nr", "db_proc", "limits", "db_fd_types", "db_tcp_states", "sysctl", "dmesg"):
         win["os"][("begin", f)] = b["os"].get(f, "")
         win["os"][("end", f)] = e["os"].get(f, "")
     for t in ("statement", "wait_events", "instance_time", "database", "pagewriter",
@@ -28310,6 +28326,31 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             return out
         _fdb = _fdmap(win["os"].get(("begin", "db_fd_types"), ""))
         _fde = _fdmap(win["os"].get(("end", "db_fd_types"), ""))
+        # TCP socket states on this port, rows ABOVE the fd rows (user
+        # 2026-09-17): kernel view via ss "sport = :port" -- time-wait /
+        # close-wait never show among the fd socket count, this is their
+        # only visibility. Fixed state order, zeros displayed, NO
+        # highlighting (user). Hidden on old snaps.
+        def _tcpmap(txt):
+            out = {}
+            for ln in (txt or "").splitlines():
+                f = ln.split("|")
+                if len(f) == 2:
+                    try:
+                        out[f[0]] = int(f[1])
+                    except ValueError:
+                        pass
+            return out
+        _tsb = _tcpmap(win["os"].get(("begin", "db_tcp_states"), ""))
+        _tse = _tcpmap(win["os"].get(("end", "db_tcp_states"), ""))
+        if _tsb or _tse:
+            for _ts in ("listen", "established", "syn-recv", "syn-sent",
+                        "fin-wait-1", "fin-wait-2", "time-wait",
+                        "close-wait", "last-ack", "closing", "other"):
+                _b = _tsb.get(_ts, 0); _e = _tse.get(_ts, 0)
+                parts.append('<tr><td>tcp %s</td><td class="n">%d</td>'
+                             '<td class="n">%d</td><td class="n">%+d</td></tr>'
+                             % (esc(_ts), _b, _e, _e - _b))
         if _fdb or _fde:
             _tb = _te = 0
             for _fc in ("data files (base)", "data files (global)", "temp files",
