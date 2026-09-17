@@ -23982,6 +23982,10 @@ Usage: vb_tool awr <create|enable|disable|awrrpt|awrdiff|baseline|topsql|event|s
                             primary there is no walreceiver; needs 'awr
                             enable')
   ltx     begin <id> end <id>
+  sqlhist <sql_id> begin <id> end <id>
+                            print ONE SQL's per-interval execution history
+                            to the screen (calls/dbtime/avg_dbtime/cpu/io/
+                            cr/pr/plan/rows per consecutive snapshot pair)
                             print the window's PER-5MIN long-transaction monitor
                             to the screen (Sample Time + ltx60_cnt|itx|act
                             + pid|state|xact_start + duration(auto unit) +
@@ -24350,7 +24354,7 @@ _awr_collect() {
 -- keys in this file -- ALL texts, no top-N filter). 95% of the old file was
 -- text; numbers-only keeps every row so sum-of-delta stays the exact pct base
 -- (2026-09-09-awr-statement-slim-design.md).
-\copy (SELECT user_name, unique_sql_id, n_calls, n_blocks_fetched, n_blocks_hit, n_soft_parse, n_hard_parse, db_time, cpu_time, execution_time, plan_time, data_io_time, n_returned_rows FROM dbe_perf.statement) TO '$dbd/statement.csv' WITH CSV HEADER
+\copy (SELECT user_name, unique_sql_id, n_calls, n_blocks_fetched, n_blocks_hit, n_soft_parse, n_hard_parse, db_time, cpu_time, execution_time, plan_time, data_io_time, n_returned_rows, sort_time, hash_time FROM dbe_perf.statement) TO '$dbd/statement.csv' WITH CSV HEADER
 \copy (SELECT * FROM dbe_perf.wait_events)              TO '$dbd/wait_events.csv'   WITH CSV HEADER
 \copy (SELECT * FROM gs_instance_time)                  TO '$dbd/instance_time.csv' WITH CSV HEADER
 \copy (SELECT * FROM pg_stat_database)                  TO '$dbd/database.csv'      WITH CSV HEADER
@@ -30803,6 +30807,68 @@ def _fmt_duration(seconds):
     return "%.1fd" % (s / 86400.0)
 
 
+
+def text_sqlhist(win, sql_id="", detail_wins=None):
+    """Per-interval execution history for ONE SQL (unique_sql_id). Whole-window
+    row first + one row per consecutive snapshot pair; columns: time_range |
+    calls | dbtime | avg_dbtime | cpu | io | cr | pr | plan | rows."""
+    lines = _text_banner("awr sql history", win, extra="sql_id: %s" % sql_id)
+    def _hist_rows(w):
+        ST = delta_rows(w, "statement", "unique_sql_id",
+                        ["n_calls", "db_time", "cpu_time", "data_io_time",
+                         "plan_time", "sort_time", "hash_time",
+                         "n_blocks_fetched", "n_blocks_hit", "n_returned_rows"])
+        d = ST.get(sql_id)
+        if not d or to_num(d.get("n_calls", 0)) <= 0:
+            return None
+        calls = to_num(d.get("n_calls", 0))
+        fetched = to_num(d.get("n_blocks_fetched", 0))
+        hit = to_num(d.get("n_blocks_hit", 0))
+        def _tot(col):
+            x = to_num(d.get(col, 0))
+            return x / 1e3 if x >= 0 else None      # us -> ms
+        def _avg(col):
+            t = _tot(col)
+            return t / calls if (t is not None and calls > 0) else None
+        def _f2(v):
+            return "%.2f" % v if v is not None else "-"
+        def _f1(v):
+            return "%.2f" % v if v is not None else "-"
+        return ["%d" % calls,
+                _f2(_tot("db_time")),
+                _f1(_avg("db_time")),
+                _f1(_avg("cpu_time")),
+                _f1(_avg("data_io_time")),
+                _f1(_avg("sort_time")),
+                _f1(_avg("hash_time")),
+                _f1(_avg("plan_time")),
+                "%.1f" % (fetched / calls) if calls > 0 and fetched >= 0 else "-",
+                "%.1f" % ((fetched - hit) / calls) if calls > 0 and fetched - hit >= 0 else "-",
+                "%.1f" % (to_num(d.get("n_returned_rows", 0)) / calls) if calls > 0 else "-"]
+    row = _hist_rows(win)
+    if not row:
+        lines.append("sql_id %s: no executions in this window" % sql_id)
+        return 1, "\n".join(lines)
+    headers = ["time_range", "calls", "dbtime", "avg_dbtime", "avg_cpu", "avg_io",
+               "avg_sort", "avg_hash", "avg_plan", "avg_cr", "avg_pr", "avg_rows"]
+    all_rows = [["whole"] + row]
+    if detail_wins:
+        for dw in detail_wins:
+            m = dw["meta"]
+            tr = "%s-%s" % (_short_ts(m.get("begin_ts", "")),
+                            _short_ts(m.get("end_ts", ""))[-5:])
+            r = _hist_rows(dw)
+            if r:
+                all_rows.append([tr] + r)
+    lines.append(_text_table(headers, all_rows,
+                             align="l" + "r" * 11))
+    # first row = whole window (no time_range prefix needed, but keep format)
+    return 0, "\n".join(lines)
+
+def _short_ts(ts):
+    ts = str(ts)
+    return ts[5:10].replace("-", "") + " " + ts[11:16] if len(ts) >= 16 else ts
+
 def text_ltx(win, repl_dir=None):
     """awrrpt Long Transaction Monitor as a screen table: per-5-min ltx60_*
     counts + oldest-txn details from the lt_*.log sampler -- same source and
@@ -30895,7 +30961,7 @@ def main():
     sqltext_root = None
     name_prefix = "awr"
     text_section = None
-    text_db = text_schema = text_table = text_event_name = None
+    text_db = text_schema = text_table = text_event_name = text_sql_id = None
     metric = "dbtime"
     top_n = 30
     n_given = False
@@ -30933,6 +30999,8 @@ def main():
             i += 2
         elif a == "--text" and i + 1 < len(argv):
             text_section = argv[i + 1]; i += 2
+        elif a == "--sql-id" and i + 1 < len(argv):
+            text_sql_id = argv[i + 1]; i += 2
         elif a == "--event" or (a == "-E" and i + 1 < len(argv)):
             if i + 1 >= len(argv):
                 sys.stderr.write("Error: %s requires a value\n" % a); return 2
@@ -31002,7 +31070,7 @@ def main():
             sys.stderr.write("Error: --text needs --begin DIR and --end DIR\n"); return 2
         if text_section not in ("topsql", "event", "summary", "tabstat",
                                 "cpu", "io", "page", "replstat", "replslot",
-                                "replay", "ltx"):
+                                "replay", "ltx", "sqlhist"):
             sys.stderr.write("Error: --text expects topsql|event|summary|tabstat"
                              "|cpu|io|page|replstat|replslot|replay|ltx\n"); return 2
         if not repl_dir:
@@ -31040,6 +31108,8 @@ def main():
                 return text_replay(w, repl_dir)
             elif text_section == "ltx":
                 return text_ltx(w, repl_dir)
+            elif text_section == "sqlhist":
+                return text_sqlhist(w, sql_id=text_sql_id, detail_wins=dw)
             else:
                 return text_tabstat(w, text_db, text_schema, text_table, detail_wins=dw)
 
@@ -32683,6 +32753,15 @@ _awr_replstat() { _awr_text_report replstat "$@"; }
 _awr_replslot() { _awr_text_report replslot "$@"; }
 _awr_replay()   { _awr_text_report replay   "$@"; }
 _awr_ltx()     { _awr_text_report ltx     "$@"; }
+_awr_sqlhist() {
+    local sid="$1"; shift   # run_awr already consumed 'sqlhist'
+    if [ -z "$sid" ] || [ "$sid" = "begin" ] || [ "$sid" = "end" ]; then
+        echo "Error: sqlhist requires a sql_id as the first argument" >&2
+        echo "Usage: awr sqlhist <sql_id> begin <id> end <id>" >&2
+        return 2
+    fi
+    _awr_text_report sqlhist --sql-id "$sid" "$@"
+}
 
 run_awr() {
     local sub="$1"
@@ -32711,6 +32790,7 @@ run_awr() {
         replslot)       _awr_replslot "$@";;
         replay)         _awr_replay "$@";;
         ltx)            _awr_ltx "$@";;
+        sqlhist)        _awr_sqlhist "$@";;
         list|ls)        _awr_list "$@";;
         show)           _awr_show "$@";;
         delete)         if [ "$1" = "until" ] && [ $# -eq 2 ]; then _awr_delete_until "$2";
