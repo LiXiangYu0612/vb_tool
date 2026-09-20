@@ -27,7 +27,8 @@ show_help() {
     echo "  as              display active session info"
     echo "  asp             analyze active session profile"
     echo "  awr             performance AWR snapshots & diff reports"
-    echo "  completion      print bash TAB-completion script; enable: source <(vb_tool completion)"
+    echo "  completion      print bash TAB-completion script; 'completion --install' appends the"
+    echo "                  activation line to ~/.bashrc (one-shot; then ./vb_tool fl<TAB> works anywhere)"
     echo "  collect_log     collect logs for cluster or single node"
     echo "  dead_tups       display dead tuples information"
     echo "  flamegraph      generate CPU flame graph"
@@ -85,7 +86,8 @@ show_list() {
     echo "  as              display active session info"
     echo "  asp             analyze active session profile"
     echo "  awr             performance AWR snapshots & diff reports"
-    echo "  completion      print bash TAB-completion script; enable: source <(vb_tool completion)"
+    echo "  completion      print bash TAB-completion script; 'completion --install' appends the"
+    echo "                  activation line to ~/.bashrc (one-shot; then ./vb_tool fl<TAB> works anywhere)"
     echo "  collect_log     collect logs for cluster or single node"
     echo "  dead_tups       display dead tuples information"
     echo "  flamegraph      generate CPU flame graph"
@@ -33485,11 +33487,62 @@ complete -F _vb_tool ./vb_tool ./vb_tool_dev ./vb_tool_test 2>/dev/null
 VBCOMP
     [ -n "$self" ] && echo "complete -F _vb_tool '$self' 2>/dev/null"
 }
+# one-shot installer (user 2026-09-20: deployer runs ONCE, every later user
+# does NOTHING -- TAB just works). bash requires the completion to be
+# registered in each shell; a child process cannot inject into a running
+# shell, so we plant the registration where shells pick it up themselves:
+#   root:   /etc/profile.d/vb_tool_completion.sh (embedded body, all users,
+#           all login shells, covers ./vb_tool too) + /usr/local/bin symlink
+#   pkg:    ~/.local/share/bash-completion/completions/vb_tool (lazy load,
+#           no bashrc edit, needs the bash-completion package)
+#   always: ~/.bashrc one source line (guaranteed fallback)
+vb_tool_completion_install() {
+    local self dir rc_file did=""
+    self=$(readlink -f "${BASH_SOURCE[0]:-$0}" 2>/dev/null) || self=""
+    [ -n "$self" ] || self="$0"
+    if [ "$(id -u)" = "0" ]; then
+        if mkdir -p /etc/profile.d 2>/dev/null \
+           && vb_tool_completion > /etc/profile.d/vb_tool_completion.sh 2>/dev/null; then
+            chmod 644 /etc/profile.d/vb_tool_completion.sh
+            did="${did}  [system] /etc/profile.d/vb_tool_completion.sh (ALL users, incl ./vb_tool)
+"
+        fi
+        if [ -d /usr/local/bin ] && ln -sf "$self" /usr/local/bin/vb_tool 2>/dev/null; then
+            did="${did}  [system] /usr/local/bin/vb_tool -> $self (PATH: vb_tool fl<TAB>)
+"
+        fi
+    fi
+    dir="$HOME/.local/share/bash-completion/completions"
+    if mkdir -p "$dir" 2>/dev/null && vb_tool_completion > "$dir/vb_tool" 2>/dev/null; then
+        did="${did}  [user]   $dir/vb_tool (lazy load, no bashrc edit)
+"
+    fi
+    rc_file="$HOME/.bashrc"
+    touch "$rc_file" 2>/dev/null
+    if ! grep -qF "source <($self completion)" "$rc_file" 2>/dev/null; then
+        printf '\n# vb_tool TAB completion (vb_tool completion --install)\nsource <(%s completion)\n' "$self" >> "$rc_file"
+        did="${did}  [user]   $rc_file (guaranteed fallback)
+"
+    fi
+    if [ -z "$did" ]; then
+        echo "Error: nothing could be installed (no writable location)" >&2
+        return 1
+    fi
+    echo "TAB completion installed:"
+    echo "$did" | sed '/^$/d'
+    echo "activate now: source ~/.bashrc (or new login shell); future shells need nothing."
+    return 0
+}
 case "$1" in
     -V|-v|version)
         echo "$VB_TOOL_VERSION"; exit 0;;
     completion)
-        vb_tool_completion; exit 0;;
+        if [ "$2" = "--install" ] || [ "$2" = "-i" ]; then
+            vb_tool_completion_install
+        else
+            vb_tool_completion
+        fi
+        exit 0;;
     se)
         if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
             se_help
