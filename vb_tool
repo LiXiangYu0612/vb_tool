@@ -1,13 +1,13 @@
 #!/bin/bash
 #--------------------------------------------------------------------------------
 #-- File name:   vb_tool
-#-- Version  ：  v2.5.4
-#-- Commit at： 2026-09-17 11:00:00
+#-- Version  ：  v2.5.6
+#-- Commit at： 2026-09-19 22:00:00
 #-- Purpose:     Vastbase Script Tool
 #-- Author:      MVS & Second-line Team 
 #--------------------------------------------------------------------------------
 set -o pipefail
-export VB_TOOL_VERSION="v2.5.4"
+export VB_TOOL_VERSION="v2.5.6"
 show_help() {
     echo "Vastbase Script Tool (vb_tool)"
     echo ""
@@ -268,12 +268,16 @@ workload_help() {
 
 sqlhc_help() {
     echo "Options for sqlhc:"
-    echo "  Usage: vb_tool sqlhc [-o] [-s <seconds>] <unique_id>"
+    echo "  Usage: vb_tool sqlhc [-o] [-s <seconds>] [-l <date>] [-n <count>] <unique_id>"
     echo "  Description: display sql health check (performance plan & sqlstat & tabstat)"
     echo "  -P <port>: database port (default: current \$PGPORT)"
     echo "  Options:"
     echo "    -o: write output to /tmp/vb_tool_sqlhc_<id>_<timestamp>.txt (default: stdout)"
     echo "    -s: duration threshold in seconds (default 300), use EXPLAIN if duration >= threshold"
+    echo "    -l <date>: start the pglog search at the LAST log of <date> (YYYYMMDD or"
+    echo "       YYYY-MM-DD), searching upward to older logs; default: newest log"
+    echo "    -n <count>: number of log files (.log/.log.gz/.csv[.gz]) to search from the"
+    echo "       start point (default 50, e.g. -n 200); stops at the first SQL match"
     echo "    -h, --help: show this help message"
     echo ""
 }
@@ -5116,8 +5120,13 @@ SELECT query FROM dbe_perf.statement WHERE unique_sql_id=:'unique_sql_id';
 \echo '======='
 \echo 'sqlplan'
 \echo '======='
-\echo '                          '
-SELECT to_char(max(start_time),'yyyy-mm-dd hh24:mi:ss') last_exec_time,ora_hash(regexp_replace(query_plan,'\(cost=.*?\)','','g')) plan_hash_value,max(query_plan) query_plan FROM dbe_perf.statement_history WHERE unique_query_id=:'unique_sql_id' group by ora_hash(regexp_replace(query_plan,'\(cost=.*?\)','','g')) order by 1;
+\set QUIET on
+\pset format unaligned
+\pset tuples_only on
+SELECT 'last_exec_time: ' || to_char(max(start_time),'yyyy-mm-dd hh24:mi:ss') || '  plan_hash_value: ' || ora_hash(regexp_replace(query_plan,'\(cost=.*?\)','','g')) || chr(10) || coalesce(regexp_replace(max(query_plan), '\s+\$', ''), '') || chr(10) AS sqlplan FROM dbe_perf.statement_history WHERE unique_query_id=:'unique_sql_id' group by ora_hash(regexp_replace(query_plan,'\(cost=.*?\)','','g')) order by 1;
+\pset tuples_only off
+\pset format aligned
+\set QUIET off
 \echo '======================'
 \echo 'sqlstat from statement'
 \echo '======================'
@@ -6488,13 +6497,13 @@ EOF
 echo '=========================================='
 echo '         top cpu usage info               '
 echo '=========================================='
-psql -d postgres -c "with tmp as (SELECT split_part(result, ',', 1) AS lwpid, split_part(result, ',', 2) AS cpu_usage FROM regexp_split_to_table('$(top -b -n1 -H -p $pid | awk '/^ *PID USER/ {ci=0; for(i=1;i<=NF;i++) if($i=="%CPU") ci=i; while (getline) if(ci && $ci!="") print $1 "," $ci}'| paste -sd ";")', ';') AS result) select round(sum(tmp.cpu_usage),2)||'%' cpu_usage,s.thread_name,a.unique_sql_id,min(s.pid) one_pid,count(*) pid_cnt,min(substr(REGEXP_REPLACE(REGEXP_REPLACE(query, '(\r|\n)+', ' '),' {2,}', ' '),1,50)) sqltext from pg_os_threads s right join tmp on s.lwpid=tmp.lwpid  left join pg_stat_activity a on s.pid=a.pid  where (a.state in ('active') or a.state is null) group by s.thread_name,a.unique_sql_id having sum(tmp.cpu_usage)>0 order by round(sum(tmp.cpu_usage),2)::numeric desc limit 10"
+psql -P footer=off -d postgres -c "with tmp as (SELECT split_part(result, ',', 1) AS lwpid, split_part(result, ',', 2) AS cpu_usage FROM regexp_split_to_table('$(top -b -n1 -H -p $pid | awk '/^ *PID USER/ {ci=0; for(i=1;i<=NF;i++) if($i=="%CPU") ci=i; while (getline) if(ci && $ci!="") print $1 "," $ci}'| paste -sd ";")', ';') AS result) select round(sum(tmp.cpu_usage),2)||'%' cpu_usage,s.thread_name,a.unique_sql_id,min(s.pid) one_pid,count(*) pid_cnt,min(substr(REGEXP_REPLACE(REGEXP_REPLACE(query, '(\r|\n)+', ' '),' {2,}', ' '),1,50)) sqltext from pg_os_threads s right join tmp on s.lwpid=tmp.lwpid  left join pg_stat_activity a on s.pid=a.pid  where (a.state in ('active') or a.state is null) group by s.thread_name,a.unique_sql_id having sum(tmp.cpu_usage)>0 order by round(sum(tmp.cpu_usage),2)::numeric desc limit 10"
 
 echo '=========================================='
 echo '         top I/O usage info               '
 echo '=========================================='
 export S_TIME_FORMAT=ISO
-psql -d postgres -c "with tmp as (SELECT split_part(result, ',', 1) AS lwpid, split_part(result, ',', 2) AS kb_rd,split_part(result, ',', 3) AS kb_wr FROM regexp_split_to_table('$(pidstat -hdt -p $pid 1 1 | awk 'NR>4 {print $4 "," $5 "," $6}' | paste -sd ";")', ';') AS result) select sum(tmp.kb_rd) read_kb,sum(tmp.kb_wr) write_kb,s.thread_name,a.unique_sql_id,min(s.pid) one_pid,count(*) pid_cnt,min(substr(REGEXP_REPLACE(REGEXP_REPLACE(query, '(\r|\n)+', ' '),' {2,}', ' '),1,50)) sqltext from pg_os_threads s right join tmp on s.lwpid=tmp.lwpid left join pg_stat_activity a on s.pid=a.pid where (a.state in ('active') or a.state is null) group by s.thread_name,a.unique_sql_id having sum(tmp.kb_rd)::numeric+sum(tmp.kb_wr)::numeric>0 order by sum(tmp.kb_rd)::numeric+sum(tmp.kb_wr)::numeric desc limit 10" 
+psql -P footer=off -d postgres -c "with tmp as (SELECT split_part(result, ',', 1) AS lwpid, split_part(result, ',', 2) AS kb_rd,split_part(result, ',', 3) AS kb_wr FROM regexp_split_to_table('$(pidstat -hdt -p $pid 1 1 | awk 'NR>4 {print $4 "," $5 "," $6}' | paste -sd ";")', ';') AS result) select sum(tmp.kb_rd) read_kb,sum(tmp.kb_wr) write_kb,s.thread_name,a.unique_sql_id,min(s.pid) one_pid,count(*) pid_cnt,min(substr(REGEXP_REPLACE(REGEXP_REPLACE(query, '(\r|\n)+', ' '),' {2,}', ' '),1,50)) sqltext from pg_os_threads s right join tmp on s.lwpid=tmp.lwpid left join pg_stat_activity a on s.pid=a.pid where (a.state in ('active') or a.state is null) group by s.thread_name,a.unique_sql_id having sum(tmp.kb_rd)::numeric+sum(tmp.kb_wr)::numeric>0 order by sum(tmp.kb_rd)::numeric+sum(tmp.kb_wr)::numeric desc limit 10" 
 
  else
     psql -d postgres -P footer=off <<EOF
@@ -6562,13 +6571,13 @@ EOF
 echo '=========================================='
 echo '         top cpu usage info               '
 echo '=========================================='
-psql -d postgres -c "with tmp as (SELECT split_part(result, ',', 1) AS lwpid, split_part(result, ',', 2) AS cpu_usage FROM regexp_split_to_table('$(top -b -n1 -H -p $pid | awk '/^ *PID USER/ {ci=0; for(i=1;i<=NF;i++) if($i=="%CPU") ci=i; while (getline) if(ci && $ci!="") print $1 "," $ci}'| paste -sd ";")', ';') AS result) select sum(tmp.cpu_usage)||'%' cpu_usage,s.thread_name,a.query_id,min(s.pid) one_pid,count(*) pid_cnt,min(substr(REGEXP_REPLACE(REGEXP_REPLACE(query, '(\r|\n)+', ' '),' {2,}', ' '),1,50)) sqltext from pg_os_threads s join tmp on s.lwpid=tmp.lwpid  left join pg_stat_activity a on s.pid=a.pid  where (a.state in ('active') or a.state is null) group by s.thread_name,a.query_id having sum(tmp.cpu_usage)>0 order by round(sum(tmp.cpu_usage),2)::numeric desc limit 10"
+psql -P footer=off -d postgres -c "with tmp as (SELECT split_part(result, ',', 1) AS lwpid, split_part(result, ',', 2) AS cpu_usage FROM regexp_split_to_table('$(top -b -n1 -H -p $pid | awk '/^ *PID USER/ {ci=0; for(i=1;i<=NF;i++) if($i=="%CPU") ci=i; while (getline) if(ci && $ci!="") print $1 "," $ci}'| paste -sd ";")', ';') AS result) select sum(tmp.cpu_usage)||'%' cpu_usage,s.thread_name,a.query_id,min(s.pid) one_pid,count(*) pid_cnt,min(substr(REGEXP_REPLACE(REGEXP_REPLACE(query, '(\r|\n)+', ' '),' {2,}', ' '),1,50)) sqltext from pg_os_threads s join tmp on s.lwpid=tmp.lwpid  left join pg_stat_activity a on s.pid=a.pid  where (a.state in ('active') or a.state is null) group by s.thread_name,a.query_id having sum(tmp.cpu_usage)>0 order by round(sum(tmp.cpu_usage),2)::numeric desc limit 10"
 
 echo '=========================================='
 echo '         top I/O usage info               '
 echo '=========================================='
 export S_TIME_FORMAT=ISO
-psql -d postgres -c "with tmp as (SELECT split_part(result, ',', 1) AS lwpid, split_part(result, ',', 2) AS kb_rd,split_part(result, ',', 3) AS kb_wr FROM regexp_split_to_table('$(pidstat -hdt -p $pid 1 1 | awk 'NR>4 {print $4 "," $5 "," $6}' | paste -sd ";")', ';') AS result) select sum(tmp.kb_rd) read_kb,sum(tmp.kb_wr) write_kb,s.thread_name,a.query_id,min(s.pid) one_pid,count(*) pid_cnt,min(substr(REGEXP_REPLACE(REGEXP_REPLACE(query, '(\r|\n)+', ' '),' {2,}', ' '),1,50)) sqltext from pg_os_threads s join tmp on s.lwpid=tmp.lwpid left join pg_stat_activity a on s.pid=a.pid where (a.state in ('active') or a.state is null) group by s.thread_name,a.query_id having sum(tmp.kb_rd)::numeric+sum(tmp.kb_wr)::numeric>0 order by sum(tmp.kb_rd)::numeric+sum(tmp.kb_wr)::numeric desc limit 10" 
+psql -P footer=off -d postgres -c "with tmp as (SELECT split_part(result, ',', 1) AS lwpid, split_part(result, ',', 2) AS kb_rd,split_part(result, ',', 3) AS kb_wr FROM regexp_split_to_table('$(pidstat -hdt -p $pid 1 1 | awk 'NR>4 {print $4 "," $5 "," $6}' | paste -sd ";")', ';') AS result) select sum(tmp.kb_rd) read_kb,sum(tmp.kb_wr) write_kb,s.thread_name,a.query_id,min(s.pid) one_pid,count(*) pid_cnt,min(substr(REGEXP_REPLACE(REGEXP_REPLACE(query, '(\r|\n)+', ' '),' {2,}', ' '),1,50)) sqltext from pg_os_threads s join tmp on s.lwpid=tmp.lwpid left join pg_stat_activity a on s.pid=a.pid where (a.state in ('active') or a.state is null) group by s.thread_name,a.query_id having sum(tmp.kb_rd)::numeric+sum(tmp.kb_wr)::numeric>0 order by sum(tmp.kb_rd)::numeric+sum(tmp.kb_wr)::numeric desc limit 10" 
 fi
 }
 
@@ -6737,7 +6746,7 @@ order by tt.total_size desc;
 
 EOF
 
-psql -d ${dbname} -f /tmp/query.sql 
+psql -P footer=off -d ${dbname} -f /tmp/query.sql
 
 }
 
@@ -8535,7 +8544,7 @@ picked AS (
             echo "[SKIP] standby: local_active_session not present; ASP has no local source"
             return 0
         fi
-	psql -d postgres <<EOF
+	psql -P footer=off -d postgres <<EOF
 
 \echo '==================================='
 \echo '       waitchain from gs_asp       '
@@ -9267,7 +9276,7 @@ run_dead_tups() {
       fi
     done
 
-    psql -d "$db_param"  <<EOF
+    psql -P footer=off -d "$db_param"  <<EOF
 \echo '=========================='
 \echo ' Instance xid information '
 \echo '=========================='
@@ -10755,15 +10764,15 @@ run_collect_log_version() {
     case "$vers" in
         1|3|5|7)
             # Contains vb_version()
-            psql -d postgres -c "SELECT vb_version();"
+            psql -d postgres -P footer=off -c "SELECT vb_version();"
             ;;
         2|6)
             # Contains pw_version()
-            psql -d postgres -c "SELECT pw_version();"
+            psql -d postgres -P footer=off -c "SELECT pw_version();"
             ;;
         4)
             # Contains only standard version()
-            psql -d postgres -c "SELECT version();"
+            psql -d postgres -P footer=off -c "SELECT version();"
             ;;
         0|*)
             # Fallback to config file if no functions are found
@@ -21877,7 +21886,9 @@ run_sqlhc() {
 local output_to_file=0
     local duration_threshold_sec=300
     local unique_id=""
-    
+    local search_start_date=""
+    local search_count=50
+
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -o)
@@ -21887,6 +21898,19 @@ local output_to_file=0
             -s)
                 [ $# -lt 2 ] && { echo "Error: -s requires a value (seconds)" >&2; return 2; }
                 duration_threshold_sec="$2"
+                shift 2
+                ;;
+            -l)
+                [ $# -lt 2 ] && { echo "Error: -l requires a value (date: YYYYMMDD or YYYY-MM-DD)" >&2; return 2; }
+                search_start_date="$2"
+                shift 2
+                ;;
+            -n)
+                [ $# -lt 2 ] && { echo "Error: -n requires a value (number of log files)" >&2; return 2; }
+                case "$2" in
+                    ''|*[!0-9]*) echo "Error: -n requires a positive integer, got '$2'" >&2; return 2 ;;
+                esac
+                search_count="$2"
                 shift 2
                 ;;
             --)
@@ -21913,6 +21937,21 @@ local output_to_file=0
         echo "Error: unique_id required" >&2
         return 1
     fi
+
+    if [[ -n "$search_start_date" ]]; then
+        case "$search_start_date" in
+            [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9])
+                search_start_date="${search_start_date:0:4}-${search_start_date:4:2}-${search_start_date:6:2}" ;;
+            [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) ;;
+            *)
+                echo "Error: -l invalid date '$search_start_date' (use YYYYMMDD or YYYY-MM-DD)" >&2
+                return 2 ;;
+        esac
+        if ! date -d "$search_start_date" +%F >/dev/null 2>&1; then
+            echo "Error: -l invalid date '$search_start_date'" >&2
+            return 2
+        fi
+    fi
     
     local log_file=""
     if [[ $output_to_file -eq 1 ]]; then
@@ -21936,11 +21975,56 @@ local output_to_file=0
         return 1
     fi
 
-    local logfiles
+    local logfiles _sel_rc
     logfiles=$(find "$gauss_log" \( -name "*.log" -o -name "*.log.gz" -o -name "*.csv" -o -name "*.csv.gz" \) -type f -printf '%T@ %p\n' 2>/dev/null | \
                sort -rn | \
-               head -n 50 | \
-               cut -d' ' -f2-)
+               cut -d' ' -f2- | \
+               SQLHC_START_DATE="$search_start_date" SQLHC_MAX_FILES="$search_count" python3 -c '
+import os, re, sys, time
+from datetime import datetime
+
+# pick the search window out of the mtime-desc log list:
+#   start = newest log of SQLHC_START_DATE day (filename date first -- rotation/
+#   gzip touches mtime, the name does not), mtime fallback for dateless names;
+#   then take SQLHC_MAX_FILES files from there downward (newest -> oldest).
+#   no start date = newest log.
+start_date = os.environ.get("SQLHC_START_DATE", "").strip().replace("-", "")
+max_files  = int(os.environ.get("SQLHC_MAX_FILES") or 50)
+files      = sys.stdin.read().splitlines()
+
+_day_re = re.compile(r"(\d{4})-?(\d{2})-?(\d{2})")
+
+def log_day(path):
+    m = _day_re.search(os.path.basename(path))
+    if m:
+        try:
+            datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+            return m.group(1) + m.group(2) + m.group(3)
+        except ValueError:
+            pass
+    try:
+        return time.strftime("%Y%m%d", time.localtime(os.path.getmtime(path)))
+    except OSError:
+        return ""
+
+start_idx = 0
+if start_date:
+    start_idx = -1
+    for i, f in enumerate(files):
+        if log_day(f) == start_date:
+            start_idx = i
+            break
+    if start_idx < 0:
+        sys.exit(1)
+
+out = files[start_idx:start_idx + max_files]
+sys.stdout.write("\n".join(out) + ("\n" if out else ""))
+')
+    _sel_rc=$?
+    if [[ $_sel_rc -ne 0 ]]; then
+        echo "Error: -l $search_start_date: no pg log found for that date under $gauss_log" >&2
+        return 1
+    fi
 
     if [[ -z "$logfiles" ]]; then
         echo "Warning: $gauss_log not found postgresql log" >&2
@@ -22672,7 +22756,7 @@ print(s.strip())
     echo ""
 
     if [ -n "$explain_type" ]; then
-    PGCONNECT_TIMEOUT=5 psql -d "$db_name" -X -q << PSQLEOF
+    PGCONNECT_TIMEOUT=5 psql -d "$db_name" -X -q -P footer=off << PSQLEOF
 SET search_path = ${user_name}, public;
 \echo '================'
 \echo '   query plan   '
@@ -23049,9 +23133,12 @@ SELECT query FROM dbe_perf.statement WHERE unique_sql_id=:'unique_sql_id';
 \echo '=============================='
 \echo 'sqlplan from statement_history'
 \echo '=============================='
-\echo '                          '
-SELECT to_char(max(start_time),'yyyy-mm-dd hh24:mi:ss') last_exec_time,
-       ora_hash(
+\set QUIET on
+\pset format unaligned
+\pset tuples_only on
+SELECT 'last_exec_time: ' || to_char(max(start_time),'yyyy-mm-dd hh24:mi:ss')
+       || '  plan_hash_value: '
+       || ora_hash(
   regexp_replace(
     regexp_replace(
       regexp_replace(query_plan,
@@ -23061,8 +23148,8 @@ SELECT to_char(max(start_time),'yyyy-mm-dd hh24:mi:ss') last_exec_time,
     ),
     '^(\s+Filter:).*$', '\1', 'gm'
   )
-) plan_hash_value,
-       max(query_plan) query_plan
+)
+       || chr(10) || coalesce(regexp_replace(max(query_plan), '\s+$', ''), '') || chr(10) AS sqlplan
 FROM dbe_perf.statement_history
 WHERE unique_query_id=:'unique_sql_id'
 group by ora_hash(
@@ -23076,6 +23163,9 @@ group by ora_hash(
     '^(\s+Filter:).*$', '\1', 'gm'
   )
 ) order by 1;
+\pset tuples_only off
+\pset format aligned
+\set QUIET off
 \echo '======================'
 \echo 'sqlstat from statement'
 \echo '======================'
@@ -24147,36 +24237,111 @@ _awr_collect() {
     # open fd classification: SAME postmaster, SAME instant as status/limits
     # above. VB is single-process multi-thread -- every backend's fd lives on
     # the postmaster, so ONE /proc/<pid>/fd walk covers the whole instance.
-    # Deleted fds (symlink target suffixed " (deleted)") count PER CLASS as a
-    # second number: temp spills are commonly deleted-while-held (unlink at
-    # close), db files deleted-but-held are a DROP/TRUNCATE signal. Classes
-    # match on path SEGMENTS (base/<db>/<digits>, /pgsql_tmp/, /pg_xlog/ ...)
-    # so a split log deploy (logdir outside datadir) needs no data_dir
-    # knowledge here. Output: "<class>|<live>|<deleted>" in a fixed order,
-    # every class emitted (zeros included -- user 2026-09-17).
+    # v2.5.6 (user): top level = professional fd TYPE (reg / pipe / socket /
+    # dev / other); reg is SUB-CLASSIFIED by DIRECTORY with the ABSOLUTE PATH
+    # as the row key, ALLOWLIST style -- only the meaningful $PGDATA dirs
+    # (_pref relative names; pg_location one level deeper = one bucket per
+    # tablespace; base/pgsql_tmp = the sort/hash spill dir) plus absolute
+    # prefixes (archive_dest GUC target, pg_tblspc symlink targets -- a
+    # tablespace's files resolve THERE, not under pg_tblspc) become their own
+    # rows. EVERYTHING else reg -- asp_data/gs_profile/sql_monitor/$PGHOME/
+    # unlisted dirs/datadir-root files -- goes to "reg other" (user 2026-09-19).
+    # Deleted fds count per row as a second number; the renderer shows merged
+    # "live(N deleted)" cells ONLY for the reg family. Output: "reg|live|
+    # deleted", "pipe|..", "socket|..", "dev|..", "other|..", then one row per
+    # seen bucket directory (pref order first).
     if [ -n "$_dpid" ] && [ -d "/proc/$_dpid/fd" ]; then
-        ls -l "/proc/$_dpid/fd" 2>/dev/null | awk '
+        _pd=$(readlink "/proc/$_dpid/cwd" 2>/dev/null)
+        [ -n "$_pd" ] && _pd="$_pd/"
+        local _pref="base|base/pgsql_tmp|global|pg_xlog|pg_wal|pg_arch|pg_clog|pg_csnlog|pg_multixact|pg_twophase|pg_cbm|pg_log|pg_audit|pg_replslot|pg_stat_tmp|pgsql_tmp|pg_tblspc|pg_location|pg_logical|pg_notify|pg_perf|pg_serial|pg_snapshots|mem_log|pg_errorinfo|pg_llog|undo"
+        _arc=$(PGCONNECT_TIMEOUT=3 psql -d postgres -tAc "show archive_dest" 2>/dev/null | head -1 | tr -d ' ')
+        case "$_arc" in
+            /*) _pref="$_pref|$_arc" ;;
+            ??*) [ -n "$_pd" ] && _pref="$_pref|$_pd$_arc" ;;
+        esac
+        if [ -d "${_pd}pg_tblspc" ]; then
+            for _t in "${_pd}pg_tblspc"/*; do
+                [ -L "$_t" ] || continue
+                _tt=$(readlink "$_t" 2>/dev/null)
+                case "$_tt" in
+                    /*) [ -d "$_tt" ] && _pref="$_pref|$_tt" ;;
+                    ??*) [ -d "${_pd}pg_tblspc/$_tt" ] && _pref="$_pref|${_pd}pg_tblspc/$_tt" ;;
+                esac
+            done
+        fi
+        ls -l "/proc/$_dpid/fd" 2>/dev/null | awk -v pd="$_pd" -v pref="$_pref" '
+            BEGIN { np = split(pref, prefarr, "|")
+                    for (j = 1; j <= np; j++) {
+                        it = prefarr[j]
+                        if (it != "" && index(it, "/") == 0) bucket1[it] = 1
+                    } }
             { t = $0; sub(/^.* -> /, "", t)
               dflag = 0
               if (t ~ / \(deleted\)$/) { dflag = 1; sub(/ \(deleted\)$/, "", t) }
-              c = "other"
-              if (t ~ /^socket:\[/) c = "socket"
-              else if (t ~ /^pipe:\[/) c = "pipe"
-              else if (t ~ /^\/dev\//) c = "device"
-              else if (t ~ /\/pgsql_tmp\//) c = "temp files"
-              else if (t ~ /\/base\/[0-9]+\/t[0-9]/) c = "temp files"
-              else if (t ~ /\/pg_xlog\//) c = "wal segments"
-              else if (t ~ /\/pg_clog\/|\/pg_csnlog\/|\/pg_multixact\/|\/pg_twophase\//) c = "tx status"
-              else if (t ~ /\/pg_cbm\//) c = "cbm"
-              else if (t ~ /\/global\/pg_dw/) c = "double write"
-              else if (t ~ /\/base\/[0-9]+\/[0-9]+(_fsm|_vm|_init)?$/) c = "data files (base)"
-              else if (t ~ /\/global\/[0-9]+(_fsm|_vm|_init)?$/) c = "data files (global)"
-              else if (t ~ /\.lock$/) c = "lock files"
-              else if (t ~ /\/pg_log\/|\/pg_audit\/|\/asp_data\/|\/gs_profile\/|\/sql_monitor\/|gs_obs\./) c = "pg logs"
+              type = "reg"
+              if (t ~ /^socket:\[/)    type = "socket"
+              else if (t ~ /^pipe:\[/) type = "pipe"
+              else if (t ~ /^\/dev\//) type = "dev"
+              else if (t !~ /^\//)     type = "other"     # anon_inode:[...] etc
+              if (type == "reg") {
+                  if (pd != "" && index(t, pd) == 1) {
+                      rel = substr(t, length(pd) + 1)
+                      ti = index(rel, "/pgsql_tmp/")
+                      if (ti > 0) {
+                          # the sort/hash spill dir -- own bucket (user: must count)
+                          c = pd substr(rel, 1, ti + 9)
+                      } else if (rel ~ /^pg_location\//) {
+                          # one bucket per tablespace dir (second level)
+                          rest = substr(rel, 13)
+                          s2 = index(rest, "/")
+                          c = (s2 > 1) ? pd "pg_location/" substr(rest, 1, s2 - 1) : pd "pg_location"
+                      } else {
+                          sl = index(rel, "/")
+                          f1 = (sl > 1) ? substr(rel, 1, sl - 1) : ""
+                          c = (f1 != "" && f1 in bucket1) ? pd f1 : "reg other"
+                      }
+                  } else {
+                      c = ""
+                      for (j = 1; j <= np; j++) {
+                          it = prefarr[j]
+                          if (it != "" && substr(it, 1, 1) == "/" && index(t, it) == 1) {
+                              c = it; break
+                          }
+                      }
+                      if (c == "") c = "reg other"
+                  }
+              } else c = type
               live[c]++; if (dflag) dcount[c]++
             }
-            END { n = split("data files (base)|data files (global)|temp files|wal segments|tx status|double write|cbm|server logs|lock files|socket|pipe|device|other", ord, "|")
-                  for (i = 1; i <= n; i++) print ord[i] "|" live[ord[i]]+0 "|" dcount[ord[i]]+0 }' \
+            END { topreg = topregd = 0
+                  for (k in live)
+                      if (k != "pipe" && k != "socket" && k != "dev" && k != "other") {
+                          topreg += live[k]; topregd += dcount[k]
+                      }
+                  print "reg|" topreg+0 "|" topregd+0
+                  print "pipe|" live["pipe"]+0 "|" dcount["pipe"]+0
+                  print "socket|" live["socket"]+0 "|" dcount["socket"]+0
+                  print "dev|" live["dev"]+0 "|" dcount["dev"]+0
+                  print "other|" live["other"]+0 "|" dcount["other"]+0
+                  for (i = 1; i <= np; i++) {
+                      it = prefarr[i]; if (it == "") continue
+                      k = (substr(it, 1, 1) == "/") ? it : pd it
+                      if (k in live) { print k "|" live[k]+0 "|" dcount[k]+0; seen[k] = 1 }
+                  }
+                  # user 2026-09-20: the spill row is ALWAYS written, 0
+                  # included -- the snapshot instant almost never catches a
+                  # live spill, the row must not vanish (有没有 temp file
+                  # 都要写). temp relations (base tN) have no own bucket
+                  # (user: same as pgsql_tmp to the eye) -- they fold into
+                  # the base dir row.
+                  if (pd != "") {
+                      sk = pd "base/pgsql_tmp"
+                      if (!(sk in seen)) { print sk "|" live[sk]+0 "|" dcount[sk]+0; seen[sk] = 1 }
+                  }
+                  for (k in live) {
+                      if (k == "reg" || k == "pipe" || k == "socket" || k == "dev" || k == "other" || seen[k]) continue
+                      print k "|" live[k]+0 "|" dcount[k]+0; seen[k] = 1
+                  } }' \
             > "$osd/db_fd_types" 2>/dev/null
     fi
     # TCP socket states on THIS port (kernel view; the fd socket row only
@@ -28339,16 +28504,33 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                 f = ln.split("|")
                 if len(f) == 3:
                     try:
-                        # snaps taken before the rename wrote this class as
-                        # "server logs" -- fold them into the current name
+                        # snaps taken before the renames wrote these classes
+                        # under older names -- fold into the current ones
                         if f[0] == "server logs":
                             f[0] = "pg logs"
+                        if f[0] == "device":
+                            f[0] = "dev"
                         out[f[0]] = (int(f[1]), int(f[2]))
                     except ValueError:
                         pass
             return out
         _fdb = _fdmap(win["os"].get(("begin", "db_fd_types"), ""))
         _fde = _fdmap(win["os"].get(("end", "db_fd_types"), ""))
+        # snaps taken before 2026-09-20 carry the spill row only when
+        # non-zero; inject 0s so it ALWAYS displays (user 2026-09-20: 有没有
+        # temp file 都要写). Guard on the new-format "reg" top row -- v2.5.4
+        # flat-class snaps always carried their own "temp files" row already.
+        # "temp tables" (base tN relations) got its own bucket for half a
+        # day and is FOLDED back into the base dir row (user: looks the same
+        # as pgsql_tmp) -- drop the key so those snaps do not show the row.
+        if "reg" in _fdb or "reg" in _fde:
+            _bk = next((k for k in _fdb if k.endswith("/base")), None) or \
+                  next((k for k in _fde if k.endswith("/base")), None)
+            if _bk:
+                _fdb.setdefault(_bk + "/pgsql_tmp", (0, 0))
+                _fde.setdefault(_bk + "/pgsql_tmp", (0, 0))
+        _fdb.pop("temp tables", None)
+        _fde.pop("temp tables", None)
         # TCP socket states on this port, rows ABOVE the fd rows (user
         # 2026-09-17): kernel view via ss "sport = :port" -- time-wait /
         # close-wait never show among the fd socket count, this is their
@@ -28375,30 +28557,77 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                              '<td class="n">%d</td><td class="n">%+d</td></tr>'
                              % (esc(_ts.title()), _b, _e, _e - _b))
         if _fdb or _fde:
-            # display names: first-letter capitals per word, abbreviations
-            # all-caps (WAL/TX/CBM/PG) -- same 2026-09-17 OS-label rule
+            # v2.5.6 (user): top rows = professional fd TYPE, lowercase --
+            # "fd reg / fd pipe / fd socket / fd dev / fd other"; the reg row
+            # expands into one sub-row PER DIRECTORY with the ABSOLUTE PATH
+            # as the label (collector emits $PGDATA first-level dirs, then
+            # $PGHOME, then "reg other"). NO separate Deleted rows: a reg
+            # row's count cells read "live(deleted deleted)" -- e.g.
+            # "22(2 deleted)" -- and the delta column sums BOTH numbers
+            # (live+deleted on each side). Old snaps carry the old flat role
+            # classes (data files (base), device, ...): "device" folds into
+            # "dev" in _fdmap, the remaining old classes render as reg
+            # sub-rows via _FD_DISP's pretty names, and the reg top row is
+            # recomputed as their sum when the collector row is absent.
             _FD_DISP = {"data files (base)": "Data Files (Base)",
                         "data files (global)": "Data Files (Global)",
                         "temp files": "Temp Files", "wal segments": "WAL Segments",
                         "tx status": "TX Status", "double write": "Double Write",
                         "cbm": "CBM", "pg logs": "PG Logs",
-                        "lock files": "Lock Files", "socket": "Socket",
-                        "pipe": "Pipe", "device": "Device", "other": "Other"}
+                        "lock files": "Lock Files", "reg other": "reg (other)"}
+            _FD_TOP = ("reg", "pipe", "socket", "dev", "other")
+            def _fd_cell(v, is_reg):
+                # "live(deleted deleted)" for the reg family, plain otherwise
+                return "%d(%d deleted)" % (v[0], v[1]) if is_reg else "%d" % v[0]
+            def _fd_reg_subs(*maps):
+                out = []
+                for m in maps:
+                    for k in m:
+                        if k not in _FD_TOP and k not in out:
+                            out.append(k)
+                # hierarchical order: paths sort lexicographically so a child
+                # (/a/base/pgsql_tmp) lands right after its parent (/a/base);
+                # non-path buckets ("reg other", "temp tables") go last
+                out.sort(key=lambda k: (0, k) if k.startswith("/") else (1, k))
+                return out
+            def _fd_top(m, fc, subs):
+                v = m.get(fc)
+                if v is not None:
+                    return v
+                if fc == "reg":           # old snaps: no collector reg row
+                    b = (0, 0)
+                    for k in subs:
+                        kb, ke = m.get(k, (0, 0))
+                        b = (b[0] + kb, b[1] + ke)
+                    return b
+                return (0, 0)
+            _subs = _fd_reg_subs(_fdb, _fde)
             _tb = _te = 0
-            for _fc in ("data files (base)", "data files (global)", "temp files",
-                        "wal segments", "tx status", "double write", "cbm",
-                        "pg logs", "lock files", "socket", "pipe",
-                        "device", "other"):
-                _b = _fdb.get(_fc, (0, 0)); _e = _fde.get(_fc, (0, 0))
+            for _fc in _FD_TOP:
+                _isreg = _fc == "reg"
+                _b = _fd_top(_fdb, _fc, _subs); _e = _fd_top(_fde, _fc, _subs)
                 _tb += _b[0] + _b[1]; _te += _e[0] + _e[1]
-                for _lbl, _bi, _ei, _sub in (("Fd " + _FD_DISP.get(_fc, _fc.title()),
-                                               _b[0], _e[0], False),
-                                              ("Deleted", _b[1], _e[1], True)):
-                    parts.append('<tr><td%s>%s</td><td class="n">%d</td>'
-                                 '<td class="n">%d</td><td class="n">%+d</td></tr>'
-                                 % (' class="muted" style="padding-left:2em"' if _sub else "",
-                                    esc(_lbl), _bi, _ei, _ei - _bi))
-            parts.append('<tr><td><b>Fd Total</b></td><td class="n"><b>%d</b></td>'
+                parts.append('<tr><td>%s</td><td class="n">%s</td>'
+                             '<td class="n">%s</td><td class="n">%+d</td></tr>'
+                             % (esc("fd " + _fc), esc(_fd_cell(_b, _isreg)),
+                                esc(_fd_cell(_e, _isreg)),
+                                (_e[0] + _e[1]) - (_b[0] + _b[1])))
+                if _isreg:
+                    # recursive depth = path components beyond the shallowest
+                    # bucket; each level adds one indent step
+                    _depths = [_s.count("/") for _s in _subs if _s.startswith("/")]
+                    _base_d = min(_depths) if _depths else 0
+                    for _s in _subs:
+                        _sb = _fdb.get(_s, (0, 0)); _se = _fde.get(_s, (0, 0))
+                        _pad = "%dem" % (2 + 2 * max(0, _s.count("/") - _base_d)) if _s.startswith("/") else "2em"
+                        # user 2026-09-20: normal text color (was class=muted
+                        # gray); indent kept for hierarchy
+                        parts.append('<tr><td style="padding-left:%s">%s</td>'
+                                     '<td class="n">%s</td><td class="n">%s</td><td class="n">%+d</td></tr>'
+                                     % (_pad, esc("fd " + _FD_DISP.get(_s, _s)),
+                                        esc(_fd_cell(_sb, True)), esc(_fd_cell(_se, True)),
+                                        (_se[0] + _se[1]) - (_sb[0] + _sb[1])))
+            parts.append('<tr><td><b>fd Total</b></td><td class="n"><b>%d</b></td>'
                          '<td class="n"><b>%d</b></td><td class="n"><b>%+d</b></td></tr>'
                          % (_tb, _te, _te - _tb))
         parts.append('</table>')
@@ -29308,7 +29537,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
               '<th class="n">max_b_cnt</th><th>h_sql</th><th>w_sql</th></tr>']
         if _ash["waitchain"]:
             for (dt, rt), v in sorted(_ash["waitchain"].items(),
-                                      key=lambda kv: (-kv[1][0], kv[0][0])):
+                                      key=lambda kv: (kv[0][0], -kv[1][0])):
                 _h.append('<tr><td>%s</td><td>%s</td><td class="n">%s</td>'
                           '<td>%s</td><td>%s</td></tr>'
                           % (esc(dt), esc(rt), fmt_int(v[0]), esc(v[1]), esc(v[2])))
@@ -31678,10 +31907,16 @@ _awr_lt_stack_sample() {
     # pg_stat_activity (memory rows outlive the activity row). Empty output
     # writes 'unknown' (user decision), psql failure writes 'error'. v2.4.7:
     # 8th field client_info = application_name|client_addr|client_port (LEFT
-    # JOIN activity; empty for background threads -> '||'). ----
+    # JOIN activity; empty for background threads -> '||'). v2.5.6: sessions
+    # running unique_sql_id 1171918037 / 4104764068 (the two AWR snapshot
+    # gs_session_memory_detail COPY aggregates) are EXCLUDED from top1 --
+    # their in-flight SRF tuplestore (hundreds of MB while the SRF
+    # materializes) would otherwise always win top1 and pollute the
+    # max-session-memory curve. If the snapshot SQL text ever changes, re-
+    # derive the two ids from dbe_perf.statement and update them here. ----
     local mlf="$root/sessmem_$(date +%Y%m%d).log" mout
     mout=$(PGCONNECT_TIMEOUT=15 PGOPTIONS='-c statement_timeout=15000' \
-          psql -d postgres -tAF'|' -c "with p as (select sessid, contextname, sum(totalsize) tot from gs_session_memory_detail group by sessid, contextname), top1 as (select sessid, sum(tot) session_tot from p group by sessid order by session_tot desc limit 1), top3 as (select contextname, tot from p where sessid in (select sessid from top1) order by tot desc limit 3) select top1.sessid, top1.session_tot, coalesce(a.pid::text,''), coalesce(a.usename,''), coalesce(a.state,''), coalesce(a.unique_sql_id::text,''), (select string_agg(contextname||'('||tot||')', ', ') from top3), coalesce(a.application_name,'')||'|'||coalesce(a.client_addr::text,'')||'|'||coalesce(a.client_port::text,'') from top1 left join pg_stat_activity a on a.pid::text = split_part(top1.sessid, '.', 2)" 2>/dev/null)
+          psql -d postgres -tAF'|' -c "with p as (select d.sessid, d.contextname, sum(d.totalsize) tot from gs_session_memory_detail d where not exists (select 1 from pg_stat_activity a2 where a2.pid::text = split_part(d.sessid, '.', 2) and a2.unique_sql_id in (1171918037, 4104764068)) group by d.sessid, d.contextname), top1 as (select sessid, sum(tot) session_tot from p group by sessid order by session_tot desc limit 1), top3 as (select contextname, tot from p where sessid in (select sessid from top1) order by tot desc limit 3) select top1.sessid, top1.session_tot, coalesce(a.pid::text,''), coalesce(a.usename,''), coalesce(a.state,''), coalesce(a.unique_sql_id::text,''), (select string_agg(contextname||'('||tot||')', ', ') from top3), coalesce(a.application_name,'')||'|'||coalesce(a.client_addr::text,'')||'|'||coalesce(a.client_port::text,'') from top1 left join pg_stat_activity a on a.pid::text = split_part(top1.sessid, '.', 2)" 2>/dev/null)
     if [ "$?" -ne 0 ]; then
         printf '%s|error\n' "$ts" >> "$mlf"
     elif [ -z "$mout" ]; then
