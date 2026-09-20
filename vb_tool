@@ -27,6 +27,7 @@ show_help() {
     echo "  as              display active session info"
     echo "  asp             analyze active session profile"
     echo "  awr             performance AWR snapshots & diff reports"
+    echo "  completion      print bash TAB-completion script: source <(vb_tool completion)"
     echo "  collect_log     collect logs for cluster or single node"
     echo "  dead_tups       display dead tuples information"
     echo "  flamegraph      generate CPU flame graph"
@@ -84,6 +85,7 @@ show_list() {
     echo "  as              display active session info"
     echo "  asp             analyze active session profile"
     echo "  awr             performance AWR snapshots & diff reports"
+    echo "  completion      print bash TAB-completion script: source <(vb_tool completion)"
     echo "  collect_log     collect logs for cluster or single node"
     echo "  dead_tups       display dead tuples information"
     echo "  flamegraph      generate CPU flame graph"
@@ -33447,9 +33449,41 @@ run_awr() {
         *) echo "Error: unknown awr subcommand '$sub'" >&2; awr_help; return 2;;
     esac
 }
+# bash TAB completion (user 2026-09-20): `source <(vb_tool completion)` to
+# enable (or add that line to ~/.bashrc). Command lists are parsed from the
+# help output ONCE per shell and cached in _VB_TOOL_CMDS/_VB_TOOL_AWR --
+# zero maintenance, newly added commands appear automatically. Plain
+# complete/compgen only: no bash-completion package, bash 4.2 compatible.
+vb_tool_completion() {
+    cat <<'VBCOMP'
+_vb_tool() {
+    local cur cmd
+    COMPREPLY=()
+    cur="${COMP_WORDS[COMP_CWORD]}"
+    cmd="${COMP_WORDS[0]}"
+    command -v "$cmd" >/dev/null 2>&1 || cmd=vb_tool
+    if [ -z "${_VB_TOOL_CMDS:-}" ]; then
+        _VB_TOOL_CMDS="$( "$cmd" -h 2>/dev/null \
+            | sed -n 's/^  \([a-z_][a-z0-9_]*\) .*/\1/p' | grep -v '^vb_tool$' | sort -u | tr '\n' ' ' )"
+        _VB_TOOL_AWR="$( "$cmd" awr help 2>/dev/null \
+            | sed -n 's/^Usage: vb_tool awr <\([^>]*\)>.*/\1/p' | head -1 | tr '|' ' ' )"
+    fi
+    if [ "$COMP_CWORD" -eq 2 ] && [ "${COMP_WORDS[1]}" = "awr" ]; then
+        COMPREPLY=( $(compgen -W "$_VB_TOOL_AWR" -- "$cur") )
+    elif [ "$COMP_CWORD" -eq 1 ]; then
+        COMPREPLY=( $(compgen -W "$_VB_TOOL_CMDS" -- "$cur") )
+    fi
+    return 0
+}
+complete -F _vb_tool vb_tool
+complete -F _vb_tool ./vb_tool ./vb_tool_dev ./vb_tool_test 2>/dev/null
+VBCOMP
+}
 case "$1" in
     -V|-v|version)
         echo "$VB_TOOL_VERSION"; exit 0;;
+    completion)
+        vb_tool_completion; exit 0;;
     se)
         if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
             se_help
