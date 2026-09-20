@@ -1,13 +1,13 @@
 #!/bin/bash
 #--------------------------------------------------------------------------------
 #-- File name:   vb_tool
-#-- Version  ：  v2.5.6
-#-- Commit at： 2026-09-19 22:00:00
+#-- Version  ：  v2.5.7
+#-- Commit at： 2026-09-20 16:00:00
 #-- Purpose:     Vastbase Script Tool
 #-- Author:      MVS & Second-line Team 
 #--------------------------------------------------------------------------------
 set -o pipefail
-export VB_TOOL_VERSION="v2.5.6"
+export VB_TOOL_VERSION="v2.5.7"
 show_help() {
     echo "Vastbase Script Tool (vb_tool)"
     echo ""
@@ -24241,11 +24241,14 @@ _awr_collect() {
     # dev / other); reg is SUB-CLASSIFIED by DIRECTORY with the ABSOLUTE PATH
     # as the row key, ALLOWLIST style -- only the meaningful $PGDATA dirs
     # (_pref relative names; pg_location one level deeper = one bucket per
-    # tablespace; base/pgsql_tmp = the sort/hash spill dir) plus absolute
-    # prefixes (archive_dest GUC target, pg_tblspc symlink targets -- a
-    # tablespace's files resolve THERE, not under pg_tblspc) become their own
-    # rows. EVERYTHING else reg -- asp_data/gs_profile/sql_monitor/$PGHOME/
-    # unlisted dirs/datadir-root files -- goes to "reg other" (user 2026-09-19).
+    # tablespace; base/<dbid> one bucket per database + base/pgsql_tmp = the
+    # sort/hash spill dir, user 2026-09-20) plus absolute prefixes
+    # (archive_dest GUC target, pg_tblspc symlink targets -- a tablespace's
+    # files resolve THERE, not under pg_tblspc) and the $PGHOME install tree
+    # (first-level dirs, bin/version.cfg its own full-path row -- leak
+    # indicator, user 2026-09-20) become their own rows. EVERYTHING else reg
+    # -- asp_data/gs_profile/sql_monitor/unlisted dirs/datadir-root files --
+    # goes to "reg other" (user 2026-09-19).
     # Deleted fds count per row as a second number; the renderer shows merged
     # "live(N deleted)" cells ONLY for the reg family. Output: "reg|live|
     # deleted", "pipe|..", "socket|..", "dev|..", "other|..", then one row per
@@ -24253,6 +24256,13 @@ _awr_collect() {
     if [ -n "$_dpid" ] && [ -d "/proc/$_dpid/fd" ]; then
         _pd=$(readlink "/proc/$_dpid/cwd" 2>/dev/null)
         [ -n "$_pd" ] && _pd="$_pd/"
+        # $PGHOME from the postmaster binary itself (exe -> $GAUSSHOME/bin/
+        # gaussdb); same-user /proc read, no env needed -- cron-safe
+        _gh=$(readlink "/proc/$_dpid/exe" 2>/dev/null)
+        case "$_gh" in
+            */bin/*) _gh=$(dirname "$(dirname "$_gh")") ;;
+            *)       [ -n "$_gh" ] && _gh=$(dirname "$_gh") ;;
+        esac
         local _pref="base|base/pgsql_tmp|global|pg_xlog|pg_wal|pg_arch|pg_clog|pg_csnlog|pg_multixact|pg_twophase|pg_cbm|pg_log|pg_audit|pg_replslot|pg_stat_tmp|pgsql_tmp|pg_tblspc|pg_location|pg_logical|pg_notify|pg_perf|pg_serial|pg_snapshots|mem_log|pg_errorinfo|pg_llog|undo"
         _arc=$(PGCONNECT_TIMEOUT=3 psql -d postgres -tAc "show archive_dest" 2>/dev/null | head -1 | tr -d ' ')
         case "$_arc" in
@@ -24269,7 +24279,7 @@ _awr_collect() {
                 esac
             done
         fi
-        ls -l "/proc/$_dpid/fd" 2>/dev/null | awk -v pd="$_pd" -v pref="$_pref" '
+        ls -l "/proc/$_dpid/fd" 2>/dev/null | awk -v pd="$_pd" -v gh="$_gh" -v pref="$_pref" '
             BEGIN { np = split(pref, prefarr, "|")
                     for (j = 1; j <= np; j++) {
                         it = prefarr[j]
@@ -24295,11 +24305,27 @@ _awr_collect() {
                           rest = substr(rel, 13)
                           s2 = index(rest, "/")
                           c = (s2 > 1) ? pd "pg_location/" substr(rest, 1, s2 - 1) : pd "pg_location"
+                      } else if (rel ~ /^base\/[0-9]+\//) {
+                          # one bucket per DATABASE dir under base/ (user
+                          # 2026-09-20, same indented display as pgsql_tmp);
+                          # temp relation segments (base/<db>/tNNN) fold in
+                          rest = substr(rel, 6)
+                          s2 = index(rest, "/")
+                          c = pd "base/" substr(rest, 1, s2 - 1)
                       } else {
                           sl = index(rel, "/")
                           f1 = (sl > 1) ? substr(rel, 1, sl - 1) : ""
                           c = (f1 != "" && f1 in bucket1) ? pd f1 : "reg other"
                       }
+                  } else if (gh != "" && index(t, gh "/") == 1) {
+                      # $PGHOME install tree (user 2026-09-20): bucket by
+                      # first-level dir; bin/version.cfg gets its OWN row
+                      # with the full file path -- a known open-without-close
+                      # LEAK in VB, a growing count must be instantly visible
+                      rel2 = substr(t, length(gh) + 2)
+                      nn = split(rel2, seg, "/")
+                      if (seg[nn] == "version.cfg") { c = t }
+                      else { c = (nn > 1) ? gh "/" seg[1] : gh }
                   } else {
                       c = ""
                       for (j = 1; j <= np; j++) {
