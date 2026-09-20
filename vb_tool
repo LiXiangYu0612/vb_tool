@@ -24263,6 +24263,30 @@ _awr_collect() {
             */bin/*) _gh=$(dirname "$(dirname "$_gh")") ;;
             *)       [ -n "$_gh" ] && _gh=$(dirname "$_gh") ;;
         esac
+        # row-key ENUMERATION from the filesystem (user 2026-09-20 老规矩:
+        # enumerated classes are always written, 0 included -- every database
+        # dir under base/, every $PGHOME first-level dir, and version.cfg
+        # wherever it lives; the awk END emits each with live+deleted counts)
+        local _baseids="" _ghdirs="" _ghcfg=""
+        if [ -n "$_pd" ] && [ -d "${_pd}base" ]; then
+            for _d in "${_pd}base"/*; do
+                [ -d "$_d" ] || continue
+                _n=$(basename "$_d")
+                case "$_n" in
+                    pgsql_tmp) continue ;;
+                    *[!0-9]*|'') continue ;;
+                esac
+                _baseids="$_baseids|$_d"
+            done
+        fi
+        if [ -n "$_gh" ] && [ -d "$_gh" ]; then
+            for _d in "$_gh"/*; do
+                [ -d "$_d" ] && _ghdirs="$_ghdirs|$_d"
+            done
+            for _c in "$_gh/version.cfg" "$_gh/bin/version.cfg"; do
+                [ -f "$_c" ] && _ghcfg="$_ghcfg|$_c"
+            done
+        fi
         local _pref="base|base/pgsql_tmp|global|pg_xlog|pg_wal|pg_arch|pg_clog|pg_csnlog|pg_multixact|pg_twophase|pg_cbm|pg_log|pg_audit|pg_replslot|pg_stat_tmp|pgsql_tmp|pg_tblspc|pg_location|pg_logical|pg_notify|pg_perf|pg_serial|pg_snapshots|mem_log|pg_errorinfo|pg_llog|undo"
         _arc=$(PGCONNECT_TIMEOUT=3 psql -d postgres -tAc "show archive_dest" 2>/dev/null | head -1 | tr -d ' ')
         case "$_arc" in
@@ -24279,7 +24303,7 @@ _awr_collect() {
                 esac
             done
         fi
-        ls -l "/proc/$_dpid/fd" 2>/dev/null | awk -v pd="$_pd" -v gh="$_gh" -v pref="$_pref" '
+        ls -l "/proc/$_dpid/fd" 2>/dev/null | awk -v pd="$_pd" -v gh="$_gh" -v baseids="$_baseids" -v ghdirs="$_ghdirs" -v ghcfg="$_ghcfg" -v pref="$_pref" '
             BEGIN { np = split(pref, prefarr, "|")
                     for (j = 1; j <= np; j++) {
                         it = prefarr[j]
@@ -24294,6 +24318,11 @@ _awr_collect() {
               else if (t ~ /^\/dev\//) type = "dev"
               else if (t !~ /^\//)     type = "other"     # anon_inode:[...] etc
               if (type == "reg") {
+                  # $PGDATA / $PGHOME tree TOTALS (user 2026-09-20: the two
+                  # first-level reg trees, always present) -- counted straight
+                  # off the fd target, independent of bucketing
+                  if (pd != "" && index(t, pd) == 1) { pdtot++; if (dflag) pddel++ }
+                  if (gh != "" && index(t, gh "/") == 1) { ghtot++; if (dflag) ghdel++ }
                   if (pd != "" && index(t, pd) == 1) {
                       rel = substr(t, length(pd) + 1)
                       ti = index(rel, "/pgsql_tmp/")
@@ -24349,18 +24378,41 @@ _awr_collect() {
                   print "socket|" live["socket"]+0 "|" dcount["socket"]+0
                   print "dev|" live["dev"]+0 "|" dcount["dev"]+0
                   print "other|" live["other"]+0 "|" dcount["other"]+0
+                  if (pd != "") { r = pd; sub(/\/$/, "", r); print r "|" pdtot+0 "|" pddel+0 }
+                  if (gh != "") print gh "|" ghtot+0 "|" ghdel+0
                   for (i = 1; i <= np; i++) {
                       it = prefarr[i]; if (it == "") continue
+                      if (pd != "" && it == "base") continue   # base row = TOTAL, emitted below
                       k = (substr(it, 1, 1) == "/") ? it : pd it
                       if (k in live) { print k "|" live[k]+0 "|" dcount[k]+0; seen[k] = 1 }
                   }
-                  # user 2026-09-20: the spill row is ALWAYS written, 0
-                  # included -- the snapshot instant almost never catches a
-                  # live spill, the row must not vanish (有没有 temp file
-                  # 都要写). temp relations (base tN) have no own bucket
-                  # (user: same as pgsql_tmp to the eye) -- they fold into
-                  # the base dir row.
+                  # user 2026-09-20 老规矩: ENUMERATED classes are always
+                  # written, 0 included -- every database dir under base/,
+                  # every $PGHOME first-level dir, version.cfg wherever it
+                  # lives; base itself gets a TOTAL row (direct files + every
+                  # child bucket). A snapshot instant almost never catches a
+                  # live spill or leak -- absence must show as 0, never as a
+                  # missing row.
+                  nb = split(baseids, barr, "|")
+                  for (i = 1; i <= nb; i++) {
+                      k = barr[i]; if (k == "") continue
+                      print k "|" live[k]+0 "|" dcount[k]+0; seen[k] = 1
+                  }
+                  ng = split(ghdirs, garr, "|")
+                  for (i = 1; i <= ng; i++) {
+                      k = garr[i]; if (k == "") continue
+                      print k "|" live[k]+0 "|" dcount[k]+0; seen[k] = 1
+                  }
+                  nc = split(ghcfg, carr, "|")
+                  for (i = 1; i <= nc; i++) {
+                      k = carr[i]; if (k == "") continue
+                      print k "|" live[k]+0 "|" dcount[k]+0; seen[k] = 1
+                  }
                   if (pd != "") {
+                      bk = pd "base"; bt = live[bk]; bd = dcount[bk]
+                      for (k in live)
+                          if (index(k, bk "/") == 1) { bt += live[k]; bd += dcount[k] }
+                      print bk "|" bt+0 "|" bd+0; seen[bk] = 1
                       sk = pd "base/pgsql_tmp"
                       if (!(sk in seen)) { print sk "|" live[sk]+0 "|" dcount[sk]+0; seen[sk] = 1 }
                   }
@@ -28639,13 +28691,25 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                                 esc(_fd_cell(_e, _isreg)),
                                 (_e[0] + _e[1]) - (_b[0] + _b[1])))
                 if _isreg:
-                    # recursive depth = path components beyond the shallowest
-                    # bucket; each level adds one indent step
-                    _depths = [_s.count("/") for _s in _subs if _s.startswith("/")]
-                    _base_d = min(_depths) if _depths else 0
+                    # user 2026-09-20: $PGDATA (PGBASE) and $PGHOME are THE two
+                    # first-level reg trees; indent is relative to the shallowest
+                    # ANCESTOR present among the rows -- a key whose parent is
+                    # absent starts its own tree at level 0, so roots of
+                    # different absolute depths (/data/vastdata vs /home/
+                    # vastbase/vasthome_29407) both sit at the top, and
+                    # version.cfg nests under its PGHOME root
+                    _sset = set(_subs)
+                    _dcache = {}
+                    def _treedepth(k):
+                        if k in _dcache:
+                            return _dcache[k]
+                        p = k.rsplit("/", 1)[0]
+                        d = (_treedepth(p) + 1) if (p and p in _sset) else 0
+                        _dcache[k] = d
+                        return d
                     for _s in _subs:
                         _sb = _fdb.get(_s, (0, 0)); _se = _fde.get(_s, (0, 0))
-                        _pad = "%dem" % (2 + 2 * max(0, _s.count("/") - _base_d)) if _s.startswith("/") else "2em"
+                        _pad = "%dem" % (2 + 2 * _treedepth(_s)) if _s.startswith("/") else "2em"
                         # user 2026-09-20: normal text color (was class=muted
                         # gray); indent kept for hierarchy
                         parts.append('<tr><td style="padding-left:%s">%s</td>'
