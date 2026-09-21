@@ -27,6 +27,8 @@ show_help() {
     echo "  as              display active session info"
     echo "  asp             analyze active session profile"
     echo "  awr             performance AWR snapshots & diff reports"
+    echo "  bash            one-shot TAB-completion install (short for 'completion --install';"
+    echo "                  then vb_tool fl<TAB> completes in any shell)"
     echo "  completion      print bash TAB-completion script; 'completion --install' appends the"
     echo "                  activation line to ~/.bashrc (one-shot; then ./vb_tool fl<TAB> works anywhere)"
     echo "  collect_log     collect logs for cluster or single node"
@@ -86,6 +88,8 @@ show_list() {
     echo "  as              display active session info"
     echo "  asp             analyze active session profile"
     echo "  awr             performance AWR snapshots & diff reports"
+    echo "  bash            one-shot TAB-completion install (short for 'completion --install';"
+    echo "                  then vb_tool fl<TAB> completes in any shell)"
     echo "  completion      print bash TAB-completion script; 'completion --install' appends the"
     echo "                  activation line to ~/.bashrc (one-shot; then ./vb_tool fl<TAB> works anywhere)"
     echo "  collect_log     collect logs for cluster or single node"
@@ -33543,6 +33547,9 @@ case "$1" in
             vb_tool_completion
         fi
         exit 0;;
+    bash)
+        vb_tool_completion_install
+        exit $?;;
     se)
         if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
             se_help
