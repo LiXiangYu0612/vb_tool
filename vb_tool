@@ -33469,20 +33469,38 @@ vb_tool_completion() {
     [ -n "$self" ] || self="$0"
     echo "_VB_TOOL_BIN='$self'"
     cat <<'VBCOMP'
+declare -A _VB_TOOL_SUBS
 _vb_tool() {
-    local cur
+    local cur cmd h
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
     if [ -z "${_VB_TOOL_CMDS:-}" ]; then
         _VB_TOOL_CMDS="$( "${_VB_TOOL_BIN:-vb_tool}" -h 2>/dev/null \
             | sed -n 's/^  \([a-z_][a-z0-9_]*\) .*/\1/p' | grep -v '^vb_tool$' | sort -u | tr '\n' ' ' )"
-        _VB_TOOL_AWR="$( "${_VB_TOOL_BIN:-vb_tool}" awr help 2>/dev/null \
-            | sed -n 's/^Usage: vb_tool awr <\([^>]*\)>.*/\1/p' | head -1 | tr '|' ' ' )"
     fi
-    if [ "$COMP_CWORD" -eq 2 ] && [ "${COMP_WORDS[1]}" = "awr" ]; then
-        COMPREPLY=( $(compgen -W "$_VB_TOOL_AWR" -- "$cur") )
-    elif [ "$COMP_CWORD" -eq 1 ]; then
+    if [ "$COMP_CWORD" -eq 1 ]; then
         COMPREPLY=( $(compgen -W "$_VB_TOOL_CMDS" -- "$cur") )
+        return 0
+    fi
+    # second word of ANY command: subcommands parsed from the command's own
+    # help -- either a "<a|b|c>" alternation in the usage line (awr style)
+    # or the indented list under "Types:" (asp style); cached per command
+    if [ "$COMP_CWORD" -eq 2 ]; then
+        cmd="${COMP_WORDS[1]}"
+        if [ -z "${_VB_TOOL_SUBS[$cmd]+x}" ]; then
+            # timeout guard: a few commands treat "help" as an argument and
+            # start real work (e.g. net) -- never let TAB freeze the shell;
+            # the empty result is cached so the probe runs once per shell
+            h="$( timeout 2 "${_VB_TOOL_BIN:-vb_tool}" "$cmd" help 2>/dev/null )"
+            _VB_TOOL_SUBS[$cmd]="$( printf '%s\n' "$h" \
+                | sed -n "s/^Usage: vb_tool $cmd <\([^>]*\)>.*/\1/p" | head -1 \
+                | awk -F'|' 'NF>1{for(i=1;i<=NF;i++) printf "%s ", $i}' )"
+            if [ -z "${_VB_TOOL_SUBS[$cmd]}" ]; then
+                _VB_TOOL_SUBS[$cmd]="$( printf '%s\n' "$h" \
+                    | awk '/^ *Types:/{f=1;next} f && /^    [a-z]/{print $1} f && /^[^ ]/{exit}' | tr '\n' ' ' )"
+            fi
+        fi
+        [ -n "${_VB_TOOL_SUBS[$cmd]}" ] && COMPREPLY=( $(compgen -W "${_VB_TOOL_SUBS[$cmd]}" -- "$cur") )
     fi
     return 0
 }
