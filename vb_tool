@@ -33523,10 +33523,13 @@ vb_tool_completion_install() {
     self=$(readlink -f "${BASH_SOURCE[0]:-$0}" 2>/dev/null) || self=""
     [ -n "$self" ] || self="$0"
     if [ "$(id -u)" = "0" ]; then
+        # trampoline, NOT an embedded copy: always loads the CURRENT
+        # completion from the tool itself, so vb_tool upgrades refresh
+        # completions without re-running the installer
         if mkdir -p /etc/profile.d 2>/dev/null \
-           && vb_tool_completion > /etc/profile.d/vb_tool_completion.sh 2>/dev/null; then
+           && printf '# vb_tool TAB completion (trampoline: always current)\n[ -n "$BASH_VERSION" ] && source <(%s completion)\n' "$self" > /etc/profile.d/vb_tool_completion.sh 2>/dev/null; then
             chmod 644 /etc/profile.d/vb_tool_completion.sh
-            did="${did}  [system] /etc/profile.d/vb_tool_completion.sh (ALL users, incl ./vb_tool)
+            did="${did}  [system] /etc/profile.d/vb_tool_completion.sh (ALL users, always current)
 "
         fi
         if [ -d /usr/local/bin ] && ln -sf "$self" /usr/local/bin/vb_tool 2>/dev/null; then
@@ -33535,8 +33538,9 @@ vb_tool_completion_install() {
         fi
     fi
     dir="$HOME/.local/share/bash-completion/completions"
-    if mkdir -p "$dir" 2>/dev/null && vb_tool_completion > "$dir/vb_tool" 2>/dev/null; then
-        did="${did}  [user]   $dir/vb_tool (lazy load, no bashrc edit)
+    if mkdir -p "$dir" 2>/dev/null \
+       && printf '# vb_tool TAB completion (trampoline: always current)\n[ -n "$BASH_VERSION" ] && source <(%s completion)\n' "$self" > "$dir/vb_tool" 2>/dev/null; then
+        did="${did}  [user]   $dir/vb_tool (lazy load, always current)
 "
     fi
     rc_file="$HOME/.bashrc"
