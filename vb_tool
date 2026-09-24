@@ -23297,7 +23297,7 @@ vtop_help() {
     echo "  Description: real-time monitor -- CPU / memory / PGDATA disk IO"
     echo "               (iops, MB/s, avg latency; read and write split)"
     echo "               + network / dbmem (proc & dynamic, peak) / top-3 memory
-               contexts / top-5 mem sessions / block roots / top SQL
+               contexts / top-3 mem sessions / block roots / top SQL
                (grouped by sqlid, ranked by real CPU%) / wait distribution"
     echo "    -P <port>: database port (default: current \$PGPORT)"
     echo "    -i <sec>:   refresh interval, 1-60 (default 5)"
