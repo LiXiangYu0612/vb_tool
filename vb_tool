@@ -4189,9 +4189,9 @@ limit 10;
 select count(*) sess_cnt,pg_size_pretty(sum(totalsize)::numeric(100,0)) sess_total_size,pg_size_pretty(avg((totalsize)::numeric(100,0))) sess_avg_size,pg_size_pretty(min((totalsize)::numeric(100,0))) sess_min_size,pg_size_pretty(max((totalsize)::numeric(100,0))) sess_max_size from
 (select sessid,sum(totalsize) totalsize from _vb_smd group by sessid);
 
-select a.sessionid,application_name,to_char(backend_start,'yyyy-mm-dd hh24:mi:ss') backend_start,state,pg_size_pretty(sum(t1.totalsize)::numeric(100,0)) total_size,substr(REGEXP_REPLACE(REGEXP_REPLACE(query, '(\r|\n)+', ' '),' {2,}', ' '),1,50) sql_text
- from pg_stat_activity a, _vb_smd t1  where a.sessionid = split_part(sessid,'.',2)
-group by a.sessionid,application_name,state,to_char(backend_start,'yyyy-mm-dd hh24:mi:ss'),substr(REGEXP_REPLACE(REGEXP_REPLACE(query, '(\r|\n)+', ' '),' {2,}', ' '),1,50) order by sum(t1.totalsize) desc limit 10;
+select split_part(sessid,'.',2) sessionid,application_name,to_char(backend_start,'yyyy-mm-dd hh24:mi:ss') backend_start,state,pg_size_pretty(sum(t1.totalsize)::numeric(100,0)) total_size,substr(REGEXP_REPLACE(REGEXP_REPLACE(query, '(\r|\n)+', ' '),' {2,}', ' '),1,50) sql_text
+ from _vb_smd t1  left join pg_stat_activity a on split_part(sessid,'.',2) = a.sessionid 
+group by split_part(sessid,'.',2),application_name,state,to_char(backend_start,'yyyy-mm-dd hh24:mi:ss'),substr(REGEXP_REPLACE(REGEXP_REPLACE(query, '(\r|\n)+', ' '),' {2,}', ' '),1,50) order by sum(t1.totalsize) desc limit 10;
 EOF
     local _vb_rc=$?
     if [ -n "$_vb_sar_pid" ]; then
@@ -23144,33 +23144,7 @@ SELECT query FROM dbe_perf.statement WHERE unique_sql_id=:'unique_sql_id';
 \set QUIET on
 \pset format unaligned
 \pset tuples_only on
-SELECT 'last_exec_time: ' || to_char(max(start_time),'yyyy-mm-dd hh24:mi:ss')
-       || '  plan_hash_value: '
-       || ora_hash(
-  regexp_replace(
-    regexp_replace(
-      regexp_replace(query_plan,
-        '"[0-9]+__unnamed_subquery__"', '"unnamed_subquery"', 'g'
-      ),
-      '\(cost=.*?\)', '', 'g'
-    ),
-    '^(\s+Filter:).*$', '\1', 'gm'
-  )
-)
-       || chr(10) || coalesce(regexp_replace(max(query_plan), '\s+$', ''), '') || chr(10) AS sqlplan
-FROM dbe_perf.statement_history
-WHERE unique_query_id=:'unique_sql_id'
-group by ora_hash(
-  regexp_replace(
-    regexp_replace(
-      regexp_replace(query_plan,
-        '"[0-9]+__unnamed_subquery__"', '"unnamed_subquery"', 'g'
-      ),
-      '\(cost=.*?\)', '', 'g'
-    ),
-    '^(\s+Filter:).*$', '\1', 'gm'
-  )
-) order by 1;
+  
 \pset tuples_only off
 \pset format aligned
 \set QUIET off
@@ -23561,11 +23535,11 @@ select type, event, wait, total_wait_time
 from dbe_perf.wait_events
 where wait > 0
   -- 'wait cmd' (idle: waiting for the client's next command) dominates the
-  -- cumulative totals and squeezes real waits out of the top-12; 'none' =
+  -- cumulative totals and squeezes real waits out of the top-50; 'none' =
   -- running. Busy STATUS rows (flush data / HashAgg / Sort ...) are NOT idle
   -- and stay visible.
   and event not in ('none', 'wait cmd')
-order by total_wait_time desc limit 12;
+order by total_wait_time desc limit 50;
 \echo ===LTX
 select a.sessionid::text, coalesce(a.usename,'-'), coalesce(a.datname,'-'),
        decode(a.state,'active','act','idle in transaction','idle-tx','?') st,
@@ -23576,15 +23550,15 @@ from pg_stat_activity a
 left join dbe_perf.thread_wait_status w on a.sessionid = w.sessionid
 where a.state in ('active','idle in transaction')
   and now()-a.xact_start > interval '60 seconds'
-  and coalesce(a.application_name,'') not in ('JobScheduler','Asp','workload','WdrSnapshot')
+  and coalesce(a.application_name,'') not in ('JobScheduler','Asp','workload','WdrSnapshot','AutoVacWorker')
 order by age_s desc limit 3;
 \echo ===MEMSES
-select a.sessionid::text, coalesce(a.usename,'-'), coalesce(a.datname,'-'),
+select s.sid::text, coalesce(a.usename,'-'), coalesce(a.datname,'-'),
        decode(a.state,'active','act','idle in transaction','idle-tx','idle','idle','?') st,
        pg_size_pretty(s.sz::numeric),
        coalesce(substr(regexp_replace(regexp_replace(a.query,'(\r|\n)+',' '),' {2,}',' '),1,68),'-')
-from (select split_part(sessid,'.',2) sid, sum(totalsize) sz from gs_session_memory_detail group by split_part(sessid,'.',2) order by sum(totalsize) desc limit 5) s
-join pg_stat_activity a on a.sessionid::text = s.sid
+from (select split_part(sessid,'.',2) sid, sum(totalsize) sz from gs_session_memory_detail group by split_part(sessid,'.',2) order by sum(totalsize) desc limit 3) s
+left join pg_stat_activity a on a.sessionid::text = s.sid
 order by s.sz desc;"
 
     local c_red="" c_ylw="" c_off=""
@@ -23645,21 +23619,21 @@ with cput as (
   select split_part(result, ',', 1) lwpid, split_part(result, ',', 2)::numeric cpu_usage
   from regexp_split_to_table('${cpupairs}', ';') as result),
 cpu as (
-  select coalesce(a.unique_sql_id::text,'pid:'||a.pid::text) k, round(sum(t.cpu_usage),1) cpu
+  select coalesce(a.unique_sql_id::text,s.thread_name::text) k, round(sum(t.cpu_usage),1) cpu
   from cput t
   join pg_os_threads s on s.lwpid = t.lwpid
-  join pg_stat_activity a on s.pid = a.pid
-  group by coalesce(a.unique_sql_id::text,'pid:'||a.pid::text))
+  left join pg_stat_activity a on s.pid = a.pid
+  group by coalesce(a.unique_sql_id::text,s.thread_name::text))
 select g.k, coalesce(cpu,0.0) cpu, g.ns, g.rn, coalesce(g.et::text,'-') et, g.sql
 from (
   select k, count(*) ns, sum(rn) rn, sum(et) et,
          max(sql) sql
   from (
-    select coalesce(a.unique_sql_id::text,'pid:'||a.pid::text) k,
+    select coalesce(a.unique_sql_id::text,s.thread_name::text) k,
            case when coalesce(w.wait_event,'-') = 'none' then 1 else 0 end rn,
            extract(epoch from (now()-a.query_start))::bigint et,
            coalesce(substr(regexp_replace(regexp_replace(a.query,'(\r|\n)+',' '),' {2,}',' '),1,150),'-') sql
-    from pg_stat_activity a
+    from pg_os_threads s left join pg_stat_activity a on a.pid=s.pid 
     left join dbe_perf.thread_wait_status w on a.sessionid = w.sessionid
     where a.state <> 'idle' and a.datname is not null
       and coalesce(a.application_name,'') not in ('JobScheduler','Asp','workload','WdrSnapshot')
@@ -31940,7 +31914,7 @@ _awr_lt_stack_sample() {
     local out
     # ---- long transaction monitor: exactly one row per sample ----
     out=$(PGCONNECT_TIMEOUT=15 PGOPTIONS='-c statement_timeout=15000' \
-          psql -d postgres -tAF',' -c "with lt as (select count(*)::text as long_cnt, coalesce(sum(case when state like 'idle in transaction%' then 1 else 0 end),0)::text as itx_cnt, coalesce(sum(case when state = 'active' then 1 else 0 end),0)::text as act_cnt from pg_stat_activity where xact_start is not null and xact_start < now() - interval '60 seconds' and pid <> pg_backend_pid() and application_name not in ('workload','WDRSnapshot') and (state like 'idle in transaction%' or state = 'active')), o as (select a.pid::text as pid, a.xact_start::timestamp(0)::text as xstart, a.state as state, coalesce(w.wait_status,'') as ws, coalesce(w.wait_event,'') as we, a.unique_sql_id::text as usi from (select * from pg_stat_activity where xact_start is not null and pid <> pg_backend_pid() and application_name not in ('workload','WDRSnapshot') and (state like 'idle in transaction%' or state = 'active') order by xact_start, pid limit 1) a left join pg_thread_wait_status w on w.tid = a.pid) select lt.long_cnt, lt.itx_cnt, lt.act_cnt, coalesce(o.pid,''), coalesce(o.xstart,''), coalesce(o.state,''), coalesce(o.ws,''), coalesce(o.we,''), coalesce(o.usi,''), gs_txid_oldestxmin()::text, case when pg_is_in_recovery() then '-' else txid_current()::text end from lt left join o on true" 2>/dev/null)
+          psql -d postgres -tAF',' -c "with lt as (select count(*)::text as long_cnt, coalesce(sum(case when state like 'idle in transaction%' then 1 else 0 end),0)::text as itx_cnt, coalesce(sum(case when state = 'active' then 1 else 0 end),0)::text as act_cnt from pg_stat_activity where xact_start is not null and xact_start < now() - interval '60 seconds' and pid <> pg_backend_pid() and application_name not in ('workload','WDRSnapshot','AutoVacWorker') and (state like 'idle in transaction%' or state = 'active')), o as (select a.pid::text as pid, a.xact_start::timestamp(0)::text as xstart, a.state as state, coalesce(w.wait_status,'') as ws, coalesce(w.wait_event,'') as we, a.unique_sql_id::text as usi from (select * from pg_stat_activity where xact_start is not null and pid <> pg_backend_pid() and application_name not in ('workload','WDRSnapshot') and (state like 'idle in transaction%' or state = 'active') order by xact_start, pid limit 1) a left join pg_thread_wait_status w on w.tid = a.pid) select lt.long_cnt, lt.itx_cnt, lt.act_cnt, coalesce(o.pid,''), coalesce(o.xstart,''), coalesce(o.state,''), coalesce(o.ws,''), coalesce(o.we,''), coalesce(o.usi,''), gs_txid_oldestxmin()::text, case when pg_is_in_recovery() then '-' else txid_current()::text end from lt left join o on true" 2>/dev/null)
     if [ "$?" -ne 0 ] || [ -z "$out" ]; then
         printf '%s,error\n' "$ts" >> "$lf"
     else
@@ -33523,13 +33497,10 @@ vb_tool_completion_install() {
     self=$(readlink -f "${BASH_SOURCE[0]:-$0}" 2>/dev/null) || self=""
     [ -n "$self" ] || self="$0"
     if [ "$(id -u)" = "0" ]; then
-        # trampoline, NOT an embedded copy: always loads the CURRENT
-        # completion from the tool itself, so vb_tool upgrades refresh
-        # completions without re-running the installer
         if mkdir -p /etc/profile.d 2>/dev/null \
-           && printf '# vb_tool TAB completion (trampoline: always current)\n[ -n "$BASH_VERSION" ] && source <(%s completion)\n' "$self" > /etc/profile.d/vb_tool_completion.sh 2>/dev/null; then
+           && vb_tool_completion > /etc/profile.d/vb_tool_completion.sh 2>/dev/null; then
             chmod 644 /etc/profile.d/vb_tool_completion.sh
-            did="${did}  [system] /etc/profile.d/vb_tool_completion.sh (ALL users, always current)
+            did="${did}  [system] /etc/profile.d/vb_tool_completion.sh (ALL users, incl ./vb_tool)
 "
         fi
         if [ -d /usr/local/bin ] && ln -sf "$self" /usr/local/bin/vb_tool 2>/dev/null; then
@@ -33538,9 +33509,8 @@ vb_tool_completion_install() {
         fi
     fi
     dir="$HOME/.local/share/bash-completion/completions"
-    if mkdir -p "$dir" 2>/dev/null \
-       && printf '# vb_tool TAB completion (trampoline: always current)\n[ -n "$BASH_VERSION" ] && source <(%s completion)\n' "$self" > "$dir/vb_tool" 2>/dev/null; then
-        did="${did}  [user]   $dir/vb_tool (lazy load, always current)
+    if mkdir -p "$dir" 2>/dev/null && vb_tool_completion > "$dir/vb_tool" 2>/dev/null; then
+        did="${did}  [user]   $dir/vb_tool (lazy load, no bashrc edit)
 "
     fi
     rc_file="$HOME/.bashrc"
