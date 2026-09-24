@@ -5131,7 +5131,7 @@ SELECT query FROM dbe_perf.statement WHERE unique_sql_id=:'unique_sql_id';
 \set QUIET on
 \pset format unaligned
 \pset tuples_only on
-SELECT 'last_exec_time: ' || to_char(max(start_time),'yyyy-mm-dd hh24:mi:ss') || '  plan_hash_value: ' || ora_hash(regexp_replace(query_plan,'\(cost=.*?\)','','g')) || chr(10) || coalesce(regexp_replace(max(query_plan), '\s+\$', ''), '') || chr(10) AS sqlplan FROM dbe_perf.statement_history WHERE unique_query_id=:'unique_sql_id' group by ora_hash(regexp_replace(query_plan,'\(cost=.*?\)','','g')) order by 1;
+SELECT 'last_exec_time: ' || to_char(max(start_time),'yyyy-mm-dd hh24:mi:ss') || '  plan_hash_value: ' || ora_hash(regexp_replace(query_plan,'\(cost=.*?\)','','g')) || chr(10) || coalesce(regexp_replace(max(query_plan), '\s+\$', ''), '') || chr(10) AS sqlplan FROM dbe_perf.statement_history WHERE unique_query_id=:'unique_sql_id' and query_plan is not null group by ora_hash(regexp_replace(query_plan,'\(cost=.*?\)','','g')) order by 1;
 \pset tuples_only off
 \pset format aligned
 \set QUIET off
@@ -5176,7 +5176,7 @@ round(avg(lwlock_wait_time)/1e3,1) lwlock_wait_ms,
 round(avg(n_blocks_fetched),1) avg_cr,
 round(avg(n_blocks_fetched-n_blocks_hit),1) avg_pr,
 round(avg(n_returned_rows+n_tuples_inserted+n_tuples_updated+n_tuples_deleted),1) avg_rows from dbe_perf.statement_history
-where unique_query_id=:'unique_sql_id' and is_slow_sql='t' and start_time>now()-3
+where unique_query_id=:'unique_sql_id' and is_slow_sql='t' and start_time>now()-3 and query_plan is not null
 group by ora_hash(
   regexp_replace(
     regexp_replace(
@@ -23159,7 +23159,7 @@ SELECT 'last_exec_time: ' || to_char(max(start_time),'yyyy-mm-dd hh24:mi:ss')
 )
        || chr(10) || coalesce(regexp_replace(max(query_plan), '\s+$', ''), '') || chr(10) AS sqlplan
 FROM dbe_perf.statement_history
-WHERE unique_query_id=:'unique_sql_id'
+WHERE unique_query_id=:'unique_sql_id' and query_plan is not null
 group by ora_hash(
   regexp_replace(
     regexp_replace(
@@ -23216,7 +23216,7 @@ round(avg(n_blocks_fetched),1) avg_cr,
 round(avg(n_blocks_fetched-n_blocks_hit),1) avg_pr,
 round(avg(n_returned_rows+n_tuples_inserted+n_tuples_updated+n_tuples_deleted),1) avg_rows
 from dbe_perf.statement_history
-where unique_query_id=:'unique_sql_id' and is_slow_sql='t' and start_time>now()-3
+where unique_query_id=:'unique_sql_id' and is_slow_sql='t' and start_time>now()-3 and query_plan is not null
 group by ora_hash(
   regexp_replace(
     regexp_replace(
