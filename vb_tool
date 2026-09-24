@@ -23144,7 +23144,33 @@ SELECT query FROM dbe_perf.statement WHERE unique_sql_id=:'unique_sql_id';
 \set QUIET on
 \pset format unaligned
 \pset tuples_only on
-  
+SELECT 'last_exec_time: ' || to_char(max(start_time),'yyyy-mm-dd hh24:mi:ss')
+       || '  plan_hash_value: '
+       || ora_hash(
+  regexp_replace(
+    regexp_replace(
+      regexp_replace(query_plan,
+        '"[0-9]+__unnamed_subquery__"', '"unnamed_subquery"', 'g'
+      ),
+      '\(cost=.*?\)', '', 'g'
+    ),
+    '^(\s+Filter:).*$', '\1', 'gm'
+  )
+)
+       || chr(10) || coalesce(regexp_replace(max(query_plan), '\s+$', ''), '') || chr(10) AS sqlplan
+FROM dbe_perf.statement_history
+WHERE unique_query_id=:'unique_sql_id'
+group by ora_hash(
+  regexp_replace(
+    regexp_replace(
+      regexp_replace(query_plan,
+        '"[0-9]+__unnamed_subquery__"', '"unnamed_subquery"', 'g'
+      ),
+      '\(cost=.*?\)', '', 'g'
+    ),
+    '^(\s+Filter:).*$', '\1', 'gm'
+  )
+) order by 1;
 \pset tuples_only off
 \pset format aligned
 \set QUIET off
