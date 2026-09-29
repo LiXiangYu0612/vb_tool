@@ -1,13 +1,13 @@
 #!/bin/bash
 #--------------------------------------------------------------------------------
 #-- File name:   vb_tool
-#-- Version  ：  v2.5.8
-#-- Commit at： 2026-09-28 14:45:15
+#-- Version  ：  v2.5.9
+#-- Commit at： 2026-09-29 17:04:45
 #-- Purpose:     Vastbase Script Tool
 #-- Author:      MVS & Second-line Team 
 #--------------------------------------------------------------------------------
 set -o pipefail
-export VB_TOOL_VERSION="v2.5.8"
+export VB_TOOL_VERSION="v2.5.9"
 show_help() {
     echo "Vastbase Script Tool (vb_tool)"
     echo ""
@@ -25514,6 +25514,113 @@ from pg_prepared_xacts order by prepared limit 10")
     printf '\n'
 }
 
+_vtop_screen_stack() { # STACK page -- `vb_tool stack`'s SUMMARY part only
+    # (user's spec 2026-09-29: 参考vb_tool stack功能, 只输出汇总部分): ONE
+    # instantaneous `vb_ctl stack -D` dump aggregated Percona pt-pmp style --
+    # identical chains counted together, leaf frame first, '<-' reads "called
+    # by". No raw-sample dump, no multi-sample loop: a dump already is a
+    # point-in-time picture of every thread, so the page is an instantaneous
+    # reading and opens at the steady sub-screen cadence -- it is NOT in
+    # _vtop_quick_first_screens (no 5s first refresh) and not an OS page.
+    local st_dd st_raw st_chains st_agg st_t st_d st_rc
+    _vtop_pg stack 'Stack' 'one instant dump, aggregated (summary only)'
+    # datadir = run_vtop's one-time resolution (dynamic scope): the SAME
+    # instance every other page queries -- never a second, own guess
+    st_dd="${datadir:-}"
+    if [ -z "$st_dd" ] || [ "$st_dd" = "unknown" ] || [ ! -d "$st_dd" ]; then
+        printf '%s  !! datadir unresolved -- cannot run vb_ctl stack%s\n' "${c_red:-}" "${c_off:-}"
+        return 0
+    fi
+    if ! command -v vb_ctl >/dev/null 2>&1; then
+        printf '%s  !! vb_ctl not found in PATH%s\n' "${c_red:-}" "${c_off:-}"
+        return 0
+    fi
+    st_raw=$(mktemp /tmp/vbtop_stack.XXXXXX)
+    st_chains=$(mktemp /tmp/vbtop_stkch.XXXXXX)
+    st_agg=$(mktemp /tmp/vbtop_stkagg.XXXXXX)
+    timeout 30 vb_ctl stack -D "$st_dd" >"$st_raw" 2>&1
+    st_rc=$?
+    # thread -> chain (leaf first): the SAME parser as run_stack -- symbols
+    # keep their names (offsets stripped), unresolved addresses normalize to
+    # 0x???? and unsampleable threads to one constant, so they all aggregate
+    awk '
+        function flush_thread() {
+            if (in_thread && nframes > 0) {
+                chain = frames[1]
+                for (k = 2; k <= nframes; k++) chain = chain " <- " frames[k]
+                print chain
+            }
+            in_thread = 0; nframes = 0
+        }
+        /^Thread [0-9]+ tid</ { flush_thread(); in_thread = 1; next }
+        in_thread && (/^[ \t]*$/ || /^\[/) { flush_thread(); next }
+        in_thread {
+            line = $0
+            sub(/[ \t]+$/, "", line)
+            sub(/ \+ 0x[0-9a-fA-F]+$/, "", line)
+            if (line ~ /^0x[0-9a-fA-F]+$/) line = "0x????"
+            if (line ~ /not available/) { nframes = 1; frames[1] = "thread <not available>"; next }
+            if (line != "") { nframes++; frames[nframes] = line }
+        }
+        END { flush_thread() }
+    ' "$st_raw" > "$st_chains"
+    st_t=$(wc -l < "$st_chains" | tr -d ' ')
+    sort "$st_chains" | uniq -c | sort -k1,1nr -k2,2 > "$st_agg"
+    st_d=$(wc -l < "$st_agg" | tr -d ' ')
+    # the banner carries the thread count the same way run_stack's block
+    # header does ("sample 1/3 (N threads)")
+    _vtop_sec "stack summary (${st_t} threads)"
+    _vtop_th "$(printf '%6s  %5s  %s' cnt pct 'chain (leaf <- caller <- ...)')"
+    if [ "$st_t" -eq 0 ]; then
+        # nothing parsed: say WHY (vb_ctl failure), not just an empty table
+        printf '%s  !! vb_ctl stack produced no threads (rc=%s)%s\n' "${c_red:-}" "$st_rc" "${c_off:-}"
+        printf '%6s  %5s  %s\n' "-" "-" "-"
+    else
+        # top 30 chains by thread count; pct = share of THIS dump's threads.
+        # Long chains wrap at the page width, continuation aligns under the
+        # chain column (the same layout as run_stack's summary).
+        # ★LINE BUDGET 40 (user's call 2026-09-29: 「stack限制一下行数输出
+        #   别超屏幕了 后面就给个提示 省略了就行」→44 太多→「还是少几行吧
+        #   我怕有些堆栈比较长」): a chain is printed only if it fits WHOLE
+        #   (cutting mid-chain would hide its callers), the first chain always
+        #   prints (never an empty page), and whatever fell off -- line-budget
+        #   cut + chains beyond the top-30 input cap - is summed into ONE
+        #   trailing note.
+        head -30 "$st_agg" | awk -v total="$st_t" -v width="$(( ${_vtop_w:-150} - 2 ))" -v maxl=40 \
+                               -v more=$(( st_d > 30 ? st_d - 30 : 0 )) '
+        {
+            pct = $1 * 100.0 / total
+            chain = substr($0, index($0, $2))
+            n = split(chain, fr, " <- ")
+            line = sprintf("%6d  %5.1f%%  %s", $1, pct, fr[1])
+            indent = sprintf("%*s", 16, "")
+            no = 0
+            for (i = 2; i <= n; i++) {
+                if (length(line) + length(" <- " fr[i]) > width) {
+                    ol[++no] = line
+                    line = indent "<- " fr[i]
+                } else {
+                    line = line " <- " fr[i]
+                }
+            }
+            ol[++no] = line
+            if (shown > 0 && shown + no > maxl) { skip++; next }
+            for (i = 1; i <= no; i++) print ol[i]
+            shown += no
+        }
+        END {
+            if (skip > 0 || more > 0) {
+                parts = ""
+                if (skip > 0)  parts = skip " chains"
+                if (more > 0)  parts = parts (parts ? " + " : "") more " beyond top-30"
+                printf "(omitted %s; full dump: vb_tool stack)\n", parts
+            }
+        }'
+    fi
+    rm -f "$st_raw" "$st_chains" "$st_agg"
+    printf '\n'
+}
+
 # ---- old page names kept as thin aliases (a stale ESC command line, a tab
 #      completion muscle memory, or an old script still renders something sane) --
 _vtop_cmd_quit=0     # set by _vtop_cmd_exec when the typed command was 'q'
@@ -25546,6 +25653,7 @@ _vtop_cmd_exec() { # $1 = prefill; opens the command line, then runs what was ty
                                 #   yields 未知命令; the old 注释 claimed it was an alias.)
         t)  screen=topsql ;;
         k)  screen=lock ;;
+        g)  screen=stack ;;    # vb_tool stack's summary, one instant dump (2026-09-29)
         *)  _vtop_notice="unknown command: ${_vtop_cmd}   (one letter per built page -- see the HINT line at the bottom)" ;;
     esac
     # a sub-screen chosen via the command line gets the quick first refresh
@@ -25557,7 +25665,7 @@ _vtop_keys_hint() { # $1=screen -> key legend line, interactive mode only.
     # ★only pages that EXIST are advertised (2026-09-27: the eleven VASTBASE
     # drill-downs). The old two-line 21-section map advertised letters with
     # nothing behind them, so pressing one did nothing at all (user: "v进入…算了")
-    # -- the legend is ONE line now and every other letter (c p v g h n o d i f)
+    # -- the legend is ONE line now and every other letter (c p v h n o d i f)
     # is silently inert: no notice, no advertisement.
     # ★the label is HINT, not KEYS (user's call 2026-09-26: "KEY: 改成提示吧"):
     # this line is the key legend -- a different thing from the one-frame
@@ -25583,7 +25691,7 @@ _vtop_keys_hint() { # $1=screen -> key legend line, interactive mode only.
     # line of every page, this legend is keys-only again. The main screen does
     # not need it either: its header line already prints "refresh 15s".
     case "$1" in
-        main) printf '%sHINT%s    %ss=sess l=ltx a=istat e=wait x=xlog r=repl m=dbmem+memctx+topmem t=topsql k=lock%s   %sEnter=cmd  ESC=cmd  q=quit%s\n' \
+        main) printf '%sHINT%s    %ss=sess l=ltx a=istat e=wait x=xlog r=repl m=dbmem+memctx+topmem t=topsql k=lock g=stack%s   %sEnter=cmd  ESC=cmd  q=quit%s\n' \
                       "${c_grn:-}" "${c_off:-}" "${c_sec:-}" "${c_off:-}" "${c_ylw:-}" "${c_off:-}" ;;
         *)    printf '%sHINT%s    %sESC=back%s   %sEnter=refresh  q=quit%s\n' \
                       "${c_grn:-}" "${c_off:-}" "${c_sec:-}" "${c_off:-}" "${c_ylw:-}" "${c_off:-}" ;;
@@ -36070,9 +36178,11 @@ if not date_filter and total > 30:
 # DB column width adapts to the longest db_name in the shown rows (+2 gap,
 # floor 12): a long cluster name (dn_6001_6002_6003 = 16) must not push the
 # DB_ROLE column around -- and any future longer name can't either
+# HOST is the LAST column (2026-09-29): mid-row it pushed DB/DB_ROLE out of
+# alignment whenever a hostname ran past its width; last, it just runs long
 dbw = max(max(len(str(r[3])) for r in rows) + 2, 12)
-print("%-8s %-20s %-12s %-8s %-5s %-14s %-*s %-17s" % ("SNAP_ID", "TS", "DB_START", "DB_TIME", "AAS", "HOST", dbw, "DB", "DB_ROLE"))
-for r in rows: print("%-8s %-20s %-12s %-8s %-5s %-14s %-*s %-17s" % (r[0], r[1], r[4], delta.get(r[0], "-"), aas.get(r[0], "-"), r[2], dbw, r[3], r[6]))
+print("%-8s %-20s %-12s %-8s %-5s %-*s %-17s %s" % ("SNAP_ID", "TS", "DB_START", "DB_TIME", "AAS", dbw, "DB", "DB_ROLE", "HOST"))
+for r in rows: print("%-8s %-20s %-12s %-8s %-5s %-*s %-17s %s" % (r[0], r[1], r[4], delta.get(r[0], "-"), aas.get(r[0], "-"), dbw, r[3], r[6], r[2]))
 if not date_filter and total > 30:
     print("(showing latest 30 of %d; 'vb_tool awr list YYYY-MM-DD' for a specific day)" % total)
 PY
