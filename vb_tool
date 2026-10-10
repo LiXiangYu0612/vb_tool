@@ -35166,13 +35166,20 @@ def text_sqlhist(win, sql_id="", detail_wins=None, sqltext_root=None):
             hash_ = to_num(e.get("hash_time",0)) - to_num(b.get("hash_time",0))
             plan = to_num(e.get("plan_time",0)) - to_num(b.get("plan_time",0))
             rows = to_num(e.get("n_returned_rows",0)) - to_num(b.get("n_returned_rows",0))
+            # ★avg_* 五列补 /calls (2026-10-10 修, 用户报 avg_sort > avg_dbtime):
+            #   老代码只做 us->ms(/1e3)没除执行次数, avg_cpu/avg_io/avg_sort/
+            #   avg_hash/avg_plan 顶着 avg 表头显示的其实是**窗口总量** --
+            #   多次调用的 SQL 总量轻松超过单次平均, 正是"avg 比.avg_dbtime 大"
+            #   的来源。avg_dbtime/avg_cr/avg_pr/avg_rows 原本就除了, 口径对齐。
+            def _ms_per_call(v):
+                return "%.2f" % (v / 1e3 / calls) if (v >= 0 and calls > 0) else "-"
             rs.append([k[0], k[1],
                        "%d" % calls,
                        "%.2f" % (db_t / 1e3) if db_t >= 0 else "-",
                        "%.2f" % ((db_t / 1e3) / calls) if db_t >= 0 and calls > 0 else "-",
-                       "%.2f" % (cpu / 1e3), "%.2f" % (io / 1e3),
-                       "%.2f" % (sort / 1e3), "%.2f" % (hash_ / 1e3),
-                       "%.2f" % (plan / 1e3),
+                       _ms_per_call(cpu), _ms_per_call(io),
+                       _ms_per_call(sort), _ms_per_call(hash_),
+                       _ms_per_call(plan),
                        "%.1f" % (fetched / calls), "%.1f" % ((fetched - hit) / calls),
                        "%.1f" % (rows / calls)])
         rs.sort(key=lambda r: -int(r[2]))
