@@ -26028,8 +26028,9 @@ select (select decode(pg_is_in_recovery(),'f',pg_current_xlog_location(),(select
 -- 有 Sync 备库时可能取到字母序靠前的 Async —— case 四态定序 Sync>Quorum>
 -- Potential>Async。★不用 decode 用 case (user's call 2026-10-10: 怕其他兼容模式
 -- 不支持 decode; case 是标准 SQL 全模式通吃)。★sync_state 取值是首字母大写
--- (openGauss walsender.cpp 实锤: "Sync"/"Quorum"/"Potential"/"Async", 2026-10-10
--- 源码核验), 与原版 PG 的小写不同, 故套 lower() 两系通吃; 未知值 else 5 恒排最后,
+-- (openGauss walsender.cpp 实锤: Sync/Quorum/Potential/Async 四值首字母大写,
+-- 2026-10-10 源码核验), 与原版 PG 的小写不同, 故套 lower() 两系通吃; 未知值
+-- else 5 恒排最后, 不依赖 NULL 排序默认值。
 -- 不依赖 NULL 排序默认值。
 select application_name, state, sync_state,
        pg_xlog_location_diff(sender_sent_location,'0/0'),
