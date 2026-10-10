@@ -10878,17 +10878,17 @@ run_sqltext() {
         return 1
     fi
 
-    local logfiles
-    # ★双层窗口 (2026-10-10 修): 原来整树按 mtime 取最新 50 个, GAUSSLOG 指向
-    #   库根目录时 asp_data/sql_monitor 的滚动日志会把 pg_log 的文件挤出名单
-    #   (156 实测: 50 个名额全被 asp/慢日志占满, 含目标 sqlid 的 pg_log 现行文件
-    #   落榜 ⇒ 误报 not found; 正常机器上查几天前的 sqlid 同样会踩)。
-    #   改法: pg_log 目录内最新 50 个优先, 其余目录(asp/slow log 等)再补最新
-    #   50 个, 去重后合并 —— 两类来源都保底, 总量上限 75 纯为 grep 耗时兜底。
-    logfiles=$({ find "$gauss_log/pg_log" \( -name "*.log" -o -name "*.log.gz" -o -name "*.csv" -o -name "*.csv.gz" \) -type f -printf '%T@ %p\n' 2>/dev/null | \
-                   sort -rn | head -n 50 | cut -d' ' -f2-
-                 find "$gauss_log" \( -name "*.log" -o -name "*.log.gz" -o -name "*.csv" -o -name "*.csv.gz" \) -type f -printf '%T@ %p\n' 2>/dev/null | \
-                   sort -rn | head -n 50 | cut -d' ' -f2-; } | awk '!seen[$0]++' | head -n 75)
+    local logfiles _sqlhc_lg_root
+    # ★只在 pg_log 里找 (user's call 2026-10-10): unique_id 的 duration/STATEMENT
+    #   行只可能出现在 pg_log; 原来整树 find 会把 asp_data/sql_monitor 的滚动日志
+    #   卷进候选, 轻则白 grep, 重则把 pg_log 现行文件挤出 50 窗口(156 实测误报
+    #   not found)。GAUSSLOG 直指 pg_log 本身的部署用自身兜底。
+    _sqlhc_lg_root="$gauss_log/pg_log"
+    [ -d "$_sqlhc_lg_root" ] || _sqlhc_lg_root="$gauss_log"
+    logfiles=$(find "$_sqlhc_lg_root" \( -name "*.log" -o -name "*.log.gz" -o -name "*.csv" -o -name "*.csv.gz" \) -type f -printf '%T@ %p\n' 2>/dev/null | \
+               sort -rn | \
+               head -n 50 | \
+               cut -d' ' -f2-)
 
     if [[ -z "$logfiles" ]]; then
         echo "Warning: $gauss_log not found postgresql log" >&2
@@ -22026,16 +22026,14 @@ local output_to_file=0
         return 1
     fi
 
-    local logfiles _sel_rc
-    # ★pg_log 前置 (2026-10-10 修, 同 run_sqltext 的挤榜 bug): 整树 mtime 序里
-    #   asp_data/sql_monitor 的滚动日志会把 pg_log 文件挤出 python 的 50 窗口
-    #   ⇒ 误报 not found。候选列表改为 [pg_log 全部, mtime 降序] ++ [其余目录,
-    #   mtime 降序], 去重不重排 —— python 的"某日最新一卷起往下取 N 个"锚定
-    #   语义不变, 只是同日里 pg_log 优先于 asp/慢日志。
-    logfiles=$({ find "$gauss_log/pg_log" \( -name "*.log" -o -name "*.log.gz" -o -name "*.csv" -o -name "*.csv.gz" \) -type f -printf '%T@ %p\n' 2>/dev/null | \
-                   sort -rn | cut -d' ' -f2-
-                 find "$gauss_log" \( -name "*.log" -o -name "*.log.gz" -o -name "*.csv" -o -name "*.csv.gz" \) -type f -printf '%T@ %p\n' 2>/dev/null | \
-                   sort -rn | cut -d' ' -f2-; } | awk '!seen[$0]++' | \
+    local logfiles _sel_rc _sqlhc_lg_root
+    # ★只在 pg_log 里找 (user's call 2026-10-10, 同 run_sqltext): 整树候选会把
+    #   asp_data/sql_monitor 卷进来挤掉 pg_log 文件; 日期锚定语义不变。
+    _sqlhc_lg_root="$gauss_log/pg_log"
+    [ -d "$_sqlhc_lg_root" ] || _sqlhc_lg_root="$gauss_log"
+    logfiles=$(find "$_sqlhc_lg_root" \( -name "*.log" -o -name "*.log.gz" -o -name "*.csv" -o -name "*.csv.gz" \) -type f -printf '%T@ %p\n' 2>/dev/null | \
+               sort -rn | \
+               cut -d' ' -f2- | \
                SQLHC_START_DATE="$search_start_date" SQLHC_MAX_FILES="$search_count" python3 -c '
 import os, re, sys, time
 from datetime import datetime
