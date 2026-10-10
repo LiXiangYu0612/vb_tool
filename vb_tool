@@ -25236,14 +25236,17 @@ _vtop_screen_topsql() { # TOPSQL page -- EXACTLY the two rankings the `as` scrip
     # ★Both need a live OS sample. A sub-screen renders in a subshell and cannot
     #   inherit the main loop's, so this page takes its own -- two commands, each
     #   under `timeout`, once per frame.
-    # ★Second `top` sample (n==2 via -d0.3 -n2), NOT the first: a `top -b` batch
-    #   reports garbage %CPU in its first sample (vtop_progress 2026-08-21:
-    #   8/8 stable at -n2, 1/10 wrong at -n1). `as` itself uses -n1 and carries
-    #   that bug -- deliberately not copied.
+    # ★SAMPLING NOW EXACTLY `as` (user's call 2026-10-10: 「cpu%感觉也是错的 …
+    #   你看看as怎么弄的 参考一下」): `top -b -n1 -H` + as 的 awk(表头行定 %CPU
+    #   列位, getline 逐行取 $1,$ci) —— %CPU = 进程生命周期平均, 与 as 打印值同源。
+    #   2026-08-21 版曾刻意改 -d0.3 -n2 取第二帧瞬时值(实测 -n1 首帧 1/10 毛刺),
+    #   但两套口径的数字对不上, 用户以 as 为准, 2026-10-10 弃瞬时帧回归 as 算法,
+    #   主屏 [TOPSQL] 的采样同步改(同一条链路, 两处永不再各说各话)。
     # ★pidstat column note: `-hdt` puts a `#` column in the HEADER only, so in
     #   the DATA rows $4=lwpid(TID), $5=kB_rd/s, $6=kB_wr/s (exactly what `as`
-    #   uses). NR>4 skips the 4 header lines; the numeric test on $4 drops the
-    #   trailing "Average:" row and any stray line.
+    #   uses). NR>4 skips the header lines (banner/blank/字段表头/进程汇总行) --
+    #   awk 亦逐字对齐 as(`NR>4 {print $4","$5","$6}`), 并补上 as 采样前设置的
+    #   S_TIME_FORMAT=ISO(此前漏掉)。
     # ★GROUP BY sqlid ONLY (user's call 2026-09-27: 「只按 sqlid 分组」) -- NOT
     #   thread_name + sqlid as `as` does. One row per statement, so the SMP
     #   threads of one statement always collapse into a single row and their
@@ -25280,9 +25283,12 @@ _vtop_screen_topsql() { # TOPSQL page -- EXACTLY the two rankings the `as` scrip
     #   sess page stacks them tight.
     _vtop_sec "top cpu usage"
     ts_pairs=""
+    # ★采样改回 `as` 的算法 (user's call 2026-10-10): `top -b -n1 -H` + as 的 awk,
+    # %CPU = 进程生命周期平均, 与 as 同源同值。2026-09-27 版的 -d0.3 -n2 瞬时帧
+    # 与 as 的数字对不上, 以 as 为准 (主屏 [TOPSQL] 同步改, 两处同一条链路)。
     if [ -n "$ts_pm" ]; then
-        ts_pairs=$(timeout 5 top -b -d0.3 -n2 -H -p "$ts_pm" 2>/dev/null \
-            | awk '/^ *PID USER/ {n++; ci=0; for(i=1;i<=NF;i++) if($i=="%CPU") ci=i; next} n==2 && /^ *[0-9]+ / {if(ci) print $1 "," $ci}' \
+        ts_pairs=$(timeout 5 top -b -n1 -H -p "$ts_pm" 2>/dev/null \
+            | awk '/^ *PID USER/ {ci=0; for(i=1;i<=NF;i++) if($i=="%CPU") ci=i; while (getline) if(ci && $ci!="") print $1 "," $ci}' \
             | paste -sd ';')
     fi
     [ -n "$ts_pairs" ] || ts_pairs="0,0"
@@ -25318,9 +25324,14 @@ order by round(sum(tmp.cpu_usage),2)::numeric desc limit 15")
     done
     _vtop_sec "top I/O usage"
     ts_pairs=""
+    # ★对齐 `as` (user's call 2026-10-10: 「top I/O 根本展示不出来」): ①补 as 有而
+    #   这里漏掉的 S_TIME_FORMAT=ISO(as 采样前 export 的环境, 时间戳格式随它走);
+    #   ②awk 去掉自加的 $4 数字过滤, 逐字用 as 的 `NR>4 {print $4","$5","$6}` ——
+    #   解析口径与 as 完全一致, as 出数这里就出数; 若 as 在同一台机器也不出数,
+    #   则是该机 pidstat/内核 task io accounting 的问题, 不在本工具层。
     if [ -n "$ts_pm" ]; then
-        ts_pairs=$(timeout 5 pidstat -hdt -p "$ts_pm" 1 1 2>/dev/null \
-            | awk 'NR>4 && $4 ~ /^[0-9]+$/ {print $4 "," $5 "," $6}' \
+        ts_pairs=$(S_TIME_FORMAT=ISO timeout 5 pidstat -hdt -p "$ts_pm" 1 1 2>/dev/null \
+            | awk 'NR>4 {print $4 "," $5 "," $6}' \
             | paste -sd ';')
     fi
     [ -n "$ts_pairs" ] || ts_pairs="0,0,0"
@@ -26593,9 +26604,15 @@ order by s.sz desc;"
         local db section="" h_node h_ver h_up s_tot s_act s_iit s_idle s_ltx s_avac s_smp s_jdbc m_used m_max m_shmax m_shused m_dyu m_dym m_dyp m_shr m_shrp m_other m_sbuf x_cur x_ckr x_old x_cbm x_cnt x_sz x_rest x_arch r_app r_state r_sync r_sent r_wr r_fl r_rp r_slot r_dsent r_dwr r_dfl r_drp r_net r_fs r_ap r_tot
         local r_sqlid r_cpu r_ns r_rn r_et r_sql ms_sid ms_sz ms_sql
         local cpupairs="0,0" VT_TOP
+        # ★[TOPSQL] cpu 采样改回 `as` 的算法 (user's call 2026-10-10: 「cpu%感觉也是
+        # 错的 你看看as怎么弄的 参考一下」): `top -b -n1 -H` + as 的 awk —— %CPU 语义
+        # = 进程生命周期平均, 与 as 打印的数字同源同值, 两边永不再各说各话。
+        # 此前 2026-08-21 的 -d0.3 -n2(取第二帧瞬时值) 与 as 的 -n1 数字对不上, 用户
+        # 以 as 为准。as 的 -n1 首帧偶发毛刺 (当年实测 1/10) 一并继承 —— 与 as 完全
+        # 同算法是本口径的第一优先级。
         if [ -n "$pm_pid" ]; then
-            cpupairs=$(timeout 5 top -b -d0.3 -n2 -H -p "$pm_pid" 2>/dev/null \
-                | awk '/^ *PID USER/ {n++; ci=0; for(i=1;i<=NF;i++) if($i=="%CPU") ci=i; next} n==2 && /^ *[0-9]+ / {if(ci) print $1 "," $ci}' \
+            cpupairs=$(timeout 5 top -b -n1 -H -p "$pm_pid" 2>/dev/null \
+                | awk '/^ *PID USER/ {ci=0; for(i=1;i<=NF;i++) if($i=="%CPU") ci=i; while (getline) if(ci && $ci!="") print $1 "," $ci}' \
                 | paste -sd ';')
         fi
         [ -n "$cpupairs" ] || cpupairs="0,0"
