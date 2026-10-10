@@ -6199,16 +6199,18 @@ time_model as (
     sum(decode(snap_stat_name,'DB_TIME',stat_value,0)) db_time,
     sum(decode(snap_stat_name,'CPU_TIME',stat_value,0)) cpu_time
     from (select snapshot_id,snap_stat_name,
-          snap_value-lag(snap_value)over(partition by snap_node_name,snap_stat_name order by snapshot_id) stat_value
-              from snapshot.snap_global_instance_time)
+          case when lag(snap_value) over pw IS NOT NULL and snap_value >= lag(snap_value) over pw
+               then snap_value - lag(snap_value) over pw end stat_value
+              from snapshot.snap_global_instance_time
+          window pw as (partition by snap_node_name,snap_stat_name order by snapshot_id))
     group by snapshot_id
 ),
 all_events as (
     select snapshot_id, 'CPU time' as event, '' as event_type,cpu_time as wait_time, null as waits, 1 as is_cpu
     from time_model
-    
+
     union all
-    
+
     select snapshot_id, event, event_type,wait_time, waits, 0 as is_cpu
     from (
         select snapshot_id, event, event_type,wait_time, waits,
@@ -6355,8 +6357,10 @@ time_range as (
 time_model as (
     select snapshot_id, sum(decode(snap_stat_name,'DB_TIME',stat_value,0)) db_time
     from (select snapshot_id,snap_stat_name,
-                 snap_value-lag(snap_value)over(partition by snap_node_name,snap_stat_name order by snapshot_id) stat_value
-          from snapshot.snap_global_instance_time)
+                 case when lag(snap_value) over pw IS NOT NULL and snap_value >= lag(snap_value) over pw
+                      then snap_value - lag(snap_value) over pw end stat_value
+          from snapshot.snap_global_instance_time
+          window pw as (partition by snap_node_name,snap_stat_name order by snapshot_id))
     group by snapshot_id
 ),
 ev as (
@@ -6829,7 +6833,7 @@ select substr(trunc(start_time,'MI'),1,19) start_time,user_name,schema_name,uniq
     '^(\s+Filter:).*$', '\1', 'gm'
   )
 ) plan_hash_value,count(*) execs,
-sum(db_time) total_db_ms,
+sum(db_time)/1e3 total_db_ms,
 round(avg(db_time)/1e3,1) db_ms,
 round(avg(execution_time)/1e3,1) et_ms,
 round(avg(cpu_time)/1e3,1) cpu_ms,
@@ -8464,6 +8468,7 @@ run_asp_waitchain_query() {
 gs_asp_1 AS (
     SELECT gs.* FROM gs_asp gs
     WHERE gs.sample_time::timestamp(0) without time zone BETWEEN '$begin_time' AND '$end_time'
+      AND ($condition1)
       AND NOT EXISTS (SELECT 1 FROM get_local_active_session() l
                       WHERE l.sample_time::timestamp(0) without time zone
                             = gs.sample_time::timestamp(0) without time zone)
@@ -24146,9 +24151,13 @@ _vtop_delta() { # $1=begin $2=end -> plain delta (0 on a counter reset)
 }
 _vtop_istrow() { # one load-profile line: $1=label $2=begin $3=end $4=window_ms $5=count|bytes
     local r t
+    # ★第三列 = end 值(当前累计, since stats_reset) —— 表头一直叫 since_reset, 旧实现
+    #   打的却是 _vtop_delta(上一帧到本帧的窗口增量), 19 行里 18 行语义与表头不符
+    #   (仅 buffer_hit% 行恰好是累计口径)。2026-10-10 对齐: 值跟表头走, 速率列
+    #   仍按窗口差分不变。
     [ -z "${2:-}" ] && { printf '%-26s %-16s %s\n' "$1" '-' '-'; return 0; }
     r=$(_vtop_rate "$2" "$3" "$4")
-    t=$(_vtop_delta "$2" "$3")
+    t=${3:--}
     if [ "$5" = "bytes" ]; then r=$(_vtop_fmt_b "$r"); t=$(_vtop_fmt_b "$t"); fi
     printf '%-26s %-16s %s\n' "$1" "$r" "$t"
 }
@@ -24550,9 +24559,21 @@ from pg_stat_database"
     is_a=""; is_t0=0
     if [ -f "$is_f" ]; then
         read -r is_t0 < "$is_f" 2>/dev/null
+        # 脏值当空(同 wait/repl 页): 基线文件被写坏时不要让 bash 报错打到屏幕上
+        case "${is_t0:-}" in ''|*[!0-9]*) is_t0="" ;; esac
         is_a=$(sed -n '2p' "$is_f" 2>/dev/null)
     fi
     is_dt=$(( is_t1 - ${is_t0:-0} ))
+    # ★基线太旧 = 没有基线 (2026-10-10 补齐; repl/wait 页 2026-09-28 已有同款,
+    #   istat 同属 quick_first 增量页却漏了): 基线文件跨页面存活, 离开本页很久再
+    #   回来时 dt 是分钟/小时级 —— 18 行速率全按超长窗口平均, 突发被稀释, 而页头
+    #   照印 refresh。与"首次进页无基线 ⇒ 全 '-'"同一惯例: 超阈即当无基线,
+    #   下一帧自然拿到正常窗口。阈值公式与 rp_lim/we_lim 同源: min(3×节律,15s)×3,
+    #   下限 20s; 单位毫秒(is_t1 是 %s%3N 毫秒, 阈值也必须毫秒 —— rp_lim 第一版
+    #   写成秒的教训在案)。
+    is_lim=$(( ${interval:-15} * 3 )); [ "$is_lim" -gt 15 ] && is_lim=15
+    is_lim=$(( is_lim * 3 * 1000 )); [ "$is_lim" -lt 20000 ] && is_lim=20000
+    [ "$is_dt" -gt "$is_lim" ] && is_dt=0
     # no baseline (first render) -> is_a empty and is_dt 0: every rate renders '-'
     # (_vtop_istrow prints dashes when its begin value is empty), exactly like the
     # main screen's first [ISTAT] frame.
@@ -24746,7 +24767,11 @@ _vtop_screen_wait() { # WAIT page -- two blocks, both [SESS]-style (boxed banner
         we_n=$((we_n + 1))
     done
     # park this render as the next one's baseline
-    if [ -n "$we_out" ]; then
+    # ★we_dbt 必须与 we_out 同帧成功才写 (2026-10-10 修): DB_TIME 查询失败的那帧
+    #   we_dbt 落空成 0, 若照写 ⇒ 下一帧 we_pdb=0 ⇒ we_ddbt=终身 DB_TIME, 所有
+    #   pct_db_time 严重偏小。istat 页同类场景是整体跳过写基线([ -n "$is_b" ]),
+    #   口径对齐: 查询失败的帧不落盘, 保留旧基线(过期判定会兜住太旧的)。
+    if [ -n "$we_out" ] && [ -n "$we_dbt" ]; then
         {
             printf '%s %s\n' "$(date +%s%3N)" "$we_dbt"
             printf '%s\n' "$we_out" | awk -F'|' 'NF>=4 {print $1 "\t" $3 "\t" $4}'
@@ -25556,9 +25581,9 @@ _vtop_screen_stack() { # STACK page -- `vb_tool stack`'s SUMMARY part only
         printf '%s  !! vb_ctl not found in PATH%s\n' "${c_red:-}" "${c_off:-}"
         return 0
     fi
-    st_raw=$(mktemp /tmp/vbtop_stack.XXXXXX)
-    st_chains=$(mktemp /tmp/vbtop_stkch.XXXXXX)
-    st_agg=$(mktemp /tmp/vbtop_stkagg.XXXXXX)
+    st_raw=$(mktemp "${TMPDIR:-/tmp}/vbtop_stack.$$.XXXXXX")
+    st_chains=$(mktemp "${TMPDIR:-/tmp}/vbtop_stkch.$$.XXXXXX")
+    st_agg=$(mktemp "${TMPDIR:-/tmp}/vbtop_stkagg.$$.XXXXXX")
     timeout 30 vb_ctl stack -D "$st_dd" >"$st_raw" 2>&1
     st_rc=$?
     # thread -> chain (leaf first): the SAME parser as run_stack -- symbols
@@ -25872,7 +25897,8 @@ _vtop_cleanup() {
     [ "${BASHPID:-$$}" = "$$" ] || return 0
     pkill -P "$BASHPID" 2>/dev/null
     rm -f "${_vtop_f:-}" "${_vtop_f:-}.box."* "/tmp/vbtop_q.$$.err" \
-          "${TMPDIR:-/tmp}/vbtop_wait.$$.prev" "${TMPDIR:-/tmp}/vbtop_istat.$$.prev" "${TMPDIR:-/tmp}/vbtop_repl.$$.prev" 2>/dev/null
+          "${TMPDIR:-/tmp}/vbtop_wait.$$.prev" "${TMPDIR:-/tmp}/vbtop_istat.$$.prev" "${TMPDIR:-/tmp}/vbtop_repl.$$.prev" \
+          "${TMPDIR:-/tmp}"/vbtop_stack."$$".* "${TMPDIR:-/tmp}"/vbtop_stkch."$$".* "${TMPDIR:-/tmp}"/vbtop_stkagg."$$".* 2>/dev/null
     # ★`stty echo ICANON` -- icanon too: bash's own `read -n1` switches the tty
     # to non-canonical while it reads, and a signal landing mid-read (Ctrl+C)
     # unwinds that restore; we are the reason the tty was touched at all, so
@@ -26345,6 +26371,12 @@ order by s.sz desc;"
     find "$_vtop_tmpdir" -maxdepth 1 -name 'vbtop_wait.*.prev' -mmin +60 -delete 2>/dev/null
     find "$_vtop_tmpdir" -maxdepth 1 -name 'vbtop_istat.*.prev' -mmin +60 -delete 2>/dev/null
     find "$_vtop_tmpdir" -maxdepth 1 -name 'vbtop_repl.*.prev' -mmin +60 -delete 2>/dev/null
+    # ★stack 页的三个 mktemp (vbtop_stack/stkch/stkagg.XXXXXX): 页内正常路径有
+    #   rm, 但 SIGINT/TERM 砸在 timeout 30 vb_ctl stack 的窗口内就漏一组且无人回收
+    #   (2026-10-10 补; 启动清扫此前也不认它们)
+    find "$_vtop_tmpdir" -maxdepth 1 -name 'vbtop_stack.*' -mmin +60 -delete 2>/dev/null
+    find "$_vtop_tmpdir" -maxdepth 1 -name 'vbtop_stkch.*' -mmin +60 -delete 2>/dev/null
+    find "$_vtop_tmpdir" -maxdepth 1 -name 'vbtop_stkagg.*' -mmin +60 -delete 2>/dev/null
     _vtop_stty=""                # set when WE turned terminal echo off (restore at exit; GLOBAL -- see above)
     # ★一个清理函数 + 四个 trap (2026-09-26): 原来只有 EXIT, 于是被 SIGTERM/SIGINT 打死时
     # tty 留在 -echo (用户终端变哑巴)、临时文件也不删。HUP 尤其重要: 终端/ssh 断开时
@@ -26924,6 +26956,13 @@ printf '           %-14s %-22s %-8.8s %-9s %.62s\n' "-" "-" "-" "-" "-"
                               ist_lg="$(_vtop_fmt_b $_lg)"; ist_ph="$(_vtop_fmt_b $_ph)"
                               ist_rd="$(_vtop_fmt_b $_rd)"; ist_tp="$(_vtop_fmt_b $_tp)"
                               ist_pw="$(_vtop_fmt_b $_pw)"; ist_dl=$_dl
+                          else
+                              # ★守卫失败帧清空 (2026-10-10 补): 注释一直声称"本帧全 '-'",
+                              # 但 ist_* 只在守卫通过时赋值 ⇒ 重启/reset 那帧会**沿用上一帧
+                              # 的旧速率**看着像实时(===EOD 哨兵注释点名要防的同一类
+                              # 陈旧数据)。清空后渲染端 ${ist_*:--} 自然打 '-'。
+                              ist_qps=""; ist_cm=""; ist_roll=""; ist_tps=""
+                              ist_lg=""; ist_ph=""; ist_rd=""; ist_tp=""; ist_pw=""; ist_dl=""
                           fi
                           prev_xc=$i_xc; prev_xr=$i_xr; prev_br=$i_br; prev_bh=$i_bh; prev_tb=$i_tb; prev_lsn=$i_lsn; prev_nc=$i_nc; prev_pw=$i_pw; prev_dl=$i_dl;;
                     XLOG) IFS='|' read -r x_cur x_ckr x_old x_cbm x_cnt x_sz x_rest x_arch <<< "$line";;
@@ -27208,7 +27247,7 @@ _se_kb_dump() {
 
 awr_help() {
     cat <<'EOF'
-Usage: vb_tool awr <create|enable|disable|awrrpt|awrdiff|baseline|topsql|event|summary|tabstat|cpu|io|page|replstat|replslot|replay|ltx|list|show|delete|config> [options]
+Usage: vb_tool awr <create|enable|disable|awrrpt|awrdiff|baseline|topsql|event|summary|tabstat|cpu|io|page|replstat|replslot|replay|ltx|sqlhist|list|show|delete|config> [options]
 
   create  [--root <dir>]    capture ONE single-point snapshot now (foreground,
                             ~5-10s), assigns the next snap_id. No html.
@@ -34198,7 +34237,6 @@ def _summary_row(win):
             out.append(ev - bv if ev - bv >= 0 else None)
         return out
     # rel_iostat = ONE cumulative row (kernel direct counters): plain delta
-        return tot
     phyrds, phywrts, phyblkrd, phyblkwrt = _io_delta(
         "rel_iostat", ["phyrds", "phywrts", "phyblkrd", "phyblkwrt"])
     # file_redo_iostat is a global aggregate (no per-file key): plain row-sum
@@ -34648,38 +34686,8 @@ def text_sqlhist(win, sql_id="", detail_wins=None, sqltext_root=None):
             lines.append("  (%d chars total)" % len(flat))
     else:
         lines.append("(sql text not found in the shared sql_text store)")
-    def _hist_rows(w):
-        ST = delta_rows(w, "statement", "unique_sql_id",
-                        ["n_calls", "db_time", "cpu_time", "data_io_time",
-                         "plan_time", "sort_time", "hash_time",
-                         "n_blocks_fetched", "n_blocks_hit", "n_returned_rows"])
-        d = ST.get(sql_id)
-        if not d or to_num(d.get("n_calls", 0)) <= 0:
-            return None
-        calls = to_num(d.get("n_calls", 0))
-        fetched = to_num(d.get("n_blocks_fetched", 0))
-        hit = to_num(d.get("n_blocks_hit", 0))
-        def _tot(col):
-            x = to_num(d.get(col, 0))
-            return x / 1e3 if x >= 0 else None      # us -> ms
-        def _avg(col):
-            t = _tot(col)
-            return t / calls if (t is not None and calls > 0) else None
-        def _f2(v):
-            return "%.2f" % v if v is not None else "-"
-        def _f1(v):
-            return "%.2f" % v if v is not None else "-"
-        return ["%d" % calls,
-                _f2(_tot("db_time")),
-                _f1(_avg("db_time")),
-                _f1(_avg("cpu_time")),
-                _f1(_avg("data_io_time")),
-                _f1(_avg("sort_time")),
-                _f1(_avg("hash_time")),
-                _f1(_avg("plan_time")),
-                "%.1f" % (fetched / calls) if calls > 0 and fetched >= 0 else "-",
-                "%.1f" % ((fetched - hit) / calls) if calls > 0 and fetched - hit >= 0 else "-",
-                "%.1f" % (to_num(d.get("n_returned_rows", 0)) / calls) if calls > 0 else "-"]
+    # ★_hist_rows(带负值守卫的旧实现)从未被调用 -- 渲染走 _hist_rows_ui;
+    # 2026-10-10 审计删除, 防止误导(其守卫逻辑已随当日修复并入 _hist_rows_ui)。
     headers = ["time_range", "calls", "dbtime", "avg_dbtime", "avg_cpu", "avg_io",
                "avg_sort", "avg_hash", "avg_plan", "avg_cr", "avg_pr", "avg_rows"]
     def _hist_rows_ui(w):
@@ -34710,8 +34718,9 @@ def text_sqlhist(win, sql_id="", detail_wins=None, sqltext_root=None):
                        _ms_per_call(cpu), _ms_per_call(io),
                        _ms_per_call(sort), _ms_per_call(hash_),
                        _ms_per_call(plan),
-                       "%.1f" % (fetched / calls), "%.1f" % ((fetched - hit) / calls),
-                       "%.1f" % (rows / calls)])
+                       "%.1f" % (fetched / calls) if (fetched >= 0 and calls > 0) else "-",
+                       "%.1f" % ((fetched - hit) / calls) if (fetched - hit >= 0 and calls > 0) else "-",
+                       "%.1f" % (rows / calls) if (rows >= 0 and calls > 0) else "-"])
         rs.sort(key=lambda r: -int(r[2]))
         return rs or None
 
@@ -34952,7 +34961,7 @@ def main():
                                 "cpu", "io", "page", "replstat", "replslot",
                                 "replay", "ltx", "sqlhist"):
             sys.stderr.write("Error: --text expects topsql|event|summary|tabstat"
-                             "|cpu|io|page|replstat|replslot|replay|ltx\n"); return 2
+                             "|cpu|io|page|replstat|replslot|replay|ltx|sqlhist\n"); return 2
         if not repl_dir:
             # per-minute series (os_*.log) live in the snapshot root,
             # next to the snap_<id> dirs the text reports are given
@@ -36325,9 +36334,9 @@ PY
     else
         echo "status        : ENABLED"
         if [ -n "$snapent" ]; then echo "  snapshot sampler : $snapent"
-        else echo "  snapshot sampler : (entry missing -- re-run 'awr enable' to fix)"; fi
+        else echo "  snapshot sampler : (entry missing -- run 'awr disable' then 'awr enable' to fix; 'awr enable' alone refuses while any marker exists)"; fi
         if [ -n "$replent" ]; then echo "  replicat sampler : $replent"
-        else echo "  replicat sampler : (entry missing -- re-run 'awr enable' to fix)"; fi
+        else echo "  replicat sampler : (entry missing -- run 'awr disable' then 'awr enable' to fix; 'awr enable' alone refuses while any marker exists)"; fi
         [ -n "$ageline" ] && echo "$ageline"
     fi
     [ -n "$others" ] && echo "other ports   : awr also enabled on: $others"
