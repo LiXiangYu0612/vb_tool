@@ -27358,7 +27358,7 @@ Usage: vb_tool awr <create|enable|disable|awrrpt|awrdiff|baseline|topsql|event|s
                             sql_id + oldestxmin, 6 compact columns; HTML awrrpt
                             keeps 12 columns + duration cell auto unit; needs
                             'awr enable' sampler)
-  list    [YYYY-MM-DD]     list stored snapshots (snap_id / ts / host / db /
+  list|ls [YYYY-MM-DD]     list stored snapshots (ls = list alias; snap_id / ts / host / db /
                             per-snap DB_TIME delta + AAS), newest first;
                             default latest 30, a date lists that whole day
   show                      awr overview: run status (crontab entries),
