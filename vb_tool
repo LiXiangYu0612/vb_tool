@@ -31519,369 +31519,6 @@ def render_single(window_dir, metric, top_n, out_html):
     else:
         sys.stdout.write(htmls)
 
-# ================== ADDM: timeline auto-diagnosis engine (pure, testable) ==================
-# v2.5.6 (user design): strictly TIME-LINE integrated analysis. All 1-min / 5-min
-# series land on one minute-slot axis; per-series anomaly rules fire into slots;
-# overlapping slots merge into INCIDENT WINDOWS with cross-family evidence; a
-# load gate (AAS vs cores) suppresses ratio-based advice on idle/low windows --
-# ADDM is only valuable when the box is busy or something is objectively wrong.
-# util% is NEVER a disk criterion (SSD multi-path): latency / queue depth only.
-def _addm_pct(a, b):
-    return (a / b * 100.0) if b else 0.0
-
-
-def _addm_ts(s):
-    try:
-        import calendar
-        return calendar.timegm(time.strptime((s or "")[:19], "%Y-%m-%d %H:%M:%S"))
-    except Exception:
-        return None
-
-
-def addm_load_gate(aas, cpu_busy, cores):
-    """IDLE/LOW/NORMAL/BUSY -- ratio-based advice is suppressed on IDLE/LOW."""
-    if cores and aas > cores * 0.5:
-        lvl = "BUSY"
-    elif aas >= 0.5:
-        lvl = "NORMAL"
-    elif aas >= 0.05:
-        lvl = "LOW"
-    else:
-        lvl = "IDLE"
-    if cores and cpu_busy is not None and cpu_busy >= 60 and lvl in ("IDLE", "LOW"):
-        lvl = "NORMAL"          # busy cpu is objective even when ASH sees little
-    return lvl
-
-
-def addm_analyze(ctx):
-    """ctx keys: t0,t1,cores,duration,dbt_us,deadlocks,temp_bytes,temp_files,
-    os_smp,ash,lt,stack,ssm,repl,fd_b,fd_e,limits_txt,st,sql_text_fn.
-    Returns {level,aas,slots,incidents,sqlrank,findings,registry}."""
-    import calendar
-    R = {"level": "IDLE", "aas": 0.0, "slots": [], "incidents": [],
-         "sqlrank": [], "findings": [], "registry": []}
-    t0e, t1e = _addm_ts(ctx.get("t0")), _addm_ts(ctx.get("t1"))
-    dur = float(ctx.get("duration") or 0) or max(1, (t1e - t0e) if t0e and t1e else 60)
-    nslots = max(1, min(720, int(dur // 60) + 1))
-    cores = ctx.get("cores")
-
-    def slot_of(ts):
-        e = _addm_ts(ts)
-        if e is None or t0e is None:
-            return None
-        return max(0, min(nslots - 1, int((e - t0e) // 60)))
-
-    slots = [dict(cpu=None, iowait=None, swap=0, memav_pct=None, dsklat=0.0,
-                  dskq=0.0, lock=None, active=None, chain=0, longtx=0, itx=0,
-                  flags=set()) for _ in range(nslots)]
-    anoms = []          # (slot, sev, family, msg)
-
-    # ---- load gate: AAS from ASH avg sessions per bucket (fallback db time) ----
-    aas = 0.0
-    ash = ctx.get("ash") or {}
-    buckets = {}
-    for (src, bk), v in (ash.get("cnt") or {}).items():
-        b = (bk or "")[:16]
-        cur = buckets.setdefault(b, {"n": 0, "act": 0.0, "mx": 0.0, "lock": 0.0})
-        cur["n"] += 1
-        cur["act"] += to_num(v[1] if len(v) > 1 else 0)      # avg sessions/sec
-        cur["mx"] = max(cur["mx"], to_num(v[2] if len(v) > 2 else 0))
-        cur["lock"] += to_num(v[3] if len(v) > 3 else 0)
-    for b, cur in buckets.items():
-        if cur["n"]:
-            cur["act"] /= cur["n"]
-            cur["lock"] /= cur["n"]
-    if buckets:
-        aas = sum(c["act"] for c in buckets.values()) / len(buckets)
-    elif ctx.get("dbt_us") is not None:
-        aas = to_num(ctx["dbt_us"]) / 1e6 / dur
-    lvl = addm_load_gate(aas, None, cores)
-    R["level"], R["aas"] = lvl, aas
-    R["cores"] = cores
-    rel_ok = lvl in ("NORMAL", "BUSY")
-
-    # ---- OS 1-min series ----
-    smp = ctx.get("os_smp") or {}
-    cpus = smp.get("cpu") or []
-    prev = None
-    for ts, vals in cpus:
-        si = slot_of(ts)
-        if si is None:
-            continue
-        try:
-            f = [float(x) for x in vals[:8]]
-        except Exception:
-            continue
-        if prev is not None:
-            d = [f[i] - prev[i] for i in range(8)]
-            tot = sum(max(0.0, x) for x in d)
-            if tot > 0:
-                busy = 100.0 * (tot - max(0.0, d[3])) / tot
-                slots[si]["cpu"] = round(busy, 1)
-                slots[si]["iowait"] = round(100.0 * max(0.0, d[4]) / tot, 1)
-                if busy >= 95:
-                    anoms.append((si, "C", "os-cpu", "CPU %d%%" % busy))
-                elif busy >= 80:
-                    anoms.append((si, "W", "os-cpu", "CPU %d%%" % busy))
-                if slots[si]["iowait"] is not None and slots[si]["iowait"] >= 30:
-                    anoms.append((si, "W", "os-cpu", "iowait %s%%" % slots[si]["iowait"]))
-        prev = f
-    prev = None
-    for ts, vals in smp.get("pg") or []:
-        si = slot_of(ts)
-        if si is None:
-            continue
-        try:
-            f = [float(x) for x in vals[:6]]
-        except Exception:
-            continue
-        if prev is not None:
-            sw = sum(max(0.0, f[i] - prev[i]) for i in (2, 3))
-            if sw > 0 and si < len(slots):
-                slots[si]["swap"] = int(sw)
-                anoms.append((si, "W", "os-swap", "swapped in/out %d pages" % sw))
-        prev = f
-    for ts, vals in smp.get("mem") or []:
-        si = slot_of(ts)
-        if si is None or len(vals) < 3:
-            continue
-        try:
-            mt, mfr, mav = float(vals[0]), float(vals[1]), float(vals[2])
-        except Exception:
-            continue
-        if mt > 0 and si < len(slots):
-            slots[si]["memav_pct"] = round(100.0 * mav / mt, 1)
-            if mav / mt < 0.02:
-                anoms.append((si, "C", "os-mem", "MemAvailable %.1f%%" % slots[si]["memav_pct"]))
-            elif mav / mt < 0.05:
-                anoms.append((si, "W", "os-mem", "MemAvailable %.1f%%" % slots[si]["memav_pct"]))
-    prev = {}
-    for ts, raw in smp.get("dsk") or []:
-        si = slot_of(ts)
-        if si is None:
-            continue
-        cur = {}
-        for ln in (raw or "").splitlines():
-            g = ln.split()
-            if len(g) >= 14 and g[2] not in cur:
-                try:
-                    cur[g[2]] = (float(g[3]), float(g[7]), float(g[9]), float(g[13]))
-                except Exception:
-                    pass
-        for dev, cv in cur.items():
-            pv = prev.get(dev)
-            if pv is None or si >= len(slots):
-                continue
-            d_ios = (cv[0] - pv[0]) + (cv[2] - pv[2])
-            d_ticks = (cv[1] - pv[1]) + (cv[3] - pv[3])
-            if d_ios >= 10:
-                lat = d_ticks / d_ios
-                if lat > slots[si]["dsklat"]:
-                    slots[si]["dsklat"] = round(lat, 1)
-                if lat >= 100:
-                    anoms.append((si, "C", "os-dsk", "%s latency %.0fms" % (dev, lat)))
-                elif lat >= 25:
-                    anoms.append((si, "W", "os-dsk", "%s latency %.0fms" % (dev, lat)))
-        prev = cur
-    for ts, vals in smp.get("tcpext") or []:
-        si = slot_of(ts)
-        if si is None:
-            continue
-        try:
-            drops = sum(float(x) for x in vals[:2])
-        except Exception:
-            continue
-        if drops > 0 and si < len(slots):
-            anoms.append((si, "C", "os-tcp", "listen-queue drops %d" % drops))
-
-    # ---- ASH 5-min buckets ----
-    for b, cur in buckets.items():
-        si = slot_of(b + ":00")
-        if si is None:
-            continue
-        if si < len(slots):
-            slots[si]["active"] = round(cur["act"], 2)
-            slots[si]["lock"] = round(_addm_pct(cur["lock"], cur["act"] or 1), 1)
-            ratio = cur["lock"] / cur["act"] if cur["act"] else 0
-            if rel_ok and ratio >= 0.2 and cur["lock"] >= 1:
-                anoms.append((si, "W", "ash-lock", "lock wait %d%% of active" % round(ratio * 100)))
-            if cores and cur["mx"] >= cores:
-                anoms.append((si, "W", "ash-busy", "active sessions %d >= cores" % cur["mx"]))
-    for (dt, root), v in (ash.get("waitchain") or {}).items():
-        si = slot_of((dt or "")[-39:][:19])
-        n = to_num(v[0]) if v else 0
-        if n >= 3:
-            anoms.append((si if si is not None else 0, "C", "ash-chain",
-                          "root blocker %s blocking %d sessions" % (root, n)))
-            if si is not None and si < len(slots):
-                slots[si]["chain"] = max(slots[si]["chain"], int(n))
-
-    # ---- 5-min DB samplers ----
-    for ts, kind, f in (ctx.get("lt") or {}).get("rows", []):
-        si = slot_of(ts)
-        if kind != "data" or si is None:
-            continue
-        try:
-            cnt = int(float(f[0])); itx = int(float(f[1]))
-        except Exception:
-            continue
-        if si < len(slots):
-            slots[si]["longtx"] = max(slots[si]["longtx"], cnt)
-            slots[si]["itx"] = max(slots[si]["itx"], itx)
-        if cnt > 0:
-            anoms.append((si, "W", "lt", "%d long transactions" % cnt))
-    mems = [(ts, to_num(f[1] if len(f) > 1 else 0)) for ts, kind, f in
-            ((r[0], r[1], r[2]) for r in (ctx.get("ssm") or {}).get("rows", [])) if kind == "data"]
-    mems = [(t, v) for t, v in mems if v > 0]
-    if len(mems) >= 2:
-        first, last = mems[0][1], mems[-1][1]
-        if first > 0 and last > first * 1.5 and last - first >= 512 * 1024 * 1024:
-            si = slot_of(mems[-1][0])
-            anoms.append((si if si is not None else 0, "W", "sessmem",
-                          "max session memory +%.0f%%" % (100.0 * (last - first) / first)))
-
-    # ---- anchors (window deltas) ----
-    if to_num(ctx.get("temp_files") or 0) > 0 or to_num(ctx.get("temp_bytes") or 0) >= 1024 * 1024:
-        R["findings"].append(["WARNING", "spill",
-                              "temp file spill: %d files / %.1f MB in this window" % (
-                                  to_num(ctx.get("temp_files") or 0),
-                                  to_num(ctx.get("temp_bytes") or 0) / 1048576.0),
-                              "Locate the spill SQL via the Top SQL sort dimension; raise work_mem or eliminate sorts"])
-    if to_num(ctx.get("deadlocks") or 0) > 0:
-        R["findings"].append(["CRITICAL", "deadlock",
-                              "%d deadlocks in this window" % to_num(ctx.get("deadlocks")),
-                              "Check application lock ordering; deadlock details in the server log"])
-    lim = 0
-    for ln in (ctx.get("limits_txt") or "").splitlines():
-        if ln.startswith("Max open files"):
-            g = ln.split()
-            lim = to_num(g[3]) if len(g) > 3 else to_num(g[1])
-    fdm = ctx.get("fd_b") or {}
-    fd_used = sum(v[0] + v[1] for k, v in fdm.items() if k in ("reg", "pipe", "socket", "dev", "other"))
-    if lim > 0 and fd_used > 0:
-        r_ = fd_used / float(lim)
-        if r_ >= 0.95:
-            R["findings"].append(["CRITICAL", "fd", "fd usage %d/%d (%.0f%%) -- near exhaustion" % (fd_used, lim, r_ * 100),
-                                  "Raise ulimit -n; check fd leaks (see fd classification)"])
-        elif r_ >= 0.8:
-            R["findings"].append(["WARNING", "fd", "fd usage %d/%d (%.0f%%)" % (fd_used, lim, r_ * 100),
-                                  "Approaching the limit; plan a ulimit raise"])
-
-    # ---- incidents: merge anomaly slots across families ----
-    anoms = [a for a in anoms if a[0] is not None]
-    anoms.sort(key=lambda a: (a[0], a[1] != "C"))
-    wins = []
-    for si, sev, fam, msg in anoms:
-        if wins and si - wins[-1]["b"] <= 1:
-            w = wins[-1]
-            w["b"] = max(w["b"], si); w["fams"].setdefault(fam, []).append((si, sev, msg))
-            w["sev"] = "C" if sev == "C" or w["sev"] == "C" else w["sev"]
-        else:
-            wins.append({"a": si, "b": si, "fams": {fam: [(si, sev, msg)]}, "sev": sev})
-    def _fmt_slot(i):
-        if t0e is None:
-            return "slot %d" % i
-        return time.strftime("%H:%M", time.localtime(t0e + i * 60))
-    for w in wins:
-        evs = []
-        for fam, items in w["fams"].items():
-            top = sorted(items, key=lambda x: x[1])[-1]
-            evs.append("%s: %s" % (fam, top[2]))
-        R["incidents"].append({
-            "win": "%s-%s" % (_fmt_slot(w["a"]), _fmt_slot(min(w["b"] + 1, nslots - 1))),
-            "sev": w["sev"], "fams": sorted(w["fams"].keys()), "evs": evs})
-    R["slots"] = slots
-    R["anoms"] = anoms
-    R["fmt_slot"] = _fmt_slot
-
-    # ---- Top SQL multi-dim ranking (suppressed on IDLE/LOW) ----
-    st = ctx.get("st") or {}
-    sql_text_fn = ctx.get("sql_text_fn")
-    ash_uids = set()
-    for v in (ash.get("sql") or {}).values():
-        try:
-            ash_uids.add(str(v[2]))
-        except Exception:
-            pass
-    chain_h = set()
-    for (dt, root), v in (ash.get("waitchain") or {}).items():
-        m2 = re.search(r"\((\d+)\)", root or "")
-        if m2:
-            chain_h.add(m2.group(1))
-    if rel_ok and ctx.get("dbt_us") and to_num(ctx["dbt_us"]) > 0:
-        rank = []
-        for uid, d in st.items():
-            dbt = to_num(d.get("db_time", 0)) / 1e6
-            calls = to_num(d.get("n_calls", 0))
-            if dbt < 5 or calls <= 0:
-                continue
-            io = to_num(d.get("data_io_time", 0)) / 1e6
-            cpu = to_num(d.get("cpu_time", 0)) / 1e6
-            srt = (to_num(d.get("sort_time", 0)) + to_num(d.get("hash_time", 0))) / 1e6
-            fetched = to_num(d.get("n_blocks_fetched", 0))
-            hit = to_num(d.get("n_blocks_hit", 0))
-            share = dbt / (to_num(ctx["dbt_us"]) / 1e6)
-            tags = []
-            if cpu / dbt >= 0.6 and dbt / calls >= 0.05:
-                tags.append("CPU-bound")
-            if io / dbt >= 0.4:
-                tags.append("IO-bound")
-            if fetched > 0 and (fetched - hit) / fetched >= 0.3:
-                tags.append("low hit ratio")
-            if srt >= 1:
-                tags.append("sort spill")
-            if uid in chain_h:
-                tags.append("blocker")
-            if uid in ash_uids:
-                tags.append("ASH-active")
-            score = share * 2.0
-            if "blocker" in tags:
-                score += 0.2
-            if "ASH-active" in tags:
-                score += 0.1
-            score += min(0.2, io / max(dbt, 1e-9) * 0.2)
-            score += min(0.1, srt / max(dbt, 1e-9) * 0.1)
-            sug = {"CPU-bound": "Check the plan/indexes to cut CPU",
-                   "IO-bound": "Cold-read amplification: check filter-column indexes and stats",
-                   "low hit ratio": "Low buffer hit ratio: add indexes or adjust the access path",
-                   "sort spill": "Sort/hash spill: raise work_mem or eliminate the sort",
-                   "blocker": "This transaction blocks others -- handle it first",
-                   "ASH-active": "Active across multiple buckets -- continuously consuming resources"}.get(tags[0] if tags else "", "Review the execution plan")
-            q = ""
-            if sql_text_fn:
-                q = (sql_text_fn(None, uid) or "")
-            rank.append({"uid": uid, "dbt": dbt, "share": share, "score": score,
-                         "tags": tags, "sug": sug, "text": re.sub(r"\s+", " ", q)[:90]})
-        rank.sort(key=lambda r: -r["score"])
-        R["sqlrank"] = rank[:5]
-
-    # ---- registry: 每条序列的检查结果（不能漏的证明）----
-    def _st(fired, present):
-        return ("FIRED(%d)" % fired) if fired else ("OK" if present else "NO DATA")
-    R["registry"] = [
-        ["os-cpu", _st(sum(1 for a in anoms if a[2] == "os-cpu"), bool(cpus))],
-        ["os-swap", _st(sum(1 for a in anoms if a[2] == "os-swap"), bool(smp.get("pg")))],
-        ["os-mem", _st(sum(1 for a in anoms if a[2] == "os-mem"), bool(smp.get("mem")))],
-        ["os-dsk latency", _st(sum(1 for a in anoms if a[2] == "os-dsk"), bool(smp.get("dsk")))],
-        ["os-tcp listen queue", _st(sum(1 for a in anoms if a[2] == "os-tcp"), bool(smp.get("tcpext")))],
-        ["ash-lock wait ratio", _st(sum(1 for a in anoms if a[2] == "ash-lock"), bool(buckets))],
-        ["ash-active/cores", _st(sum(1 for a in anoms if a[2] == "ash-busy"), bool(buckets))],
-        ["ash-chain", _st(sum(1 for a in anoms if a[2] == "ash-chain"), bool((ash.get("waitchain"))))],
-        ["lt-long transactions", _st(sum(1 for a in anoms if a[2] == "lt"), bool((ctx.get("lt") or {}).get("rows")))],
-        ["sessmem-session memory", _st(sum(1 for a in anoms if a[2] == "sessmem"), bool(mems))],
-        ["stack-call stacks", _st(0, bool((ctx.get("stack") or {}).get("be")))],
-        ["repl-replication", _st(0, bool((ctx.get("repl") or {}).get("rows")))],
-        ["anchor-temp spill", ("FIRED" if R["findings"] and any(f[1] == "溢出" for f in R["findings"]) else
-                      "OK" if ctx.get("temp_files") is not None else "NO DATA")],
-        ["anchor-deadlock", ("FIRED" if any(f[1] == "死锁" for f in R["findings"]) else "OK")],
-        ["anchor-fd/limits", ("FIRED" if any(f[1] == "fd" for f in R["findings"]) else
-                       "OK" if lim > 0 else "NO DATA")],
-        ["anchor-TopSQL concentration", ("OK" if not rel_ok else ("FIRED" if R["sqlrank"] else "OK"))],
-        ["settings-diff", "not enabled in v1"],
-    ]
-    return R
-
-
 def render_single_awr(win, metric, top_n, out_html, repl_dir=None):
     """AWR-style single-window report: faithful AWR subset + classic AWR HTML look.
     Data sources: dbe_perf.{statement,wait_events}, gs_instance_time, pg_stat_database, /proc.
@@ -32076,23 +31713,6 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     # cron sampler; the window tables stay snap-delta based and untouched)
     os_smp = (load_os_samples(repl_dir, m.get("begin_ts", ""), m.get("end_ts", ""))
               if repl_dir is not None else None)
-    def _fdmap(txt):
-        out = {}
-        for ln in (txt or "").splitlines():
-            f = ln.split("|")
-            if len(f) == 3:
-                try:
-                    # snaps taken before the renames wrote these classes
-                    # under older names -- fold into the current ones
-                    if f[0] == "server logs":
-                        f[0] = "pg logs"
-                    if f[0] == "device":
-                        f[0] = "dev"
-                    out[f[0]] = (int(f[1]), int(f[2]))
-                except ValueError:
-                    pass
-        return out
-
 
     # ================= OS Statistics =================
     sec("OS Statistics")
@@ -32246,7 +31866,22 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         # " (deleted)": temp spills are routinely deleted-while-held, db
         # files deleted-but-held point at DROP/TRUNCATE. Whole block hidden
         # on old snaps / unreadable fd dir.
-
+        def _fdmap(txt):
+            out = {}
+            for ln in (txt or "").splitlines():
+                f = ln.split("|")
+                if len(f) == 3:
+                    try:
+                        # snaps taken before the renames wrote these classes
+                        # under older names -- fold into the current ones
+                        if f[0] == "server logs":
+                            f[0] = "pg logs"
+                        if f[0] == "device":
+                            f[0] = "dev"
+                        out[f[0]] = (int(f[1]), int(f[2]))
+                    except ValueError:
+                        pass
+            return out
         _fdb = _fdmap(win["os"].get(("begin", "db_fd_types"), ""))
         _fde = _fdmap(win["os"].get(("end", "db_fd_types"), ""))
         # snaps taken before 2026-09-20 carry the spill row only when
@@ -33390,106 +33025,6 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                          % (esc(k), esc(_syb.get(k, "-")), esc(_sye.get(k, "-"))))
         parts.append('</table>')
         _close_foldsec()
-
-    # ================= ADDM 自动诊断 (timeline auto-diagnosis) =================
-    # rendered at the end (all deltas/samples loaded), then MOVED to the exec-
-    # summary position (first_sec_pos). Sampler loaders are idempotent reads.
-    if repl_dir is not None:
-        _ashx = load_ash_flushes(repl_dir, m.get("begin_ts", ""), m.get("end_ts", ""))
-        _ltx = load_lt_samples(repl_dir, m.get("begin_ts", ""), m.get("end_ts", ""))
-        _stx = load_stack_samples(repl_dir, m.get("begin_ts", ""), m.get("end_ts", ""))
-        _ssmx = load_sessmem_samples(repl_dir, m.get("begin_ts", ""), m.get("end_ts", ""))
-        _rplx = load_repl_samples(repl_dir, m.get("begin_ts", ""), m.get("end_ts", ""))
-        _fmb = _fdmap(win["os"].get(("begin", "db_fd_types"), ""))
-        _fme = _fdmap(win["os"].get(("end", "db_fd_types"), ""))
-        _ci2 = parse_cpuinfo(win["os"].get(("end", "cpuinfo"), "")
-                             or win["os"].get(("begin", "cpuinfo"), ""))
-        _A = addm_analyze({
-            "t0": m.get("begin_ts", ""), "t1": m.get("end_ts", ""),
-            "cores": _ci2.get("total_cores"), "duration": duration,
-            "dbt_us": dbt, "deadlocks": deadlocks, "temp_bytes": temp_bytes,
-            "temp_files": agg("temp_files"),
-            "os_smp": os_smp, "ash": _ashx, "lt": _ltx, "stack": _stx,
-            "ssm": _ssmx, "repl": _rplx, "fd_b": _fmb, "fd_e": _fme,
-            "limits_txt": win["os"].get(("end", "limits"), ""), "st": ST,
-            "sql_text_fn": (lambda _row, _uid: sql_text_of(win, _row, _uid))})
-        _ad_pos = len(parts)
-        sec("ADDM Auto-Diagnosis")
-        parts.append('<div class="note">Strictly timeline-integrated: 1-min OS samples + 5-min ASH / long-tx / session-memory samples + snapshot deltas. '
-                     'Ratio-based advice is suppressed on idle/low-load windows; disk util% is never a criterion (multi-path SSD).</div>')
-        parts.append('<table class="t"><tr><th>Load Level</th><th class="n">AAS (avg active sessions)</th>'
-                     '<th class="n">Cores</th><th class="n">DB Time (s)</th><th>Note</th></tr>')
-        parts.append('<tr><td><b>%s</b></td><td class="n">%.2f</td><td class="n">%s</td>'
-                     '<td class="n">%.1f</td><td class="note">%s</td></tr>'
-                     % (esc(_A["level"]), _A["aas"], esc(str(_A["cores"] or "-")),
-                        to_num(dbt) / 1e6,
-                        esc("Idle/low load: ratio-based advice suppressed" if _A["level"] in ("IDLE", "LOW")
-                            else "Normal/busy load: full analysis executed")))
-        parts.append('</table>')
-        sub("Timeline (1-minute granularity)")
-        _flags = {}
-        for _si, _sev, _fam, _msg in _A.get("anoms") or []:
-            _flags.setdefault(_si, []).append(_fam)
-        parts.append('<table class="t"><tr><th>Time</th><th class="n">CPU%</th><th class="n">iowait%</th>'
-                     '<th class="n">MemAvail %</th><th class="n">Swap pages</th><th class="n">Disk lat ms</th>'
-                     '<th class="n">Lock wait %</th><th class="n">Active</th><th class="n">Long tx</th>'
-                     '<th>Flags</th></tr>')
-        for _i, _s in enumerate(_A.get("slots") or []):
-            _fl = ",".join(sorted(set(_flags.get(_i, []))))
-            parts.append('<tr><td>%s</td><td class="n">%s</td><td class="n">%s</td>'
-                         '<td class="n">%s</td><td class="n">%s</td><td class="n">%s</td>'
-                         '<td class="n">%s</td><td class="n">%s</td><td class="n">%s</td>'
-                         '<td>%s</td></tr>'
-                         % (esc(_A["fmt_slot"](_i)),
-                            esc("-" if _s["cpu"] is None else _s["cpu"]),
-                            esc("-" if _s["iowait"] is None else _s["iowait"]),
-                            esc("-" if _s["memav_pct"] is None else _s["memav_pct"]),
-                            esc(_s["swap"] or "-"), esc(_s["dsklat"] or "-"),
-                            esc("-" if _s["lock"] is None else _s["lock"]),
-                            esc("-" if _s["active"] is None else _s["active"]),
-                            esc(_s["longtx"] or "-"), esc(_fl)))
-        parts.append('</table>')
-        sub("Incident Windows (cross-family)")
-        if _A["incidents"]:
-            parts.append('<table class="t"><tr><th>Window</th><th>Severity</th><th>Families</th><th>Evidence</th></tr>')
-            for _w in _A["incidents"]:
-                parts.append('<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>'
-                             % (esc(_w["win"]), esc(_w["sev"]), esc(",".join(_w["fams"])),
-                                esc("；".join(_w["evs"]))))
-            parts.append('</table>')
-        else:
-            parts.append('<div class="note">No anomalous windows detected.</div>')
-        sub("Top SQL Optimization Advice (multi-dimension score)")
-        if _A["sqlrank"]:
-            parts.append('<table class="t"><tr><th>#</th><th>SQL Id</th><th>Text (truncated)</th>'
-                         '<th class="n">DB Time(s)</th><th class="n">Share</th><th class="n">Score</th>'
-                         '<th>Dimension tags</th><th>Advice</th></tr>')
-            for _i, _r in enumerate(_A["sqlrank"], 1):
-                parts.append('<tr><td>%d</td><td>%s</td><td class="sql">%s</td>'
-                             '<td class="n">%.1f</td><td class="n">%.1f%%</td><td class="n">%.2f</td>'
-                             '<td>%s</td><td>%s</td></tr>'
-                             % (_i, esc(str(_r["uid"])), esc(_r["text"] or "-"), _r["dbt"],
-                                _r["share"] * 100, _r["score"], esc(",".join(_r["tags"]) or "-"),
-                                esc(_r["sug"])))
-            parts.append('</table>')
-        else:
-            parts.append('<div class="note">%s</div>'
-                         % esc("Idle/low load: Top SQL ranking suppressed" if _A["level"] in ("IDLE", "LOW")
-                               else "No SQL met the scoring bar (single-SQL DB Time >= 5s)"))
-        sub("Window-Level Findings")
-        if _A["findings"]:
-            parts.append('<table class="t"><tr><th>Severity</th><th>Category</th><th>Finding</th><th>Recommendation</th></tr>')
-            for _f in _A["findings"]:
-                parts.append('<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>'
-                             % (esc(_f[0]), esc(_f[1]), esc(_f[2]), esc(_f[3])))
-            parts.append('</table>')
-        else:
-            parts.append('<div class="note">No window-level anomalies detected.</div>')
-        sub("Coverage Checklist (all series)")
-        parts.append('<table class="t"><tr><th>Series</th><th>Status</th></tr>')
-        for _rn, _rs in _A["registry"]:
-            parts.append('<tr><td>%s</td><td>%s</td></tr>' % (esc(_rn), esc(_rs)))
-        parts.append('</table>')
 
     _toc_html = ('<div class="toc" id="toc"><b>Contents</b><ul>' + "".join(
         '<li><a href="#%s">%s</a>%s</li>' % (_id, esc(t),
@@ -35166,11 +34701,6 @@ def text_sqlhist(win, sql_id="", detail_wins=None, sqltext_root=None):
             hash_ = to_num(e.get("hash_time",0)) - to_num(b.get("hash_time",0))
             plan = to_num(e.get("plan_time",0)) - to_num(b.get("plan_time",0))
             rows = to_num(e.get("n_returned_rows",0)) - to_num(b.get("n_returned_rows",0))
-            # ★avg_* 五列补 /calls (2026-10-10 修, 用户报 avg_sort > avg_dbtime):
-            #   老代码只做 us->ms(/1e3)没除执行次数, avg_cpu/avg_io/avg_sort/
-            #   avg_hash/avg_plan 顶着 avg 表头显示的其实是**窗口总量** --
-            #   多次调用的 SQL 总量轻松超过单次平均, 正是"avg 比.avg_dbtime 大"
-            #   的来源。avg_dbtime/avg_cr/avg_pr/avg_rows 原本就除了, 口径对齐。
             def _ms_per_call(v):
                 return "%.2f" % (v / 1e3 / calls) if (v >= 0 and calls > 0) else "-"
             rs.append([k[0], k[1],
@@ -35407,9 +34937,6 @@ def main():
         "summary": frozenset({"instance_time", "database", "statement",
                               "rel_iostat", "file_redo_iostat"}),
         "tabstat": frozenset({"object_tables"}),
-        # sqlhist: same statement slim set as topsql (_by_user + delta_rows
-        # touch statement only); joined the detail_wins family 2026-10-10,
-        # before that it paid the FULL db load for a one-table report.
         "sqlhist": frozenset({"statement"}),
         # cpu/io/page/replstat/replslot/replay/ltx: render whole window only
         # (no detail_wins), so load_snap is called exactly 2x — slim path adds
@@ -35473,11 +35000,6 @@ def main():
         # leading column, one banner/header); a 1-interval window (end-begin
         # == 1) keeps just the whole-window report
         detail_wins = None
-        # sqlhist joined the per-snapshot family 2026-10-10: text_sqlhist
-        # always HAD the detail_wins loop (whole-window row + one row per
-        # consecutive snapshot pair, same table, time_range leading column)
-        # but this gate never listed it, so the loop was dead code and the
-        # report showed the whole-window aggregate only (user report).
         if text_section in ("topsql", "event", "summary", "tabstat", "sqlhist"):
             seq = snap_seq_dirs(begin_dir, end_dir)
             if len(seq) > 2:
@@ -35650,7 +35172,7 @@ _awr_lt_stack_sample() {
     local out
     # ---- long transaction monitor: exactly one row per sample ----
     out=$(PGCONNECT_TIMEOUT=15 PGOPTIONS='-c statement_timeout=15000' \
-          psql -d postgres -tAF',' -c "with lt as (select count(*)::text as long_cnt, coalesce(sum(case when state like 'idle in transaction%' then 1 else 0 end),0)::text as itx_cnt, coalesce(sum(case when state = 'active' then 1 else 0 end),0)::text as act_cnt from pg_stat_activity where xact_start is not null and xact_start < now() - interval '60 seconds' and pid <> pg_backend_pid() and application_name not in ('workload','WDRSnapshot') and (state like 'idle in transaction%' or state = 'active')), o as (select a.pid::text as pid, a.xact_start::timestamp(0)::text as xstart, a.state as state, coalesce(w.wait_status,'') as ws, coalesce(w.wait_event,'') as we, a.unique_sql_id::text as usi from (select * from pg_stat_activity where xact_start is not null and pid <> pg_backend_pid() and application_name not in ('workload','WDRSnapshot') and (state like 'idle in transaction%' or state = 'active') order by xact_start, pid limit 1) a left join pg_thread_wait_status w on w.tid = a.pid) select lt.long_cnt, lt.itx_cnt, lt.act_cnt, coalesce(o.pid,''), coalesce(o.xstart,''), coalesce(o.state,''), coalesce(o.ws,''), coalesce(o.we,''), coalesce(o.usi,''), gs_txid_oldestxmin()::text, case when pg_is_in_recovery() then '-' else txid_current()::text end from lt left join o on true" 2>/dev/null)
+          psql -d postgres -tAF',' -c "with lt as (select count(*)::text as long_cnt, coalesce(sum(case when state like 'idle in transaction%' then 1 else 0 end),0)::text as itx_cnt, coalesce(sum(case when state = 'active' then 1 else 0 end),0)::text as act_cnt from pg_stat_activity where xact_start is not null and xact_start < now() - interval '60 seconds' and pid <> pg_backend_pid() and application_name not in ('workload','WDRSnapshot','AutoVacWorker') and (state like 'idle in transaction%' or state = 'active')), o as (select a.pid::text as pid, a.xact_start::timestamp(0)::text as xstart, a.state as state, coalesce(w.wait_status,'') as ws, coalesce(w.wait_event,'') as we, a.unique_sql_id::text as usi from (select * from pg_stat_activity where xact_start is not null and pid <> pg_backend_pid() and application_name not in ('workload','WDRSnapshot') and (state like 'idle in transaction%' or state = 'active') order by xact_start, pid limit 1) a left join pg_thread_wait_status w on w.tid = a.pid) select lt.long_cnt, lt.itx_cnt, lt.act_cnt, coalesce(o.pid,''), coalesce(o.xstart,''), coalesce(o.state,''), coalesce(o.ws,''), coalesce(o.we,''), coalesce(o.usi,''), gs_txid_oldestxmin()::text, case when pg_is_in_recovery() then '-' else txid_current()::text end from lt left join o on true" 2>/dev/null)
     if [ "$?" -ne 0 ] || [ -z "$out" ]; then
         printf '%s,error\n' "$ts" >> "$lf"
     else
@@ -37235,13 +36757,10 @@ vb_tool_completion_install() {
     self=$(readlink -f "${BASH_SOURCE[0]:-$0}" 2>/dev/null) || self=""
     [ -n "$self" ] || self="$0"
     if [ "$(id -u)" = "0" ]; then
-        # trampoline, NOT an embedded copy: always loads the CURRENT
-        # completion from the tool itself, so vb_tool upgrades refresh
-        # completions without re-running the installer
         if mkdir -p /etc/profile.d 2>/dev/null \
-           && printf '# vb_tool TAB completion (trampoline: always current)\n[ -n "$BASH_VERSION" ] && source <(%s completion)\n' "$self" > /etc/profile.d/vb_tool_completion.sh 2>/dev/null; then
+           && vb_tool_completion > /etc/profile.d/vb_tool_completion.sh 2>/dev/null; then
             chmod 644 /etc/profile.d/vb_tool_completion.sh
-            did="${did}  [system] /etc/profile.d/vb_tool_completion.sh (ALL users, always current)
+            did="${did}  [system] /etc/profile.d/vb_tool_completion.sh (ALL users, incl ./vb_tool)
 "
         fi
         if [ -d /usr/local/bin ] && ln -sf "$self" /usr/local/bin/vb_tool 2>/dev/null; then
@@ -37250,9 +36769,8 @@ vb_tool_completion_install() {
         fi
     fi
     dir="$HOME/.local/share/bash-completion/completions"
-    if mkdir -p "$dir" 2>/dev/null \
-       && printf '# vb_tool TAB completion (trampoline: always current)\n[ -n "$BASH_VERSION" ] && source <(%s completion)\n' "$self" > "$dir/vb_tool" 2>/dev/null; then
-        did="${did}  [user]   $dir/vb_tool (lazy load, always current)
+    if mkdir -p "$dir" 2>/dev/null && vb_tool_completion > "$dir/vb_tool" 2>/dev/null; then
+        did="${did}  [user]   $dir/vb_tool (lazy load, no bashrc edit)
 "
     fi
     rc_file="$HOME/.bashrc"
