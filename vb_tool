@@ -26013,6 +26013,11 @@ select (select decode(pg_is_in_recovery(),'f',pg_current_xlog_location(),(select
 -- Replication Stat section (awr_block.sh:750, pg_stat_replication) -- sync_state is
 -- the sync one; the four lags are the awr's net / fsync / apply / total.
 -- Primary side only for now: on a standby this returns 0 rows and the row shows a dash.
+-- ★多备库取行 (user's call 2026-10-10): 原来按 application_name 排序取第 1 个,
+-- 有 Sync 备库时可能取到字母序靠前的 Async —— 改 decode 四态定序 Sync>Quorum>
+-- Potential>Async。★sync_state 取值是首字母大写 (openGauss walsender.cpp 实锤:
+-- "Sync"/"Quorum"/"Potential"/"Async", 2026-10-10 源码核验), 与原版 PG 的小写不同,
+-- 故套 lower() 两系通吃; 未匹配到的值 decode 返 NULL, 升序恒排最后。
 select application_name, state, sync_state,
        pg_xlog_location_diff(sender_sent_location,'0/0'),
        pg_xlog_location_diff(receiver_write_location,'0/0'),
@@ -26025,7 +26030,7 @@ select application_name, state, sync_state,
        case when s.slot_name is null then '-' when s.active then 'active' else 'inactive' end
 from pg_stat_replication a
 left join pg_replication_slots s on s.slot_name = a.application_name
-order by application_name limit 1;
+order by decode(lower(sync_state),'sync',1,'quorum',2,'potential',3,'async',4), application_name limit 1;
 \echo ===DBM
 select round(coalesce(max(case when memorytype='process_used_memory' then memorymbytes end),0)/1024.0,1),
        round(coalesce(max(case when memorytype='max_process_memory' then memorymbytes end),0)/1024.0,1),
