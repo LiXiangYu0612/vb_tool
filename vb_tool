@@ -5140,17 +5140,17 @@ SELECT 'last_exec_time: ' || to_char(max(start_time),'yyyy-mm-dd hh24:mi:ss') ||
 \echo '======================'
 \echo '                          '
 SELECT user_name,n_calls,
-round(db_time/1e3/n_calls,1) avg_db_ms,
-round(execution_time/1e3/n_calls,1) avg_et_ms,
-round(cpu_time/1e3/n_calls,1) avg_cpu_ms,
-round(data_io_time/1e3/n_calls,1) avg_io_ms,
-round((parse_time+plan_time+rewrite_time)/1e3/n_calls,1) avg_plan_ms,
-round(pl_execution_time/1e3/n_calls,1) avg_plsql_ms,
-round(sort_time/1e3/n_calls,1) a_sort_ms,
-round(hash_time/1e3/n_calls,1) a_hash_ms,
-round(n_blocks_fetched/n_calls,1) avg_cr,
-round((n_blocks_fetched-n_blocks_hit)/n_calls,1) avg_pr,
-round((n_returned_rows+n_tuples_inserted+n_tuples_updated+n_tuples_deleted)/n_calls,1) avg_rows
+coalesce(round(db_time/1e3/nullif(n_calls,0),1)::text,'-') avg_db_ms,
+coalesce(round(execution_time/1e3/nullif(n_calls,0),1)::text,'-') avg_et_ms,
+coalesce(round(cpu_time/1e3/nullif(n_calls,0),1)::text,'-') avg_cpu_ms,
+coalesce(round(data_io_time/1e3/nullif(n_calls,0),1)::text,'-') avg_io_ms,
+coalesce(round((parse_time+plan_time+rewrite_time)/1e3/nullif(n_calls,0),1)::text,'-') avg_plan_ms,
+coalesce(round(pl_execution_time/1e3/nullif(n_calls,0),1)::text,'-') avg_plsql_ms,
+coalesce(round(sort_time/1e3/nullif(n_calls,0),1)::text,'-') a_sort_ms,
+coalesce(round(hash_time/1e3/nullif(n_calls,0),1)::text,'-') a_hash_ms,
+coalesce(round(n_blocks_fetched/nullif(n_calls,0),1)::text,'-') avg_cr,
+coalesce(round((n_blocks_fetched-n_blocks_hit)/nullif(n_calls,0),1)::text,'-') avg_pr,
+coalesce(round((n_returned_rows+n_tuples_inserted+n_tuples_updated+n_tuples_deleted)/nullif(n_calls,0),1)::text,'-') avg_rows
 FROM dbe_perf.statement WHERE unique_sql_id=:'unique_sql_id';
 \echo '====================================='
 \echo 'slow statement_history from sysdate-3'
@@ -6841,7 +6841,7 @@ round(avg(data_io_time)/1e3,1) io_ms,
 round(avg(parse_time+plan_time+rewrite_time)/1e3,1) parse_ms,
 round(avg(n_blocks_fetched),1) avg_cr,
 round(avg(n_blocks_fetched-n_blocks_hit),1) avg_pr,
-round(avg(n_returned_rows),1) n_rows ,
+round(avg(n_returned_rows+n_tuples_inserted+n_tuples_updated+n_tuples_deleted),1) n_rows ,
 row_number()over(partition by substr(trunc(start_time,'MI'),1,19) order by sum(db_time) desc) rn
 from pg_catalog.statement_history
 where start_time between (case when :'begin_date'='' or :'begin_date' is null then  to_char(trunc(now()-5/24/60,'MI'),'yyyy-mm-dd hh24:mi:ss') else :'begin_date' end) and (case when :'end_date'='' or :'end_date' is null then to_char(trunc(now()+1/24/60,'MI'),'yyyy-mm-dd hh24:mi:ss') else :'end_date' end) and is_slow_sql='t'
@@ -10120,15 +10120,15 @@ SELECT a.user_name,
        a.n_soft_parse - COALESCE(b.n_soft_parse, 0) AS n_soft,
        a.n_hard_parse - COALESCE(b.n_hard_parse, 0) AS n_hard,
        ${total_time_sql},
-       ROUND((a.db_time - COALESCE(b.db_time, 0)) / 1e3 / GREATEST((a.n_calls - COALESCE(b.n_calls, 0)), 1), 1) AS avg_db,
-       ROUND((a.execution_time - COALESCE(b.execution_time, 0)) / 1e3 / GREATEST((a.n_calls - COALESCE(b.n_calls, 0)), 1), 1) AS avg_et,
-       ROUND(((a.parse_time + a.plan_time + a.rewrite_time) - COALESCE(b.parse_time + b.plan_time + b.rewrite_time, 0)) / 1e3 / GREATEST((a.n_calls - COALESCE(b.n_calls, 0)), 1), 1) AS avg_parse,
-       ROUND((a.cpu_time - COALESCE(b.cpu_time, 0)) / 1e3 / GREATEST((a.n_calls - COALESCE(b.n_calls, 0)), 1), 1) AS avg_cpu,
-       ROUND((a.data_io_time - COALESCE(b.data_io_time, 0)) / 1e3 / GREATEST((a.n_calls - COALESCE(b.n_calls, 0)), 1), 1) AS avg_io,
-       ROUND((a.n_blocks_fetched - COALESCE(b.n_blocks_fetched, 0)) / GREATEST((a.n_calls - COALESCE(b.n_calls, 0)), 1), 1) AS avg_cr,
-       ROUND((a.n_blocks_fetched - COALESCE(b.n_blocks_fetched, 0) - a.n_blocks_hit + COALESCE(b.n_blocks_hit, 0)) / GREATEST((a.n_calls - COALESCE(b.n_calls, 0)), 1), 1) AS avg_pr,
-       ROUND((a.n_returned_rows - COALESCE(b.n_returned_rows, 0)) / GREATEST((a.n_calls - COALESCE(b.n_calls, 0)), 1), 1) AS avg_rows,
-       ROUND((a.temp_used - COALESCE(b.temp_used, 0)) / GREATEST((a.n_calls - COALESCE(b.n_calls, 0)), 1), 1) AS avg_temp
+       ROUND((a.db_time - COALESCE(b.db_time, 0)) / 1e3 / NULLIF(GREATEST(a.n_calls - COALESCE(b.n_calls, 0), 0), 0), 1) AS avg_db,
+       ROUND((a.execution_time - COALESCE(b.execution_time, 0)) / 1e3 / NULLIF(GREATEST(a.n_calls - COALESCE(b.n_calls, 0), 0), 0), 1) AS avg_et,
+       ROUND(((a.parse_time + a.plan_time + a.rewrite_time) - COALESCE(b.parse_time + b.plan_time + b.rewrite_time, 0)) / 1e3 / NULLIF(GREATEST(a.n_calls - COALESCE(b.n_calls, 0), 0), 0), 1) AS avg_parse,
+       ROUND((a.cpu_time - COALESCE(b.cpu_time, 0)) / 1e3 / NULLIF(GREATEST(a.n_calls - COALESCE(b.n_calls, 0), 0), 0), 1) AS avg_cpu,
+       ROUND((a.data_io_time - COALESCE(b.data_io_time, 0)) / 1e3 / NULLIF(GREATEST(a.n_calls - COALESCE(b.n_calls, 0), 0), 0), 1) AS avg_io,
+       ROUND((a.n_blocks_fetched - COALESCE(b.n_blocks_fetched, 0)) / NULLIF(GREATEST(a.n_calls - COALESCE(b.n_calls, 0), 0), 0), 1) AS avg_cr,
+       ROUND((a.n_blocks_fetched - COALESCE(b.n_blocks_fetched, 0) - a.n_blocks_hit + COALESCE(b.n_blocks_hit, 0)) / NULLIF(GREATEST(a.n_calls - COALESCE(b.n_calls, 0), 0), 0), 1) AS avg_pr,
+       ROUND((a.n_returned_rows - COALESCE(b.n_returned_rows, 0)) / NULLIF(GREATEST(a.n_calls - COALESCE(b.n_calls, 0), 0), 0), 1) AS avg_rows,
+       ROUND((a.temp_used - COALESCE(b.temp_used, 0)) / NULLIF(GREATEST(a.n_calls - COALESCE(b.n_calls, 0), 0), 0), 1) AS avg_temp
 FROM statement_now a 
 LEFT JOIN statement_bak b ON a.user_name = b.user_name AND a.unique_sql_id = b.unique_sql_id
 CROSS JOIN total_times c  
@@ -23367,17 +23367,17 @@ group by ora_hash(
 \echo '======================'
 \echo '                          '
 SELECT user_name,n_calls,
-round(db_time/1e3/n_calls,1) avg_db_ms,
-round(execution_time/1e3/n_calls,1) avg_et_ms,
-round(cpu_time/1e3/n_calls,1) avg_cpu_ms,
-round(data_io_time/1e3/n_calls,1) avg_io_ms,
-round((parse_time+plan_time+rewrite_time)/1e3/n_calls,1) avg_plan_ms,
-round(pl_execution_time/1e3/n_calls,1) avg_plsql_ms,
-round(sort_time/1e3/n_calls,1) a_sort_ms,
-round(hash_time/1e3/n_calls,1) a_hash_ms,
-round(n_blocks_fetched/n_calls,1) avg_cr,
-round((n_blocks_fetched-n_blocks_hit)/n_calls,1) avg_pr,
-round((n_returned_rows+n_tuples_inserted+n_tuples_updated+n_tuples_deleted)/n_calls,1) avg_rows
+coalesce(round(db_time/1e3/nullif(n_calls,0),1)::text,'-') avg_db_ms,
+coalesce(round(execution_time/1e3/nullif(n_calls,0),1)::text,'-') avg_et_ms,
+coalesce(round(cpu_time/1e3/nullif(n_calls,0),1)::text,'-') avg_cpu_ms,
+coalesce(round(data_io_time/1e3/nullif(n_calls,0),1)::text,'-') avg_io_ms,
+coalesce(round((parse_time+plan_time+rewrite_time)/1e3/nullif(n_calls,0),1)::text,'-') avg_plan_ms,
+coalesce(round(pl_execution_time/1e3/nullif(n_calls,0),1)::text,'-') avg_plsql_ms,
+coalesce(round(sort_time/1e3/nullif(n_calls,0),1)::text,'-') a_sort_ms,
+coalesce(round(hash_time/1e3/nullif(n_calls,0),1)::text,'-') a_hash_ms,
+coalesce(round(n_blocks_fetched/nullif(n_calls,0),1)::text,'-') avg_cr,
+coalesce(round((n_blocks_fetched-n_blocks_hit)/nullif(n_calls,0),1)::text,'-') avg_pr,
+coalesce(round((n_returned_rows+n_tuples_inserted+n_tuples_updated+n_tuples_deleted)/nullif(n_calls,0),1)::text,'-') avg_rows
 FROM dbe_perf.statement WHERE unique_sql_id=:'unique_sql_id';
 \echo '====================================='
 \echo 'slow statement_history from sysdate-3'
@@ -27348,16 +27348,16 @@ Usage: vb_tool awr <create|enable|disable|awrrpt|awrdiff|baseline|topsql|event|s
                             primary there is no walreceiver; needs 'awr
                             enable')
   ltx     begin <id> end <id>
-  sqlhist <sql_id> begin <id> end <id>
-                            print ONE SQL's per-interval execution history
-                            to the screen (calls/dbtime/avg_dbtime/cpu/io/
-                            cr/pr/plan/rows per consecutive snapshot pair)
                             print the window's PER-5MIN long-transaction monitor
                             to the screen (Sample Time + ltx60_cnt|itx|act
                             + pid|state|xact_start + duration(auto unit) +
                             sql_id + oldestxmin, 6 compact columns; HTML awrrpt
                             keeps 12 columns + duration cell auto unit; needs
                             'awr enable' sampler)
+  sqlhist <sql_id> begin <id> end <id>
+                            print ONE SQL's per-interval execution history
+                            to the screen (calls/dbtime/avg_dbtime/cpu/io/
+                            cr/pr/plan/rows per consecutive snapshot pair)
   list|ls [YYYY-MM-DD]     list stored snapshots (ls = list alias; snap_id / ts / host / db /
                             per-snap DB_TIME delta + AAS), newest first;
                             default latest 30, a date lists that whole day
@@ -27367,8 +27367,8 @@ Usage: vb_tool awr <create|enable|disable|awrrpt|awrdiff|baseline|topsql|event|s
                             count; while ENABLED also last-snap age
                             (ok / STALE liveness hint)
   delete  until <time>      delete snapshots (by ts), html reports (by mtime) and
-                            old repl_/walrcv_/os_/lt_/stack_*.log (by whole
-                            day) older than <time>; e.g. '2026-08-11' or
+                            old repl_/slot_/walrcv_/os_/lt_/stack_/sessmem_*.log
+                            (by whole day) older than <time>; e.g. '2026-08-11' or
                             '2026-08-11 12:00:00'
   config                    show current retention / interval values
   config  retention <days>  set retention in days (default 8; 0 = never purge).
@@ -34095,7 +34095,7 @@ def _topsql_rows(win, metric, top_n):
         pr = fetched - hit
         cr_per = fetched / calls if (calls > 0 and fetched >= 0) else None
         pr_per = pr / calls if (calls > 0 and pr >= 0) else None
-        pct = 100.0 * v / total if total > 0 else None
+        pct = 100.0 * v / total if total > 0 else 0.0
         rows_delta = to_num(d.get("n_returned_rows", 0))
         rows_per = rows_delta / calls if (calls > 0 and rows_delta >= 0) else None
         total_cell = ("%.1f" % (v / 1e6)) if metric in ("dbtime", "cpu", "io") else ("%d" % v)
@@ -34168,7 +34168,7 @@ def _event_rows(win, event_filter):
     rows = []
     for ev, etype, t, waits in entries:
         avg = t / 1000.0 / waits if (waits is not None and waits > 0) else None
-        pct = 100.0 * t / db_time if (db_time and db_time > 0) else None
+        pct = 100.0 * t / db_time if (db_time and db_time > 0) else 0.0
         rows.append(["%.1f" % (db_time / 1e6) if db_time is not None else "-",
                      ev, etype,
                      "%.1f" % (t / 1e6),
@@ -34851,6 +34851,7 @@ def main():
     text_section = None
     text_db = text_schema = text_table = text_event_name = text_sql_id = None
     metric = "dbtime"
+    metric_given = False
     top_n = 30
     n_given = False
     i = 0
@@ -34877,7 +34878,7 @@ def main():
         elif a == "-o" and i + 1 < len(argv):
             out_html = argv[i + 1]; i += 2
         elif a == "-m" and i + 1 < len(argv):
-            metric = argv[i + 1]; i += 2
+            metric = argv[i + 1]; metric_given = True; i += 2
         elif a == "-n" and i + 1 < len(argv):
             try:
                 top_n = int(argv[i + 1])
@@ -34962,6 +34963,19 @@ def main():
                                 "replay", "ltx", "sqlhist"):
             sys.stderr.write("Error: --text expects topsql|event|summary|tabstat"
                              "|cpu|io|page|replstat|replslot|replay|ltx|sqlhist\n"); return 2
+        # ★选项归属校验 (2026-10-11, user: 给错子命令的选项要报错, 不再静默吞):
+        #   text 模式下 -m/-n 只属于 topsql, -E 只属于 event, -d/-s/-t 只属于
+        #   tabstat, --sql-id 只属于 sqlhist; 其余 8 个 section 不吃任何选项。
+        #   (html 模式的 -m/-n 不在此列。)
+        if text_section:
+            _opt_owner = {"m": ("topsql",), "n": ("topsql",), "E": ("event",),
+                          "d": ("tabstat",), "s": ("tabstat",), "t": ("tabstat",)}
+            for _opt, _owners in _opt_owner.items():
+                _given = {"m": metric_given, "n": n_given, "E": bool(text_event_name),
+                          "d": bool(text_db), "s": bool(text_schema), "t": bool(text_table)}.get(_opt, False)
+                if _given and text_section not in _owners:
+                    sys.stderr.write("Error: -%s is only valid for 'awr %s' (got section '%s')\n"
+                                     % (_opt, "'|'".join(_owners), text_section)); return 2
         if not repl_dir:
             # per-minute series (os_*.log) live in the snapshot root,
             # next to the snap_<id> dirs the text reports are given
@@ -34972,6 +34986,8 @@ def main():
             top_n = 10        # awr topsql default differs from awrrpt's 30
         if text_section == "tabstat" and not (text_db and text_schema and text_table):
             sys.stderr.write("Error: --text tabstat needs --db NAME --schema NAME --table NAME\n"); return 2
+        if text_section == "sqlhist" and not text_sql_id:
+            sys.stderr.write("Error: --text sqlhist needs --sql-id ID\n"); return 2
 
         def _run(w, dw=None):
             if text_section == "topsql":
@@ -36087,11 +36103,11 @@ _awr_enable() {
     # Wrap in `bash -lc` so cron's minimal env sources the user's login profile
     # (psql + PG* vars); PGPORT=<port> pins THIS instance so the entry keeps
     # capturing the same database even if the profile's PGPORT later changes.
-    # '*/60' in the minute field draws a cron install warning (step > 59);
-    # express 60 min as plain '0' (hourly at :00) instead
-    local minspec="*/$mins"
-    [ "$mins" -eq 60 ] && minspec="0"
-    local entry="$minspec * * * * /bin/bash -lc 'PGPORT=$port $self awr create >/dev/null 2>&1'  $marker"
+    # ★门控快照条目 (2026-10-11, user: 90 分钟就要真的 90 分钟): cron 分钟域表达
+    #   不了 >60/不整除 60 的间隔; 改每分钟唤醒 + epoch 分钟模 interval 文件值 ——
+    #   任意 N(1-1440) 精确; interval 改动只写文件下一边界即生效, 与 crontab 解耦。
+    local gateroot; gateroot=$(_awr_root)   # ★enable 作用域没有现成 $root(实测踩坑: 空路径生成 cat /interval)
+    local entry="* * * * * /bin/bash -lc 'R=\$(cat $gateroot/interval 2>/dev/null); case \"\$R\" in \"\"|*[!0-9]*) R=60;; esac; [ \$(( \$(date +\%s) / 60 \% \$R )) -eq 0 ] && PGPORT=$port $self awr create >/dev/null 2>&1'  $marker"
     local rentry="* * * * * /bin/bash -lc 'PGPORT=$port $self awr _repl-sample >/dev/null 2>&1'  $rmarker"
     if ! ( crontab -l 2>/dev/null | grep -vF "$rmarker" | grep -vF "$marker"; echo "$rentry"; echo "$entry" ) | crontab -; then
         echo "Error: failed to install crontab entries (check cron.allow/cron.deny, permissions or disk) -- periodic capture NOT started" >&2
@@ -36494,9 +36510,10 @@ _awr_interval_read() {
 # awr config <retention|interval> <value>  -- modify awr settings:
 #   retention <days>  0 = keep forever (max 3650); purges already-expired
 #                     snaps/repl+slot logs/html reports immediately
-#   interval  <min>   1-60 (cron minute-field limit); when periodic capture is
-#                     enabled the crontab entry is rewritten on the spot, so
-#                     the new interval takes effect without disable/enable
+#   interval  <min>   1-1440, any value fires at EXACTLY that cadence (the
+#                     snapshot entry wakes every minute and gates on this
+#                     value); takes effect at the next boundary, no crontab
+#                     rewrite needed
 # No args: print current values + usage.
 _awr_config() {
     local root; root=$(_awr_root)
@@ -36532,9 +36549,9 @@ _awr_config() {
             return 0
             ;;
         interval)
-            case "$val" in ''|*[!0-9]*) echo "Error: interval expects a positive integer number of minutes (1-60)" >&2; return 2;; esac
-            if [ "$val" -lt 1 ] || [ "$val" -gt 60 ]; then
-                echo "Error: interval must be 1-60 minutes (cron minute-field limit; longer intervals: edit crontab manually)" >&2
+            case "$val" in ''|*[!0-9]*) echo "Error: interval expects a positive integer number of minutes (1-1440)" >&2; return 2;; esac
+            if [ "$val" -lt 1 ] || [ "$val" -gt 1440 ]; then
+                echo "Error: interval must be 1-1440 minutes (the snapshot entry wakes every minute and gates on this value, so any cadence is exact)" >&2
                 return 2
             fi
             local oldi; oldi=$(_awr_interval_read)
@@ -36545,18 +36562,20 @@ _awr_config() {
             # entries (same generator as enable; keeps sampler entry and other
             # ports' entries, heals half-open)
             local cport="${PGPORT:-5432}"
+            # ★2026-10-11: 门控条目从 interval 文件现读节奏, 本端口正常条目不再
+            #   重写; 重写只为迁移旧形(*/N 硬编码)或 legacy 无端口条目(D8)。
             if crontab -l 2>/dev/null | grep -qE "# vb_tool_awr_repl_p${cport}\$" || \
-               crontab -l 2>/dev/null | grep -qE "# vb_tool_awr_p${cport}\$"; then
+               crontab -l 2>/dev/null | grep -qE "# vb_tool_awr_p${cport}\$" || \
+               crontab -l 2>/dev/null | grep -qE '# vb_tool_awr(_repl)? *$'; then
                 local self; self=$(readlink -f "$0" 2>/dev/null || echo "$0")
-                local minspec="*/$val"
-                [ "$val" -eq 60 ] && minspec="0"
-                local entry="$minspec * * * * /bin/bash -lc 'PGPORT=$cport $self awr create >/dev/null 2>&1'  # vb_tool_awr_p$cport"
+                local gateroot; gateroot=$(_awr_root)
+                local entry="* * * * * /bin/bash -lc 'R=\$(cat $gateroot/interval 2>/dev/null); case \"\$R\" in \"\"|*[!0-9]*) R=60;; esac; [ \$(( \$(date +\%s) / 60 \% \$R )) -eq 0 ] && PGPORT=$cport $self awr create >/dev/null 2>&1'  # vb_tool_awr_p$cport"
                 local rentry="* * * * * /bin/bash -lc 'PGPORT=$cport $self awr _repl-sample >/dev/null 2>&1'  # vb_tool_awr_repl_p$cport"
-                if ! ( crontab -l 2>/dev/null | grep -vE "# vb_tool_awr_repl_p${cport}\$" | grep -vE "# vb_tool_awr_p${cport}\$"; echo "$rentry"; echo "$entry" ) | crontab -; then
+                if ! ( crontab -l 2>/dev/null | grep -vE "# vb_tool_awr_repl_p${cport}\$" | grep -vE "# vb_tool_awr_p${cport}\$" | grep -vE '# vb_tool_awr(_repl)? *$'; echo "$rentry"; echo "$entry" ) | crontab -; then
                     echo "Error: failed to rewrite crontab entry (check cron.allow/cron.deny, permissions or disk) -- interval NOT changed" >&2
                     return 1
                 fi
-                echo "awr config: periodic capture is ENABLED on port $cport -- crontab entry rewritten to every ${val}min"
+                echo "awr config: crontab entry ensured in gated form -- cadence follows $gateroot/interval = ${val}min exactly (legacy/old-form entries migrated)"
                 echo "  $entry"
             fi
             return 0
