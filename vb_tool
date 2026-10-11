@@ -23,7 +23,7 @@ show_help() {
     echo ""
     echo "Available Commands:"
     echo "  analyze_log     analyze database logs (slow queries or plans)"
-    echo "  analyze_log_v2  analyze database logs (slow queries), output html report (enhanced)"
+    echo "  analyze_log_v2  analyze database logs (slow queries), output html report"
     echo "  as              display active session info"
     echo "  asp             analyze active session profile"
     echo "  awr             performance AWR snapshots & diff reports"
@@ -84,7 +84,7 @@ show_list() {
     echo ""
     echo "Available Commands:"
     echo "  analyze_log     analyze database logs (slow queries or plans)"
-    echo "  analyze_log_v2  analyze database logs (slow queries), output html report (enhanced)"
+    echo "  analyze_log_v2  analyze database logs (slow queries), output html report"
     echo "  as              display active session info"
     echo "  asp             analyze active session profile"
     echo "  awr             performance AWR snapshots & diff reports"
@@ -3232,7 +3232,7 @@ run_osw_netstat() {
         fi
         for f in "${files[@]}"; do
             echo ""
-            echo "#### $f"
+            echo "==== $f ===="
             _osw_netstat_one "$INTERFACE" "$f" || rc=1
         done
         return $rc
@@ -10315,7 +10315,7 @@ run_collect_log_self() {
     # Logfile Check
     echo "--------------------------------------------------------------"
     if [ $_vb_cl_rc -eq 0 ]; then
-        echo "[INFO ] Compressing logs ……"
+        echo "[INFO ] Compressing logs ..."
 	    tar -czf "/tmp/${logname}.tar.gz" -C /tmp "$logname"
         if [ $? -ne 0 ]; then
             echo "[ERROR] tar failed; raw files kept at $output_dir" >&2
@@ -10325,7 +10325,7 @@ run_collect_log_self() {
         echo "--------------------------------------------------------------"
         echo "[SUCCESS] Logs collected to \"/tmp/${logname}.tar.gz\" . Size: $(du -sh "/tmp/${logname}.tar.gz" | cut -f1)"
     else
-        echo "[ERROR] Logs collection failed!"
+        echo "[ERROR] Logs collection failed"
         exit 1
     fi
 }
@@ -10365,7 +10365,7 @@ run_collect_log_all() {
     fi
     
     # Final Result
-    echo "[INFO ] Compressing logs ……"
+    echo "[INFO ] Compressing logs ..."
 	tar -czf "/tmp/${logname}.tar.gz" -C /tmp "$logname"
     if [ $? -ne 0 ]; then
         echo "[ERROR] tar failed; raw files kept at $output_dir" >&2
@@ -11922,18 +11922,18 @@ def check_memory_usage(threshold_mb=2048, raise_exception=True):
             if memory_mb > 0:
                 # 检查内存阈值
                 if memory_mb > threshold_mb:
-                    error_msg = f"内存使用超过限制: {memory_mb:.2f}MB > MAX_LIMIT:  {threshold_mb}MB "
+                    error_msg = f"Memory usage over limit: {memory_mb:.2f}MB > MAX_LIMIT:  {threshold_mb}MB "
                     if raise_exception:
                         raise MemoryError(error_msg)
                 else:
-                    print(f"内存使用正常: {memory_mb:.2f}MB    MAX_LIMIT: {threshold_mb}MB ")
+                    print(f"Memory usage normal: {memory_mb:.2f}MB    MAX_LIMIT: {threshold_mb}MB ")
             else:
-                print("警告: 内存检查失败，请注意内存使用")
+                print("WARNING: memory check failed; verify memory usage manually")
         else:
-            print("警告: 当前系统不支持内存检查（resource模块不可用）")
+            print("WARNING: memory check unsupported here (resource module unavailable)")
     
     except Exception:
-        print("警告: 内存检查失败，请注意内存使用")
+        print("WARNING: memory check failed; verify memory usage manually")
  
 
 ## @function 获取数据库日志行前缀格式
@@ -11951,17 +11951,17 @@ def get_log_line_prefix():
         stdout, stderr = process.communicate()
         
         if process.returncode != 0:
-            print(f"ERROR: vsql命令执行失败: {stderr.strip()}")
+            print(f"ERROR: vsql command failed: {stderr.strip()}")
             return None
             
         log_prefix = stdout.strip()
         
         return log_prefix
     except FileNotFoundError:
-        print("ERROR: 未找到vsql命令，请确保已正确安装并配置数据库客户端")
+        print("ERROR: vsql not found; install and configure the database client first")
         return None
     except Exception as e:
-        print(f"ERROR: 获取日志行前缀格式时发生错误: {str(e)}")
+        print(f"ERROR: failed to get log_line_prefix: {str(e)}")
         return None
 
 ## @function 获取数据库日志目录
@@ -11980,7 +11980,7 @@ def get_db_log_directory():
         stdout, stderr = process.communicate()
         
         if process.returncode != 0:
-            print(f"ERROR: vsql命令执行失败: {stderr.strip()}")
+            print(f"ERROR: vsql command failed: {stderr.strip()}")
             return None
             
         log_directory = stdout.strip()
@@ -11998,7 +11998,7 @@ def get_db_log_directory():
             stdout_data, stderr_data = process_data.communicate()
             
             if process_data.returncode != 0:
-                print(f"ERROR: 获取data_directory失败: {stderr_data.strip()}")
+                print(f"ERROR: failed to get data_directory: {stderr_data.strip()}")
                 return None
                 
             data_directory = stdout_data.strip()
@@ -12007,10 +12007,10 @@ def get_db_log_directory():
             
         return log_directory
     except FileNotFoundError:
-        print("ERROR: 未找到vsql命令，请确保已正确安装并配置数据库客户端")
+        print("ERROR: vsql not found; install and configure the database client first")
         return None
     except Exception as e:
-        print(f"ERROR: 获取日志目录时发生错误: {str(e)}")
+        print(f"ERROR: failed to get log directory: {str(e)}")
         return None
 
 
@@ -12118,8 +12118,8 @@ def query_wait_events_for_sql_ids(sql_ids, start_time, end_time, batch_size=500,
 
     if not valid_ids:
         if debug:
-            print("[DEBUG] wait events: 无有效 SQL ID", file=sys.stderr)
-        return {}, "没有有效的数值型 SQL ID 可查询等待事件"
+            print("[DEBUG] wait events: no valid SQL ID", file=sys.stderr)
+        return {}, "no valid numeric SQL IDs to query wait events for"
 
     # 检查 vsql 是否可用
     try:
@@ -12130,7 +12130,7 @@ def query_wait_events_for_sql_ids(sql_ids, start_time, end_time, batch_size=500,
         )
         test_proc.communicate()
     except FileNotFoundError:
-        return {}, "无法连接数据库（未找到 vsql 命令），未查询等待事件信息"
+        return {}, "cannot reach the database (vsql not found); wait events not queried"
 
     start_str = start_time.strftime('%Y-%m-%d %H:%M:%S') if hasattr(start_time, 'strftime') else str(start_time)
     end_str = end_time.strftime('%Y-%m-%d %H:%M:%S') if hasattr(end_time, 'strftime') else str(end_time)
@@ -12144,9 +12144,9 @@ def query_wait_events_for_sql_ids(sql_ids, start_time, end_time, batch_size=500,
     for batch_idx, batch_ids in enumerate(batches, 1):
         ids_csv = ','.join(batch_ids)
         if len(batches) > 1:
-            print(f"[进度] 等待事件分批查询: 第 {batch_idx}/{len(batches)} 批, 本批 {len(batch_ids)} 个 ID", file=sys.stderr)
+            print(f"[progress] wait events batched query: batch {batch_idx}/{len(batches)}, {len(batch_ids)} IDs this batch", file=sys.stderr)
         if debug:
-            print(f"[DEBUG] wait events: 批次 {batch_idx}/{len(batches)}, 时间范围=({start_str} ~ {end_str}), IDs={batch_ids[:5]}{'...' if len(batch_ids) > 5 else ''}", file=sys.stderr)
+            print(f"[DEBUG] wait events: batch {batch_idx}/{len(batches)}, time range=({start_str} ~ {end_str}), IDs={batch_ids[:5]}{'...' if len(batch_ids) > 5 else ''}", file=sys.stderr)
 
         # 两轮尝试: 先按日志时间范围过滤; 查不到则去掉时间过滤兜底重查
         batch_hit = 0
@@ -12155,8 +12155,8 @@ def query_wait_events_for_sql_ids(sql_ids, start_time, end_time, batch_size=500,
                 (None, None, '不限时间(兜底)')], 1):
             query = _build_wait_events_query(ids_csv, q_start, q_end)
             if debug:
-                print(f"[DEBUG] wait events 执行命令({tag}): vsql -d postgres -q -A -t -c <query>", file=sys.stderr)
-                print(f"[DEBUG] wait events 完整 SQL({tag}):\n{query}", file=sys.stderr)
+                print(f"[DEBUG] wait events command({tag}): vsql -d postgres -q -A -t -c <query>", file=sys.stderr)
+                print(f"[DEBUG] wait events full SQL({tag}):\n{query}", file=sys.stderr)
             try:
                 process = subprocess.Popen(
                     ['vsql', '-d', 'postgres', '-q', '-A', '-t', '-c', query],
@@ -12166,22 +12166,22 @@ def query_wait_events_for_sql_ids(sql_ids, start_time, end_time, batch_size=500,
                 # A2: 超时保护，避免极端情况下脚本长时间阻塞
                 stdout, stderr = process.communicate(timeout=timeout)
             except FileNotFoundError:
-                return {}, "无法连接数据库（未找到 vsql 命令），未查询等待事件信息"
+                return {}, "cannot reach the database (vsql not found); wait events not queried"
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.communicate()
-                warning = f"查询等待事件超时（>{timeout}s），已终止该批次查询"
+                warning = f"wait events query timed out (>{timeout}s); batch aborted"
                 print(f"WARNING: {warning}")
                 stderr_warnings.append(warning)
                 break
             except Exception as e:
-                warning = f"查询等待事件时发生错误: {str(e)}"
+                warning = f"error querying wait events: {str(e)}"
                 print(f"WARNING: {warning}")
                 stderr_warnings.append(warning)
                 break
 
             if process.returncode != 0:
-                warning = f"查询等待事件失败: {stderr.strip()}"
+                warning = f"wait events query failed: {stderr.strip()}"
                 print(f"WARNING: {warning}")
                 stderr_warnings.append(warning)
                 break
@@ -12189,7 +12189,7 @@ def query_wait_events_for_sql_ids(sql_ids, start_time, end_time, batch_size=500,
             # A4: returncode=0 但 stderr 非空时打印 WARNING（NOTICE 等信息不阻断）
             stderr_text = (stderr or '').strip()
             if stderr_text:
-                print(f"WARNING: vsql stderr 输出: {stderr_text}", file=sys.stderr)
+                print(f"WARNING: vsql stderr: {stderr_text}", file=sys.stderr)
                 stderr_warnings.append(f"vsql stderr: {stderr_text}")
 
             for line in stdout.strip().split('\n'):
@@ -12210,23 +12210,23 @@ def query_wait_events_for_sql_ids(sql_ids, start_time, end_time, batch_size=500,
                     continue
 
             if debug:
-                print(f"[DEBUG] wait events: 批次 {batch_idx} ({tag}) 命中 {batch_hit} 条记录", file=sys.stderr)
+                print(f"[DEBUG] wait events: batch {batch_idx} ({tag}) hit {batch_hit} records", file=sys.stderr)
             if batch_hit > 0:
                 break  # 有数据就不再兜底重查
             if attempt == 1 and debug:
-                print(f"[DEBUG] wait events: 批次 {batch_idx} 时间范围内无数据, 去掉时间过滤重查", file=sys.stderr)
+                print(f"[DEBUG] wait events: batch {batch_idx} no data in time range, retrying without time filter", file=sys.stderr)
 
     if not wait_events:
-        base_msg = (f"已查询 {total_ids} 个 SQL ID 的等待事件信息，但未找到任何数据"
-                    f"（已尝试: 日志时间范围 {start_str} 至 {end_str} + 不限时间兜底）")
+        base_msg = (f"Queried wait events for {total_ids} SQL IDs but found no data"
+                    f" (tried log range {start_str} to {end_str} plus an unfiltered fallback)")
         if stderr_warnings:
-            base_msg += f"；期间发生 {len(stderr_warnings)} 个警告"
+            base_msg += f"; {len(stderr_warnings)} warnings during the run"
         return {}, base_msg
 
-    print(f"等待事件查询完成: {len(wait_events)}/{total_ids} 个 SQL ID 找到数据")
+    print(f"wait events done: data found for {len(wait_events)}/{total_ids} SQL IDs")
     if stderr_warnings:
         # 有数据但也有警告，把警告透传给报告（不阻断）
-        return wait_events, f"部分批次查询出现警告（共 {len(stderr_warnings)} 条），已尽力获取数据"
+        return wait_events, f"some batches had warnings ({len(stderr_warnings)} total); best-effort data kept"
     return wait_events, None
 
 
@@ -12560,8 +12560,8 @@ def _query_table_schemas(names, db_name, timeout=60, debug=False):
         f"  AND c.relname IN ({names_csv});"
     )
     if debug:
-        print(f"[DEBUG] 解析表 schema: vsql -d {db_name} -X -q -A -t -F '|', 表数={len(names)}", file=sys.stderr)
-        print(f"[DEBUG] 解析表 schema SQL:\n{query}", file=sys.stderr)
+        print(f"[DEBUG] resolve table schemas: vsql -d {db_name} -X -q -A -t -F '|', tables={len(names)}", file=sys.stderr)
+        print(f"[DEBUG] resolve table schemas SQL:\n{query}", file=sys.stderr)
     try:
         process = subprocess.Popen(
             ['vsql', '-d', db_name, '-X', '-q', '-A', '-t', '-F', '|', '-c', query],
@@ -12571,11 +12571,11 @@ def _query_table_schemas(names, db_name, timeout=60, debug=False):
         stdout, stderr = process.communicate(timeout=timeout)
     except Exception as e:
         if debug:
-            print(f"[DEBUG] 批量解析表 schema 失败: {e}", file=sys.stderr)
+            print(f"[DEBUG] batch table-schema resolve failed: {e}", file=sys.stderr)
         return resolved
     if process.returncode != 0:
         if debug:
-            print(f"[DEBUG] 批量解析表 schema 失败: {stderr.strip()}", file=sys.stderr)
+            print(f"[DEBUG] batch table-schema resolve failed: {stderr.strip()}", file=sys.stderr)
         return resolved
 
     for line in stdout.strip().split('\n'):
@@ -12638,7 +12638,7 @@ def _resolve_table_schemas(tables, db_name, timeout=60, debug=False):
     resolved = _query_table_schemas([t for _, t in tables], db_name, timeout=timeout, debug=debug)
     result = _apply_schema_resolution(tables, resolved)
     if debug:
-        print(f"[DEBUG] 表 schema 解析: {tables} -> {result}", file=sys.stderr)
+        print(f"[DEBUG] table schema resolve: {tables} -> {result}", file=sys.stderr)
     return result
 
 
@@ -13018,7 +13018,7 @@ def query_sqlhc_tabstats(tables, db_name, timeout=120, debug=False):
     """
     if not tables:
         if debug:
-            print(f"[DEBUG] sqlhc tabstats: 表列表为空, db={db_name}", file=sys.stderr)
+            print(f"[DEBUG] sqlhc tabstats: empty table list, db={db_name}", file=sys.stderr)
         return "No tables found."
 
     if debug:
@@ -13027,8 +13027,8 @@ def query_sqlhc_tabstats(tables, db_name, timeout=120, debug=False):
     query = _build_sqlhc_tabstats_query(tables)
 
     if debug:
-        print(f"[DEBUG] sqlhc tabstats 执行命令: vsql -d {db_name} -X -P footer=off", file=sys.stderr)
-        print(f"[DEBUG] sqlhc tabstats 完整 SQL:\n{query}", file=sys.stderr)
+        print(f"[DEBUG] sqlhc tabstats command: vsql -d {db_name} -X -P footer=off", file=sys.stderr)
+        print(f"[DEBUG] sqlhc tabstats full SQL:\n{query}", file=sys.stderr)
     try:
         # 对齐格式输出（不加 -A -t，footer=off），与 vb_tool psql -d <db> -X -P footer=off 一致
         process = subprocess.Popen(
@@ -13053,7 +13053,7 @@ def query_sqlhc_tabstats(tables, db_name, timeout=120, debug=False):
 
     result = stdout.rstrip()
     if debug:
-        print(f"[DEBUG] sqlhc tabstats: db={db_name}, 返回长度={len(result)}", file=sys.stderr)
+        print(f"[DEBUG] sqlhc tabstats: db={db_name}, result length={len(result)}", file=sys.stderr)
     return result
 
 
@@ -13105,13 +13105,13 @@ def query_sqlhc_statement_stats(unique_id, timeout=120, debug=False):
     try:
         uid = int(str(unique_id).strip())
     except (ValueError, TypeError):
-        return f"无效的 unique_query_id: {unique_id}"
+        return f"invalid unique_query_id: {unique_id}"
 
     query = _build_sqlhc_statement_stats_query(uid)
 
     if debug:
-        print("[DEBUG] sqlhc statement stats 执行命令: vsql -d postgres -X -P footer=off", file=sys.stderr)
-        print(f"[DEBUG] sqlhc statement stats 完整 SQL:\n{query}", file=sys.stderr)
+        print("[DEBUG] sqlhc statement stats command: vsql -d postgres -X -P footer=off", file=sys.stderr)
+        print(f"[DEBUG] sqlhc statement stats full SQL:\n{query}", file=sys.stderr)
     try:
         # dbe_perf.statement 固定连接 postgres 库查询
         process = subprocess.Popen(
@@ -13136,7 +13136,7 @@ def query_sqlhc_statement_stats(unique_id, timeout=120, debug=False):
 
     result = stdout.rstrip()
     if debug:
-        print(f"[DEBUG] sqlhc statement stats: uid={uid}, 返回长度={len(result)}", file=sys.stderr)
+        print(f"[DEBUG] sqlhc statement stats: uid={uid}, result length={len(result)}", file=sys.stderr)
     return result
 
 
@@ -13185,8 +13185,8 @@ ORDER BY CASE WHEN short_desc LIKE '%planner%' THEN 'planner' ELSE short_desc EN
 
     def _run(q, tag):
         if debug:
-            print(f"[DEBUG] sqlhc opt params({tag}) 执行命令: vsql -d postgres -X -P footer=off", file=sys.stderr)
-            print(f"[DEBUG] sqlhc opt params({tag}) 完整 SQL:\n{q}", file=sys.stderr)
+            print(f"[DEBUG] sqlhc opt params({tag}) command: vsql -d postgres -X -P footer=off", file=sys.stderr)
+            print(f"[DEBUG] sqlhc opt params({tag}) full SQL:\n{q}", file=sys.stderr)
         try:
             process = subprocess.Popen(
                 ['vsql', '-d', 'postgres', '-X', '-P', 'footer=off'],
@@ -13223,7 +13223,7 @@ ORDER BY CASE WHEN short_desc LIKE '%planner%' THEN 'planner' ELSE short_desc EN
     params_text = header + "\n\n".join(parts) if parts else ""
 
     if debug:
-        print(f"[DEBUG] sqlhc opt params: version长度={len(version_text or '')}, params长度={len(params_body or '')}, error={err}", file=sys.stderr)
+        print(f"[DEBUG] sqlhc opt params: version length={len(version_text or '')}, params length={len(params_body or '')}, error={err}", file=sys.stderr)
 
     return {
         'version': version_text or '',
@@ -13316,7 +13316,7 @@ def query_sqlhc_tabsize(tables, db_name, timeout=120, debug=False):
     """
     if not tables:
         if debug:
-            print(f"[DEBUG] sqlhc tabsize: 表列表为空, db={db_name}", file=sys.stderr)
+            print(f"[DEBUG] sqlhc tabsize: empty table list, db={db_name}", file=sys.stderr)
         return "No tables found."
 
     if debug:
@@ -13325,8 +13325,8 @@ def query_sqlhc_tabsize(tables, db_name, timeout=120, debug=False):
     query = _build_sqlhc_tabsize_query(tables)
 
     if debug:
-        print(f"[DEBUG] sqlhc tabsize 执行命令: vsql -d {db_name} -X -P footer=off", file=sys.stderr)
-        print(f"[DEBUG] sqlhc tabsize 完整 SQL:\n{query}", file=sys.stderr)
+        print(f"[DEBUG] sqlhc tabsize command: vsql -d {db_name} -X -P footer=off", file=sys.stderr)
+        print(f"[DEBUG] sqlhc tabsize full SQL:\n{query}", file=sys.stderr)
     try:
         # 对齐格式输出（不加 -A -t，footer=off）
         process = subprocess.Popen(
@@ -13351,7 +13351,7 @@ def query_sqlhc_tabsize(tables, db_name, timeout=120, debug=False):
 
     result = stdout.rstrip()
     if debug:
-        print(f"[DEBUG] sqlhc tabsize: db={db_name}, 返回长度={len(result)}", file=sys.stderr)
+        print(f"[DEBUG] sqlhc tabsize: db={db_name}, result length={len(result)}", file=sys.stderr)
     return result
 
 
@@ -13384,7 +13384,7 @@ def _run_vsql_batch(db_name, blocks, timeout=120, debug=False, label='sqlhc batc
     session_timeout = timeout * max(1, len(blocks))
 
     if debug:
-        print(f"[DEBUG] {label}: vsql -d {db_name} -X -P footer=off, 共 {len(blocks)} 块, 会话超时 {session_timeout}s", file=sys.stderr)
+        print(f"[DEBUG] {label}: vsql -d {db_name} -X -P footer=off, {len(blocks)} blocks, session timeout {session_timeout}s", file=sys.stderr)
     try:
         process = subprocess.Popen(
             ['vsql', '-d', db_name, '-X', '-P', 'footer=off'],
@@ -13414,7 +13414,7 @@ def _run_vsql_batch(db_name, blocks, timeout=120, debug=False, label='sqlhc batc
         body = parts[i + 1] if i + 1 < len(parts) else ''
         results[marker] = body.strip('\n')
     if debug:
-        print(f"[DEBUG] {label}: 解析出 {len(results)}/{len(blocks)} 块", file=sys.stderr)
+        print(f"[DEBUG] {label}: parsed {len(results)}/{len(blocks)} blocks", file=sys.stderr)
     return results, error
 
 
@@ -13443,7 +13443,7 @@ def batch_query_sqlhc_statement_stats(unique_ids, timeout=120, debug=False):
     results, error = _run_vsql_batch(
         'postgres', blocks, timeout=timeout, debug=debug, label='sqlhc statement stats batch')
     if error:
-        print(f"WARNING: sqlhc statement stats 批量查询: {error}", file=sys.stderr)
+        print(f"WARNING: sqlhc statement stats batch query: {error}", file=sys.stderr)
     return {uid_by_marker[m]: body for m, body in results.items()}
 
 
@@ -13496,7 +13496,7 @@ def batch_query_sqlhc_table_info(uid_tables, db_name, timeout=120, debug=False, 
             label=f'sqlhc table info({db_name})#{idx}')
         if debug:
             tables_show = ','.join(f'{o}.{t}' for o, t in key)
-            print(f"[DEBUG] sqlhc table info({db_name})#{idx}: {tables_show} 耗时 {time.monotonic() - _t:.1f}s", file=sys.stderr)
+            print(f"[DEBUG] sqlhc table info({db_name})#{idx}: {tables_show} took {time.monotonic() - _t:.1f}s", file=sys.stderr)
         return idx, key, results, error
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
@@ -13507,7 +13507,7 @@ def batch_query_sqlhc_table_info(uid_tables, db_name, timeout=120, debug=False, 
     key_to_tabstats, key_to_tabsize = {}, {}
     for idx, key, results, error in set_results:
         if error:
-            print(f"WARNING: sqlhc table info 批量查询({db_name})#{idx}: {error}", file=sys.stderr)
+            print(f"WARNING: sqlhc table info batch query({db_name})#{idx}: {error}", file=sys.stderr)
         for marker, body in results.items():
             if marker.endswith(':tabstat__'):
                 key_to_tabstats[key] = body
@@ -13523,7 +13523,7 @@ def batch_query_sqlhc_table_info(uid_tables, db_name, timeout=120, debug=False, 
                 if key in key_to_tabsize:
                     tabsize_map[uid_str] = key_to_tabsize[key]
     if debug:
-        print(f"[DEBUG] sqlhc table info({db_name}): {len(uid_tables)} 个 uid 去重为 {len(unique_sets)} 个表集合, {workers} 并行会话(动态)", file=sys.stderr)
+        print(f"[DEBUG] sqlhc table info({db_name}): {len(uid_tables)} uids deduped to {len(unique_sets)} table sets, {workers} parallel sessions (dynamic)", file=sys.stderr)
     return tabstats_map, tabsize_map
 
 
@@ -13555,35 +13555,35 @@ def _format_wait_events_for_sqlhc(records):
 
     groups = []  # [(标签, record)]
     if max_recs:
-        groups.append(('最大执行时间点', max_recs[0]))
+        groups.append(('max exec time', max_recs[0]))
     if min_recs:
-        groups.append(('最小执行时间点', min_recs[0]))
+        groups.append(('min exec time', min_recs[0]))
     if len(groups) == 1:
         # 时间范围内仅 1 条记录（最大/最小为同一次执行）
-        groups = [('最大/最小执行时间点(同一次执行)', groups[0][1])]
+        groups = [('max/min exec time (same execution)', groups[0][1])]
 
-    lines = ["================", "等待事件信息", "================"]
+    lines = ["================", "Wait Event Info", "================"]
 
     # 1. statement_history 记录（指定业务列，一行输出）
     for tag, rec in groups:
         lines.append("")
-        lines.append(f"------ statement_history 记录 ({tag}) ------")
+        lines.append(f"------ statement_history record ({tag}) ------")
         pairs = [f"{c}={_oneline(rec.get(c))}" for c in _SH_COLS if c in rec]
-        lines.append(' | '.join(pairs) if pairs else '(无记录)')
+        lines.append(' | '.join(pairs) if pairs else '(no records)')
 
     # 2. 执行计划 query_plan（单独列出，最大/最小各一个）
     for tag, rec in groups:
         lines.append("")
-        lines.append(f"------ 执行计划 query_plan ({tag}) ------")
+        lines.append(f"------ query plan ({tag}) ------")
         plan = str(rec.get('query_plan', '') or '').strip('\r\n')
-        lines.append(plan if plan else '(无执行计划)')
+        lines.append(plan if plan else '(no plan)')
 
     # 3. 等待事件（单独列出，最大/最小各一个，保留原始多行）
     for tag, rec in groups:
         lines.append("")
-        lines.append(f"------ 等待事件 ({tag}) ------")
+        lines.append(f"------ wait events ({tag}) ------")
         event_text = str(rec.get('event_text', '') or '').strip('\r\n')
-        lines.append(event_text if event_text else '(无等待事件明细)')
+        lines.append(event_text if event_text else '(no wait event detail)')
 
     return '\n'.join(lines).rstrip()
 
@@ -13658,7 +13658,7 @@ def generate_sqlhc_content(unique_id, stat, db_name, timeout=120, wait_events_re
         lines.append(wait_events_block)
     else:
         lines.append("================")
-        lines.append("等待事件信息")
+        lines.append("Wait Event Info")
         lines.append("================")
         lines.append("No wait events found in statement_history.")
     lines.append("")
@@ -13677,7 +13677,7 @@ def generate_sqlhc_content(unique_id, stat, db_name, timeout=120, wait_events_re
     else:
         tables = _extract_tables_from_sql(sql_text, default_user=user)
         if debug:
-            print(f"[DEBUG] sqlhc[{unique_id}]: 提取表数量={len(tables)}, 默认 user={user}, tables={tables}", file=sys.stderr)
+            print(f"[DEBUG] sqlhc[{unique_id}]: tables extracted={len(tables)}, default user={user}, tables={tables}", file=sys.stderr)
         if tables:
             # 在目标库解析表的实际 schema（未带 schema 的表可能不在执行用户同名 schema 下）
             tables = _resolve_table_schemas(tables, db_name, timeout=timeout, debug=debug)
@@ -13777,23 +13777,23 @@ parser = argparse.ArgumentParser(
   python analyze_log.py -f /path/to/log.log --debug
 """)
 parser.add_argument('-f', '--file', type=str, nargs='+', 
-                    help="输入日志文件路径，支持多个文件。不指定则自动从数据库获取日志目录并分析最近2天日志")
+                    help="input log file path, multiple allowed; without -f the database log directory is used and the last 2 days analyzed")
 parser.add_argument('-b', '--begin', type=str, 
-                    help="分析开始时间，格式: 'YYYY-MM-DD HH:MM:SS' 或 'YYYY-MM-DD'")
+                    help="analysis begin time, 'YYYY-MM-DD HH:MM:SS' or 'YYYY-MM-DD'")
 parser.add_argument('-e', '--end', type=str, 
-                    help="分析结束时间，格式: 'YYYY-MM-DD HH:MM:SS' 或 'YYYY-MM-DD'")
+                    help="analysis end time, 'YYYY-MM-DD HH:MM:SS' or 'YYYY-MM-DD'")
 parser.add_argument('-p', '--prefix', type=str, 
-                    help="日志行前缀格式，不指定则从数据库获取,如获取失败则使用默认格式: '%%m %%r %%d %%u [%%x] [%%p]'。")
+                    help="log_line_prefix format; fetched from the database when omitted, default '%%m %%r %%d %%u [%%x] [%%p]' on failure")
 parser.add_argument('--diff', type=str, default='1d',
-                    help="对比时间间隔，格式: 数字+m/h/d，例如 30m, 1h, 1d。默认为 1d")
+                    help="diff interval, <n>m/h/d, e.g. 30m, 1h, 1d; default 1d")
 parser.add_argument('-d', '--days', type=int, default=None,
-                    help="分析最近N天的日志（自动获取日志时默认2天；与 -f 同用时按行过滤超出 now-N天 的日志；显式指定 -b/-e 的时间边界优先）")
-parser.add_argument('-v', '--version', action='store_true', help="显示版本信息")
+                    help="analyze the last N days (default 2 when auto-fetching; with -f, rows older than now-N days are filtered; explicit -b/-e bounds win)")
+parser.add_argument('-v', '--version', action='store_true', help="show version")
 parser.add_argument('-m', '--mode', type=str, default='query', choices=['all', 'query', 'error'],
-                    help="分析范围: query(默认，分析 SQL 语句 DML+DDL，不分析错误日志), error(仅分析错误日志 ERROR/WARNING/FATAL/PANIC，不分析 SQL), all(分析所有内容：SQL + 错误日志)")
+                    help="scope: query (default; SQL DML+DDL only), error (ERROR/WARNING/FATAL/PANIC only), all (both)")
 parser.add_argument('-o', '--output', type=str, default=None,
-                    help="输出HTML报告的文件路径，例如: report.html 或 /path/to/report.html。不指定则使用默认路径")
-parser.add_argument('--debug', action='store_true', help="启用调试输出")
+                    help="HTML report path, e.g. report.html or /path/to/report.html; default location when omitted")
+parser.add_argument('--debug', action='store_true', help="enable debug output")
 def _parse_detail_arg(value):
     """解析 --detail 参数值。
 
@@ -13821,16 +13821,16 @@ def _parse_detail_arg(value):
             return ('top', n)
         except ValueError:
             raise argparse.ArgumentTypeError(
-                f"--detail top:N 中 N 必须为正整数, 收到: '{n_str}'")
+                f"--detail top:N needs a positive integer, got '{n_str}'")
     raise argparse.ArgumentTypeError(
-        f"无效的 --detail 取值 '{value}', 支持: top / top:N / all")
+        f"invalid --detail value '{value}', expected top / top:N / all")
 
 
 parser.add_argument('--detail', type=_parse_detail_arg, nargs='?', const=('top', 20), default=None,
                     metavar='top[:N]|all',
-                    help="查询慢SQL的等待事件信息: top(默认Top20 4个维度去重后的SQL ID), top:N(自定义TopN), all(查询所有慢SQL)。不指定则不查询")
+                    help="query wait events for slow SQL: top (default, Top20 deduped across 4 dimensions), top:N, all; skipped when omitted")
 parser.add_argument('--detail-timeout', type=int, default=120,
-                    help="--detail 查询等待事件的单批次 vsql 超时时间(秒), 默认 120")
+                    help="per-batch vsql timeout in seconds for --detail wait event queries, default 120")
 args = parser.parse_args()
 # -e 只给日期时按“当天结束”理解（否则按 00:00 边界会把当天日志整文件排除）
 if args.end and re.match(r'^\d{4}-\d{2}-\d{2}$', args.end.strip()):
@@ -13840,15 +13840,15 @@ file_names = args.file
 # 验证 --mode 参数
 statement_filter = args.mode.lower()
 if statement_filter not in ['all', 'query', 'error']:
-    print(f"错误: 无效的 --mode 参数 '{args.mode}'，应为 all/query/error")
+    print(f"Error: invalid --mode '{args.mode}', expected all/query/error")
     sys.exit(1)
 
 if statement_filter == 'query':
-    print("过滤模式: 分析 SQL 语句 (DML+DDL)，不分析错误日志")
+    print("Filter mode: SQL statements (DML+DDL) only, no error log analysis")
 elif statement_filter == 'error':
-    print("过滤模式: 仅分析错误日志 (ERROR/WARNING/FATAL/PANIC)，不分析 SQL")
+    print("Filter mode: error log only (ERROR/WARNING/FATAL/PANIC), no SQL analysis")
 else:
-    print("过滤模式: 分析所有内容 (SQL + 错误日志)")
+    print("Filter mode: everything (SQL + error log)")
 
 
 if args.version:
@@ -13858,15 +13858,15 @@ if args.version:
 # 获取日志行前缀格式
 log_prefix = args.prefix
 if not log_prefix:
-    print("未指定日志前缀格式，尝试从数据库获取...")
+    print("No log prefix format given, trying the database...")
     log_prefix = get_log_line_prefix()
     if log_prefix:
-        print(f"从数据库获取到日志前缀格式: {log_prefix}")
+        print(f"Got log prefix format from database: {log_prefix}")
     else:
-        print("无法从数据库获取日志前缀格式，使用默认格式")
+        print("Cannot get log prefix format from database, using default")
         log_prefix = '%m %r %d %u [%x] [%p]'
 else:
-    print(f"使用指定的日志前缀格式: {log_prefix}")
+    print(f"Using given log prefix format: {log_prefix}")
 
 ## @function 解析日志行前缀格式
 ## @description 根据日志前缀格式创建解析函数
@@ -13935,7 +13935,7 @@ def parse_log_prefix_format(log_prefix):
     if unique_fields and unique_fields[0] == 'timestamp':
         unique_fields = unique_fields[1:]
     
-    print(f"解析日志前缀 '{log_prefix}'....")
+    print(f"Parsing log prefix '{log_prefix}'....")
     
     return {
         'parse_func': lambda log_line: _parse_log_line_by_format(log_line, unique_fields),
@@ -14227,7 +14227,7 @@ def parse_csv_log_line(csv_row):
         
         return result
     except Exception as e:
-        print(f"警告: 解析CSV日志行失败: {str(e)}")
+        print(f"WARNING: CSV log line parse failed: {str(e)}")
         return None
 
 
@@ -14241,7 +14241,7 @@ def convert_csv_to_standard_format(content):
     Returns:
         str: 转换后的标准格式日志内容
     """
-    print("检测到CSV格式日志，正在转换为标准格式...")
+    print("CSV-format log detected, converting to standard format...")
     
     converted_lines = []
     
@@ -14375,7 +14375,7 @@ def convert_csv_to_standard_format(content):
         converted_lines.append(log_line)
         converted_count += 1
     
-    print(f"CSV转换完成: 成功转换 {converted_count} 行，跳过 {skipped_count} 行")
+    print(f"CSV conversion done: {converted_count} rows converted, {skipped_count} skipped")
     return '\n'.join(converted_lines)
 
 
@@ -14432,14 +14432,14 @@ def read_log_file_stream(file_name, auto_detect_csv=True):
         file_size_gb = file_size / (1024**3)  # 转换为GB
         
         if file_size_gb > 2.0:
-            print(f"警告: 文件 {file_name} 大小为 {file_size_gb:.2f}GB，超过2GB限制，程序退出")
-            raise MemoryError(f"处理文件数过大，占用超过2GB内存。当前文件大小: {file_size_gb:.2f}GB")
+            print(f"WARNING: file {file_name} is {file_size_gb:.2f}GB, over the 2GB limit, exiting")
+            raise MemoryError(f"too many files, over the 2GB memory budget; current file is {file_size_gb:.2f}GB")
         
         if file_name.endswith('.gz'):
             # 处理.gz压缩文件
             with gzip.open(file_name, 'rt', encoding='utf-8', errors='ignore') as file:
                 content = file.read()
-            print(f"检测到.gz文件，已自动解压: {file_name}")
+            print(f".gz detected, decompressed automatically: {file_name}")
         else:
             # 处理普通文本文件
             with open(file_name, "r", encoding='utf-8', errors='ignore') as file:
@@ -14447,7 +14447,7 @@ def read_log_file_stream(file_name, auto_detect_csv=True):
         
         # 通过文件后缀名判断CSV格式
         if auto_detect_csv and is_csv_file(file_name):
-            print(f"文件 {file_name} 是CSV格式日志")
+            print(f"File {file_name} is a CSV-format log")
             content = convert_csv_to_standard_format(content)
         
         return content
@@ -14455,7 +14455,7 @@ def read_log_file_stream(file_name, auto_detect_csv=True):
         # 重新抛出内存错误
         raise
     except Exception as e:
-        print(f"错误: 无法读取文件 {file_name}: {str(e)}")
+        print(f"Error: cannot read file {file_name}: {str(e)}")
         return None
 
 def find_recent_log_files(log_directory, days=2, begin_time=None, end_time=None):
@@ -14472,7 +14472,7 @@ def find_recent_log_files(log_directory, days=2, begin_time=None, end_time=None)
         list: 符合条件的日志文件列表，按修改时间从远到近排序
     """
     if not os.path.exists(log_directory):
-        print(f"日志目录不存在: {log_directory}")
+        print(f"Log directory does not exist: {log_directory}")
         return []
     
     # 查找日志文件模式
@@ -14599,11 +14599,11 @@ def find_recent_log_files(log_directory, days=2, begin_time=None, end_time=None)
         # 如果还是没有找到文件，抛出异常
         if not filtered_files:
             if begin_time and end_time:
-                raise FileNotFoundError(f"在指定时间范围 {begin_time} 到 {end_time} 内没有找到合适的日志文件")
+                raise FileNotFoundError(f"no log file found in the given range {begin_time} to {end_time}")
             elif begin_time:
-                raise FileNotFoundError(f"在指定开始时间 {begin_time} 之后没有找到合适的日志文件")
+                raise FileNotFoundError(f"no log file found after the given begin time {begin_time}")
             elif end_time:
-                raise FileNotFoundError(f"在指定结束时间 {end_time} 之前没有找到合适的日志文件")
+                raise FileNotFoundError(f"no log file found before the given end time {end_time}")
             else:
                 # 使用默认天数限制
                 cutoff_date = datetime.now() - timedelta(days=days)
@@ -14648,7 +14648,7 @@ def expand_file_patterns(file_patterns):
             if os.path.isfile(pattern):
                 expanded_files.append(pattern)
             else:
-                print(f"警告: 未找到匹配的文件: {pattern}")
+                print(f"WARNING: no file matches: {pattern}")
     
     # 去重并排序
     expanded_files = sorted(list(set(expanded_files)))
@@ -14670,7 +14670,7 @@ def show_progress(current, total, prefix="处理进度", start_time=None, total_
     if start_time:
         elapsed = datetime.now() - start_time
         total_seconds = total_elapsed_time + elapsed.total_seconds()
-        elapsed_time = f" 总耗时: {total_seconds:.1f}秒"
+        elapsed_time = f" total elapsed: {total_seconds:.1f}s"
     
     print(f'\r{prefix}: |{bar}| {percent:.1f}% ({current}/{total}){elapsed_time}', end='', flush=True)
     if current == total:
@@ -14692,7 +14692,7 @@ def parse_diff_interval(diff_str):
     """
     match = re.match(r'^(\d+)([mhd])$', diff_str)
     if not match:
-        print(f"错误: 无效的对比间隔格式 '{diff_str}'，应为 数字+m/h/d，例如 30m, 1h, 1d")
+        print(f"Error: invalid diff interval '{diff_str}', expected <n>m/h/d, e.g. 30m, 1h, 1d")
         sys.exit(1)
     
     value = int(match.group(1))
@@ -14704,25 +14704,25 @@ def parse_diff_interval(diff_str):
     elif unit == 'd':
         return timedelta(days=value)
     else:
-        print(f"错误: 无效的对比间隔单位 '{unit}'，应为 m/h/d")
+        print(f"Error: invalid diff interval unit '{unit}', expected m/h/d")
         sys.exit(1)
 diff_interval = parse_diff_interval(args.diff)
 # 如果没有指定-f参数，则自动获取数据库日志目录并分析最近2天的日志文件
 if not args.file:
-    print("未指定日志文件，尝试自动获取数据库日志目录...")
+    print("No log file given, trying the database log directory...")
     log_directory = get_db_log_directory()
     if not log_directory:
         # 数据库无法连接时，尝试使用 $PGDATA/pg_log 默认路径
         default_dir = get_default_log_directory()
         if default_dir and os.path.exists(default_dir):
-            print(f"无法通过vsql获取日志目录，使用默认路径: {default_dir}")
+            print(f"Cannot get log directory via vsql, using default: {default_dir}")
             log_directory = default_dir
         else:
             if default_dir:
-                print(f"无法通过vsql获取日志目录，默认路径 {default_dir} 也不存在")
-            print("无法获取数据库日志目录，请手动指定日志文件")
+                print(f"Cannot get log directory via vsql; default {default_dir} missing too")
+            print("Cannot get the database log directory; specify log files manually")
             sys.exit(1)
-    print(f"获取到日志目录: {log_directory}")
+    print(f"Log directory: {log_directory}")
     # 解析时间参数
     begin_time = None
     end_time = None
@@ -14735,22 +14735,22 @@ if not args.file:
     if begin_time or end_time:
         recent_files = find_recent_log_files(log_directory, days=args.days, begin_time=begin_time, end_time=end_time)
         if recent_files:
-            print(f"找到 {len(recent_files)} 个指定时间范围内的日志文件:")
+            print(f"Found {len(recent_files)} log files in the given time range:")
             for i, file_name in enumerate(recent_files, 1):
                 print(f"  {i}. {file_name}")
             file_names = recent_files
         else:
-            print("在指定时间范围内未找到日志文件")
+            print("No log files in the given time range")
             sys.exit(1)
     else:
         recent_files = find_recent_log_files(log_directory, days=args.days if args.days is not None else 2)
         if recent_files:
-            print(f"找到 {len(recent_files)} 个最近的日志文件:")
+            print(f"Found {len(recent_files)} most recent log files:")
             for i, file_name in enumerate(recent_files, 1):
                 print(f"  {i}. {file_name}")
             file_names = recent_files
         else:
-            print("在日志目录中未找到最近的日志文件")
+            print("No recent log files in the log directory")
             sys.exit(1)
 else:
     # 扩展文件模式，支持通配符
@@ -14759,7 +14759,7 @@ else:
         print("Error: No valid files found.")
         sys.exit(1)
     
-    print(f"找到 {len(file_names)} 个文件:")
+    print(f"Found {len(file_names)} files:")
     for i, file_name in enumerate(file_names, 1):
         print(f"  {i}. {file_name}")
 
@@ -15040,7 +15040,7 @@ def process_single_file(file_name, args, total_elapsed_time=0):
     Returns:
         tuple: (total_list, file_size_mb) - 解析结果和文件大小
     """
-    print(f"\n正在处理文件: {file_name}")
+    print(f"\nProcessing file: {file_name}")
     
     # 使用优化的文件读取
     content = read_log_file_stream(file_name)
@@ -15048,14 +15048,14 @@ def process_single_file(file_name, args, total_elapsed_time=0):
     # 检查文件大小并给出优化建议
     file_size = len(content)
     file_size_mb = file_size / (1024 * 1024)
-    print(f"文件大小: {file_size_mb:.2f} MB")
+    print(f"File size: {file_size_mb:.2f} MB")
     
 
     
     # 使用预编译的正则表达式分割日志
     blocks = TIMESTAMP_PATTERN.split(content)[1:]
     if not blocks:
-        print("警告: 未在文件中找到符合格式的日志记录")
+        print("WARNING: no well-formed log records found in this file")
         return [], [], file_size_mb, [], [], []
 
     # -d 按行过滤：丢弃超出 now - N天 的日志块（-f 指定文件时同样生效；
@@ -15079,10 +15079,10 @@ def process_single_file(file_name, args, total_elapsed_time=0):
                     break
                 _di += 2
             if _di >= len(blocks):
-                print(f"提示: 文件内所有日志均早于 {v_days_cutoff}（-d {args.days}），跳过该文件")
+                print(f"Note: every record in this file is older than {v_days_cutoff} (-d {args.days}), skipping it")
                 return [], [], file_size_mb, [], [], []
             if _di > 0:
-                print(f"按 -d {args.days} 过滤: 丢弃前 {_di // 2} 条超出时间范围的日志块（早于 {v_days_cutoff}）")
+                print(f"-d {args.days} filter: dropped first {_di // 2} out-of-range log blocks (older than {v_days_cutoff})")
                 blocks = blocks[_di:]
 
     # Parse start and end times（更健壮的跨文件范围过滤）
@@ -15147,7 +15147,7 @@ def process_single_file(file_name, args, total_elapsed_time=0):
         print(f'Error: not support type {e_type}')
         return [], [], file_size_mb, [], [], []
     
-    print(f"文件 {file_name} 处理完成，找到 {len(total_list)} 条慢SQL记录，{len(deadlock_list)} 条死锁记录，{len(lock_event_list)} 条锁事件记录，{len(lock_chain_list)} 条锁等待链记录，{len(error_list)} 条错误/警告记录")
+    print(f"File {file_name} done: {len(total_list)} slow SQL, {len(deadlock_list)} deadlocks, {len(lock_event_list)} lock events, {len(lock_chain_list)} lock wait chains, {len(error_list)} errors/warnings")
 
     # 显式释放大内存变量
     del blocks
@@ -15180,11 +15180,11 @@ def process_multiple_files(file_names, args):
     total_size = 0
     total_elapsed_time = 0  # 总耗时
     
-    print(f"开始处理 {len(file_names)} 个日志文件...")
+    print(f"Processing {len(file_names)} log files...")
     
     for i, file_name in enumerate(file_names, 1):
         print(f"\n{'='*60}")
-        print(f"处理进度: {i}/{len(file_names)}")
+        print(f"Progress: {i}/{len(file_names)}")
         
         try:
             file_start_time = datetime.now()  # 记录单个文件开始时间
@@ -15211,18 +15211,18 @@ def process_multiple_files(file_names, args):
             gc.collect()
             
         except Exception as e:
-            print(f"处理文件 {file_name} 时出错: {str(e)}")
+            print(f"Error processing file {file_name}: {str(e)}")
             continue
     
     print(f"\n{'='*60}")
-    print(f"所有文件处理完成!")
-    print(f"总文件大小: {total_size:.2f} MB")
-    print(f"总慢SQL记录数: {len(all_total_list)} 条")
-    print(f"总死锁记录数: {len(all_deadlock_list)} 条")
-    print(f"总锁事件记录数: {len(all_lock_event_list)} 条")
-    print(f"总锁等待链记录数: {len(all_lock_chain_list)} 条")
-    print(f"总错误/警告记录数: {len(all_error_list)} 条")
-    print(f"总耗时: {total_elapsed_time}秒")
+    print("All files processed")
+    print(f"Total file size: {total_size:.2f} MB")
+    print(f"Total slow SQL records: {len(all_total_list)}")
+    print(f"Total deadlock records: {len(all_deadlock_list)}")
+    print(f"Total lock event records: {len(all_lock_event_list)}")
+    print(f"Total lock wait chain records: {len(all_lock_chain_list)}")
+    print(f"Total error/warning records: {len(all_error_list)}")
+    print(f"Total elapsed: {total_elapsed_time}s")
 
     return all_total_list, all_deadlock_list, total_size, total_elapsed_time, all_lock_event_list, all_lock_chain_list, all_error_list
 
@@ -15230,7 +15230,7 @@ def process_multiple_files(file_names, args):
 # ==================== 新增：数据分析与报告生成类 ====================
 
 class ReportGenerator:
-    """HTML报告生成器，整合汇总、分时段分析和详情展示。"""
+    """HTML报告生成器，整合汇总、分时段分析和Detail展示。"""
     
     @staticmethod
     def _make_id_safe(unique_id):
@@ -15244,7 +15244,7 @@ class ReportGenerator:
         """计算锁事件跳转锚点所用的 timestamp,与 Top10 锁事件表的合并逻辑保持一致。
 
         Top10 表会把同一次锁等待的 waiting+acquired 合并为一行,且行锚点的
-        timestamp 取 waiting 的时间;而慢 SQL 详情侧 waiting/acquired 各展示一条。
+        timestamp 取 waiting 的时间;而慢 SQL Detail侧 waiting/acquired 各展示一条。
         若直接沿用事件自身 timestamp,acquired 的锚点会指向不存在的时间,导致跳转失败。
         因此对 acquired 事件,在同组事件里查找同 lock_type+target 的最早 waiting 时间;
         waiting 或找不到配对时回退为事件自身 timestamp。
@@ -15294,12 +15294,12 @@ class ReportGenerator:
 
     # 耗时区间定义与对应颜色
     TIME_RANGES = [
-        (60, float('inf'), '#8B0000', '60s以上'),      # 深红
+        (60, float('inf'), '#8B0000', '60s+'),          # dark red
         (30, 60, '#FF6B6B', '30-60s'),                # 浅红
         (10, 30, '#FFD93D', '10-30s'),                # 黄
         (3, 10, '#6BC5D2', '3-10s'),                  # 蓝
         (1, 3, '#CCCCCC', '1-3s'),                    # 灰 (边框区分)
-        (0, 1, '#4CAF50', '1s以下'),                  # 绿
+        (0, 1, '#4CAF50', '<1s'),                     # green
     ]
 
     @staticmethod
@@ -15327,9 +15327,9 @@ class ReportGenerator:
         
         total_slow = len(stats_dict)
         summary_html_parts.append(f"""
-        <h2>SQL汇总统计</h2>
+        <h2>SQL Summary Statistics</h2>
         <div class="summary-stats">
-            <p><strong>慢SQL去重条目数：</strong>{total_slow} 条（按 Unique ID 去重）</p>
+            <p><strong>Deduped slow SQL entries: </strong>{total_slow} (deduped by Unique ID)</p>
             <div class="stats-grid">
         """)
         
@@ -15339,7 +15339,7 @@ class ReportGenerator:
             summary_html_parts.append(f"""
                 <div class="stat-item" style="border-left-color: {color};">
                     <span class="range-name">{rname}</span>
-                    <span class="range-count">{count} 条</span>
+                    <span class="range-count">{count}</span>
                     <span class="range-percent">({percent:.1f}%)</span>
                 </div>
             """)
@@ -15400,7 +15400,7 @@ class ReportGenerator:
             sorted_by_count = sorted(stats_list, key=lambda x: x[1]['count'], reverse=True)[:10]
             # 按最大耗时 (max_duration) 排序
             sorted_by_max = sorted(stats_list, key=lambda x: x[1]['max_duration'], reverse=True)[:10]
-            # 按抖动系数 (CV = stddev / avg) 排序
+            # 按Jitter (CV) (CV = stddev / avg) 排序
             sorted_by_cv = sorted(stats_list, key=lambda x: x[1]['duration_stddev'] / x[1]['avg_duration'] if x[1]['avg_duration'] > 0 else 0, reverse=True)[:10]
             # 按标准差 (stddev) 排序
             sorted_by_stddev = sorted(stats_list, key=lambda x: x[1]['duration_stddev'], reverse=True)[:10]
@@ -15418,9 +15418,9 @@ class ReportGenerator:
             # 总耗时 Top 10
             html_parts.append(f"""
                 <div class="top10-section" data-sql-type="{sql_type}">
-                    <h4>按总耗时排序 (sum_duration)</h4>
+                    <h4>Sort by total time (sum_duration)</h4>
                     <table class="top10-table">
-                        <tr><th>排名</th><th>Unique ID</th><th>SQL Text</th><th>总耗时(s)</th><th>执行次数</th></tr>
+                        <tr><th>Rank</th><th>Unique ID</th><th>SQL Text</th><th>Total time (s)</th><th>Calls</th></tr>
             """)
             for idx, (uid, stat) in enumerate(sorted_by_sum, 1):
                 uid_escaped = html.escape(str(uid).strip(), quote=True)
@@ -15445,9 +15445,9 @@ class ReportGenerator:
             # 平均耗时 Top 10
             html_parts.append(f"""
                 <div class="top10-section" data-sql-type="{sql_type}">
-                    <h4>按平均耗时排序 (avg_duration)</h4>
+                    <h4>Sort by avg time (avg_duration)</h4>
                     <table class="top10-table">
-                        <tr><th>排名</th><th>Unique ID</th><th>SQL Text</th><th>平均耗时(s)</th><th>执行次数</th></tr>
+                        <tr><th>Rank</th><th>Unique ID</th><th>SQL Text</th><th>Avg time (s)</th><th>Calls</th></tr>
             """)
             for idx, (uid, stat) in enumerate(sorted_by_avg, 1):
                 uid_escaped = html.escape(str(uid).strip(), quote=True)
@@ -15473,9 +15473,9 @@ class ReportGenerator:
             # 执行次数 Top 10
             html_parts.append(f"""
                 <div class="top10-section" data-sql-type="{sql_type}">
-                    <h4>按执行次数排序 (calls)</h4>
+                    <h4>Sort by calls (calls)</h4>
                     <table class="top10-table">
-                        <tr><th>排名</th><th>Unique ID</th><th>SQL Text</th><th>平均耗时(s)</th><th>执行次数</th></tr>
+                        <tr><th>Rank</th><th>Unique ID</th><th>SQL Text</th><th>Avg time (s)</th><th>Calls</th></tr>
             """)
             for idx, (uid, stat) in enumerate(sorted_by_count, 1):
                 uid_escaped = html.escape(str(uid).strip(), quote=True)
@@ -15500,9 +15500,9 @@ class ReportGenerator:
             # 最大耗时 Top 10
             html_parts.append(f"""
                 <div class="top10-section" data-sql-type="{sql_type}">
-                    <h4>按最大耗时排序 (max_duration)</h4>
+                    <h4>Sort by max time (max_duration)</h4>
                     <table class="top10-table">
-                        <tr><th>排名</th><th>Unique ID</th><th>SQL Text</th><th>最大耗时(s)</th><th>执行次数</th></tr>
+                        <tr><th>Rank</th><th>Unique ID</th><th>SQL Text</th><th>Max time (s)</th><th>Calls</th></tr>
             """)
             for idx, (uid, stat) in enumerate(sorted_by_max, 1):
                 uid_escaped = html.escape(str(uid).strip(), quote=True)
@@ -15525,12 +15525,12 @@ class ReportGenerator:
                 </div>
             """)
 
-            # 抖动系数 Top 10
+            # Jitter (CV) Top 10
             html_parts.append(f"""
                 <div class="top10-section" data-sql-type="{sql_type}">
-                    <h4>按抖动系数排序 (CV = stddev / avg)</h4>
+                    <h4>Sort by jitter (CV = stddev / avg)</h4>
                     <table class="top10-table">
-                        <tr><th>排名</th><th>Unique ID</th><th>SQL Text</th><th>抖动系数</th><th>执行次数</th></tr>
+                        <tr><th>Rank</th><th>Unique ID</th><th>SQL Text</th><th>Jitter (CV)</th><th>Calls</th></tr>
             """)
             for idx, (uid, stat) in enumerate(sorted_by_cv, 1):
                 uid_escaped = html.escape(str(uid).strip(), quote=True)
@@ -15556,9 +15556,9 @@ class ReportGenerator:
             # 标准差 Top 10
             html_parts.append(f"""
                 <div class="top10-section" data-sql-type="{sql_type}">
-                    <h4>按标准差排序 (stddev)</h4>
+                    <h4>Sort by stddev (stddev)</h4>
                     <table class="top10-table">
-                        <tr><th>排名</th><th>Unique ID</th><th>SQL Text</th><th>stddev(s)</th><th>时间差(s)</th></tr>
+                        <tr><th>Rank</th><th>Unique ID</th><th>SQL Text</th><th>stddev(s)</th><th>Time diff (s)</th></tr>
             """)
             for idx, (uid, stat) in enumerate(sorted_by_stddev, 1):
                 uid_escaped = html.escape(str(uid).strip(), quote=True)
@@ -15584,7 +15584,7 @@ class ReportGenerator:
             return ''.join(html_parts)
         
         summary_html_parts.append("""
-        <h3 id="top10-ranking">Top 10 慢SQL排名</h3>
+        <h3 id="top10-ranking">Top 10 Slow SQL</h3>
         <div class="top10-container">
         """)
         
@@ -15645,7 +15645,7 @@ class ReportGenerator:
             parts.append('"%s" x%d' % (m, c) if c > 1 else '"%s"' % m)
         desc = ' + '.join(parts)
         if len(users) == 1:
-            desc = '%s 用户 ' % list(users.keys())[0] + desc
+            desc = '%s user ' % list(users.keys())[0] + desc
         return desc
 
     @staticmethod
@@ -15661,16 +15661,16 @@ class ReportGenerator:
             if params_text:
                 params_b64 = _gz_b64_text(params_text)
                 version_html += ('<button class="copy-btn" data-sql-b64="%s" data-filename="opt_params.txt.gz" '
-                                 'data-done-text="已下载" onclick="downloadEmbeddedText(this)">📥 下载参数配置(.gz)</button>' % params_b64)
-            rows.append(('数据库版本', version_html))
+                                 'data-done-text="已下载" onclick="downloadEmbeddedText(this)">Download params (.gz)</button>' % params_b64)
+            rows.append(('DB version', version_html))
         elif opt_params_info.get('error'):
-            rows.append(('数据库版本', '<span class="ov-na">未获取（%s）</span>' % html.escape(str(opt_params_info['error']))))
+            rows.append(('DB version', '<span class="ov-na">not fetched (%s)</span>' % html.escape(str(opt_params_info['error']))))
         # ---- 错误统计 ----
         if statement_filter == 'query':
             # query 模式未提取错误日志，显示 N/A 并给出提示
             rows.append(('ERROR / WARNING / FATAL',
-                         '<span class="ov-na">N/A（当前 --mode=query 模式未分析错误日志，如需分析请使用 --mode error 或 --mode all）</span>'))
-            rows.append(('错误最多时段', '<span class="ov-na">N/A</span>'))
+                         '<span class="ov-na">N/A (--mode=query skips error logs; rerun with --mode error or --mode all)</span>'))
+            rows.append(('Peak error hour', '<span class="ov-na">N/A</span>'))
         else:
             level_counter, hour_counter = ReportGenerator._error_level_stats(error_list)
             n_error = level_counter.get('ERROR', 0)
@@ -15678,15 +15678,15 @@ class ReportGenerator:
             n_fatal = level_counter.get('FATAL', 0) + level_counter.get('PANIC', 0)
             err_cls = 'ov-bad' if (n_error or n_fatal) else ('ov-warn' if n_warning else '')
             rows.append(('ERROR / WARNING / FATAL',
-                         '<span class="%s">%d / %d / %d 条</span>' % (err_cls, n_error, n_warning, n_fatal)))
+                         '<span class="%s">%d / %d / %d</span>' % (err_cls, n_error, n_warning, n_fatal)))
             if hour_counter:
                 peak_hour, peak_cnt = max(hour_counter.items(), key=lambda x: x[1])
                 desc = ReportGenerator._describe_peak_hour(error_list, peak_hour)
-                peak_txt = '%s 时段(%d 条' % (peak_hour, peak_cnt)
+                peak_txt = '%s (%d)' % (peak_hour, peak_cnt)
                 peak_txt += ('，' + desc if desc else '') + ')'
-                rows.append(('错误最多时段', '<span class="ov-bad">%s</span>' % html.escape(peak_txt)))
+                rows.append(('Peak error hour', '<span class="ov-bad">%s</span>' % html.escape(peak_txt)))
             else:
-                rows.append(('错误最多时段', '无错误/警告记录'))
+                rows.append(('Peak error hour', 'no error/warning records'))
 
         # ---- 慢 SQL 统计（按 DQL/DDL 拆分） ----
         total_slow = len(all_total_list)
@@ -15697,18 +15697,18 @@ class ReportGenerator:
             """构建单个类型的慢 SQL 统计行(空数据下返回完整 4 行结构,保持报告一致性)"""
             if not items:
                 return [
-                    (f'{label} 慢 SQL 触发次数', '0 次'),
-                    (f'{label} 慢 SQL 总耗时', '<span class="ov-na">无记录</span>'),
-                    (f'{label} 慢 SQL 最多时段', '<span class="ov-na">无记录</span>'),
-                    (f'{label} 最长慢语句', '<span class="ov-na">无记录</span>'),
+                    (f'{label} slow SQL fires', '0 calls'),
+                    (f'{label} slow SQL total time', '<span class="ov-na">no records</span>'),
+                    (f'{label} slow SQL peak hour', '<span class="ov-na">no records</span>'),
+                    (f'{label} longest slow stmt', '<span class="ov-na">no records</span>'),
                 ]
             sub_rows = []
             total = len(items)
             durations = [item['duration'] for item in items]
             avg_dur = sum(durations) / total
             total_dur = sum(durations)
-            sub_rows.append((f'{label} 慢 SQL 触发次数', f'{total} 次，平均 {avg_dur:.2f} s'))
-            sub_rows.append((f'{label} 慢 SQL 总耗时', f'{total_dur:.2f} s'))
+            sub_rows.append((f'{label} slow SQL fires', f'{total} calls, avg {avg_dur:.2f} s'))
+            sub_rows.append((f'{label} slow SQL total time', f'{total_dur:.2f} s'))
             slow_hours = defaultdict(int)
             for item in items:
                 t = item.get('time')
@@ -15716,15 +15716,15 @@ class ReportGenerator:
                     slow_hours[t.strftime('%H:00')] += 1
             if slow_hours:
                 ph, pc = max(slow_hours.items(), key=lambda x: x[1])
-                sub_rows.append((f'{label} 慢 SQL 最多时段', f'<span class="ov-bad">{ph} 时段({pc} 条)</span>'))
+                sub_rows.append((f'{label} slow SQL peak hour', f'<span class="ov-bad">{ph} ({pc})</span>'))
             else:
-                sub_rows.append((f'{label} 慢 SQL 最多时段', '<span class="ov-na">无有效时间</span>'))
+                sub_rows.append((f'{label} slow SQL peak hour', '<span class="ov-na">no valid time</span>'))
             max_item = max(items, key=lambda x: x['duration'])
             sql_brief = re.sub(r'\s+', ' ', (max_item.get('qry_text') or '')).strip()[:80]
             t = max_item.get('time')
-            sub_rows.append((f'{label} 最长慢语句',
-                             f'<span class="ov-bad">{max_item["duration"]:.2f} s</span>，'
-                             f'{t.strftime("%H:%M") if t is not None else "-"} 的 '
+            sub_rows.append((f'{label} longest slow stmt',
+                             f'<span class="ov-bad">{max_item["duration"]:.2f} s</span> at '
+                             f'{t.strftime("%H:%M") if t is not None else "-"}: '
                              f'<span class="ov-sql" title="{html.escape(sql_brief, quote=True)}">{html.escape(sql_brief)}</span>'))
             return sub_rows
 
@@ -15732,9 +15732,9 @@ class ReportGenerator:
         if total_slow:
             _total_dur = sum(item['duration'] for item in all_total_list)
             _avg_dur = _total_dur / total_slow
-            rows.append(('慢 SQL 触发', f'总次数: {total_slow} 次, 总耗时: {_total_dur:.2f} s, 平均耗时: {_avg_dur:.2f} s'))
+            rows.append(('Slow SQL fires', f'total {total_slow} calls, total {_total_dur:.2f} s, avg {_avg_dur:.2f} s'))
         else:
-            rows.append(('慢 SQL 触发', '总次数: 0 次, 总耗时: <span class="ov-na">无记录</span>, 平均耗时: <span class="ov-na">无记录</span>'))
+            rows.append(('Slow SQL fires', 'total 0 calls, total <span class="ov-na">no records</span>, avg <span class="ov-na">no records</span>'))
         rows.extend(_build_slow_sql_stats(dml_list, 'DQL'))
         rows.extend(_build_slow_sql_stats(ddl_list, 'DDL'))
 
@@ -15742,7 +15742,7 @@ class ReportGenerator:
             '<tr><td class="ov-label">%s</td><td class="ov-value">%s</td></tr>' % (k, v)
             for k, v in rows
         )
-        return ('<div class="overview-box"><h3 class="overview-title">📋 汇总信息</h3>'
+        return ('<div class="overview-box"><h3 class="overview-title">Summary</h3>'
                 '<table class="overview-table">%s</table></div>' % body)
 
     @staticmethod
@@ -15751,20 +15751,20 @@ class ReportGenerator:
         if statement_filter == 'query':
             return """
             <section id="error-section">
-                <h2>⚠️ 错误日志分析</h2>
-                <p class="error-empty">当前 <code>--mode=query</code> 模式未分析错误日志。如需查看 ERROR / WARNING / FATAL / PANIC 记录，请使用 <code>--mode error</code> 或 <code>--mode all</code> 重新分析。</p>
+                <h2>Error Log Analysis</h2>
+                <p class="error-empty">--mode=query did not analyze error logs. To see ERROR / WARNING / FATAL / PANIC records, rerun with <code>--mode error</code> or <code>--mode all</code>.</p>
             </section>
             """
         if not error_list:
             return """
             <section id="error-section">
-                <h2>⚠️ 错误日志分析</h2>
-                <p class="error-empty">日志中未发现 ERROR / WARNING / FATAL / PANIC 记录。</p>
+                <h2>Error Log Analysis</h2>
+                <p class="error-empty">No ERROR / WARNING / FATAL / PANIC records found in the log.</p>
             </section>
             """
 
         level_counter, hour_counter = ReportGenerator._error_level_stats(error_list)
-        parts = ['<section id="error-section"><h2>⚠️ 错误日志分析</h2>']
+        parts = ['<section id="error-section"><h2>Error Log Analysis</h2>']
 
         # ---- 1. 级别统计卡片 ----
         level_meta = [('ERROR', '#e74c3c'), ('WARNING', '#f39c12'),
@@ -15775,7 +15775,7 @@ class ReportGenerator:
             parts.append(f"""
                 <div class="stat-item" style="border-left-color: {color};">
                     <span class="range-name">{lv}</span>
-                    <span class="range-count">{cnt} 条</span>
+                    <span class="range-count">{cnt}</span>
                 </div>
             """)
         # 错误最多时段卡片
@@ -15783,8 +15783,8 @@ class ReportGenerator:
             peak_hour, peak_cnt = max(hour_counter.items(), key=lambda x: x[1])
             parts.append(f"""
                 <div class="stat-item" style="border-left-color: #e67e22;">
-                    <span class="range-name">错误最多时段</span>
-                    <span class="range-count">{peak_hour}({peak_cnt} 条)</span>
+                    <span class="range-name">Peak error hour</span>
+                    <span class="range-count">{peak_hour} ({peak_cnt})</span>
                 </div>
             """)
         parts.append('</div></div>')
@@ -15815,11 +15815,11 @@ class ReportGenerator:
 
         def _render_group_table(group_items, title, limit=None, more_note=True):
             """渲染消息聚合表。limit=None 表示全部展示。"""
-            parts_html = [f'<h3>{title}(共 {len(group_items)} 类)</h3>']
+            parts_html = [f'<h3>{title} ({len(group_items)} groups)</h3>']
             parts_html.append("""<table class="error-table error-group-table">
                 <thead><tr>
-                    <th>级别</th><th>次数</th><th>错误消息(归一化)</th>
-                    <th>涉及用户</th><th>涉及数据库</th><th>首次出现</th><th>最近出现</th>
+                    <th>Level</th><th>Count</th><th>Error message (normalized)</th>
+                    <th>Users</th><th>Databases</th><th>First seen</th><th>Last seen</th>
                 </tr></thead><tbody>""")
             shown = group_items if limit is None else group_items[:limit]
             fmt = lambda t: t.strftime('%Y-%m-%d %H:%M:%S') if t else '-'
@@ -15835,14 +15835,14 @@ class ReportGenerator:
                 </tr>""")
             parts_html.append('</tbody></table>')
             if more_note and limit and len(group_items) > limit:
-                parts_html.append(f'<p class="error-more-note">仅显示前 {limit} 类,共 {len(group_items)} 类。</p>')
+                parts_html.append(f'<p class="error-more-note">Showing first {limit} of {len(group_items)} groups.</p>')
             return ''.join(parts_html)
 
         # ---- 2a. WARNING 聚合表(仅前 20 类,无明细) ----
         if warning_groups:
             parts.append(_render_group_table(
                 warning_groups,
-                title='WARNING 消息聚合(仅显示次数最多的前 20 类,无明细)',
+                title='WARNING message aggregation (top 20 by count, no detail)',
                 limit=20,
                 more_note=True,
             ))
@@ -15851,7 +15851,7 @@ class ReportGenerator:
         if critical_groups:
             parts.append(_render_group_table(
                 critical_groups,
-                title='ERROR / FATAL / PANIC 消息聚合(全部展示)',
+                title='ERROR / FATAL / PANIC message aggregation (all shown)',
                 limit=None,
                 more_note=False,
             ))
@@ -15884,17 +15884,17 @@ class ReportGenerator:
 
             parts.append(f"""
                 <div class="error-detail-header">
-                    <h3>错误明细(共 {len(sorted_all_errors)} 条 ERROR/FATAL/PANIC,按消息聚合后展示首尾 {len(first_last_rows)} 条)</h3>
+                    <h3>Error detail ({len(sorted_all_errors)} ERROR/FATAL/PANIC, grouped by message, first/last {len(first_last_rows)} shown)</h3>
                     <div class="search-box">
-                        <input type="text" id="error-search" placeholder="输入错误消息关键词过滤..." onkeydown="if(event.key==='Enter')applyErrorSearch()" />
-                        <button onclick="applyErrorSearch()" class="btn-confirm" title="确认搜索">✓</button>
-                        <button onclick="resetErrorSearch()" class="btn-reset" title="重置搜索">✕</button>
+                        <input type="text" id="error-search" placeholder="Filter by error message keyword..." onkeydown="if(event.key==='Enter')applyErrorSearch()" />
+                        <button onclick="applyErrorSearch()" class="btn-confirm" title="Apply search">✓</button>
+                        <button onclick="resetErrorSearch()" class="btn-reset" title="Reset search">✕</button>
                     </div>
                 </div>
                 <table class="error-table" id="error-detail-table">
                 <thead><tr>
-                    <th>#</th><th>时间</th><th>级别</th><th>用户</th>
-                    <th>数据库</th><th>客户端</th><th>错误消息</th>
+                    <th>#</th><th>Time</th><th>Level</th><th>User</th>
+                    <th>Database</th><th>Client</th><th>Error message</th>
                 </tr></thead><tbody>""")
             for idx, (seq_no, total, e) in enumerate(first_last_rows, 1):
                 t = e.get('time')
@@ -15902,9 +15902,9 @@ class ReportGenerator:
                 row_cls = ' class="error-row-hidden"' if idx > visible_rows else ''
                 msg_disp = html.escape(e['message'][:1000])
 
-                # 构建前后3行日志上下文,首行追加执行编号说明(仅在详情展开后可见)
-                seq_txt = f"第 {seq_no} 次 / 共 {total} 次执行"
-                context_parts = [f"[执行编号] {seq_txt}"]
+                # 构建前后3行日志上下文,首行追加执行编号说明(仅在Detail展开后可见)
+                seq_txt = f"#{seq_no} of {total} executions"
+                context_parts = [f"[exec no.] {seq_txt}"]
                 for line in e.get('context_before', [])[-3:]:
                     context_parts.append(f"  {line}")
                 context_parts.append(f"> {e.get('full_log', e['message'])}")
@@ -15924,8 +15924,8 @@ class ReportGenerator:
                     <td class="error-msg-cell">
                         <pre>{msg_disp}</pre>
                         <div class="error-action-btns">
-                            <button class="error-detail-btn" onclick="toggleErrorDetail(this)" title="查看前后3行日志">详情</button>
-                            <button class="copy-btn" data-copy-text="{context_copy}" onclick="copyToClipboard(this)" title="复制上下文日志">复制</button>
+                            <button class="error-detail-btn" onclick="toggleErrorDetail(this)" title="Show 3 lines before/after">Detail</button>
+                            <button class="copy-btn" data-copy-text="{context_copy}" onclick="copyToClipboard(this)" title="Copy context log">Copy</button>
                         </div>
                         <div class="error-context-detail" style="display:none;">
                             <pre>{context_escaped}</pre>
@@ -15941,8 +15941,8 @@ class ReportGenerator:
                         加载更多 (剩余 {total_rows - visible_rows} 行)
                     </button>
                     <button class="expand-btn" id="error-expand-all-btn" onclick="toggleAllErrorRows()">
-                        <span class="expand-text">展开全部</span>
-                        <span class="collapse-text" style="display:none;">收起全部</span>
+                        <span class="expand-text">Expand all</span>
+                        <span class="collapse-text" style="display:none;">Collapse all</span>
                     </button>
                 </div>""")
             else:
@@ -15952,8 +15952,8 @@ class ReportGenerator:
                         加载更多
                     </button>
                     <button class="expand-btn" id="error-expand-all-btn" onclick="toggleAllErrorRows()">
-                        <span class="expand-text">展开全部</span>
-                        <span class="collapse-text" style="display:none;">收起全部</span>
+                        <span class="expand-text">Expand all</span>
+                        <span class="collapse-text" style="display:none;">Collapse all</span>
                     </button>
                 </div>""")
         parts.append('</section>')
@@ -15962,7 +15962,7 @@ class ReportGenerator:
     @staticmethod
     def generate_deadlock_section(deadlock_list):
         """
-        生成死锁分析HTML片段（合并为单一“死锁分析”表格）
+        生成Deadlock AnalysisHTML片段（合并为单一“Deadlock Analysis”表格）
 
         Args:
             deadlock_list: 死锁记录列表，每项为包含以下字段的字典：
@@ -15982,20 +15982,20 @@ class ReportGenerator:
 
         html_parts = []
         html_parts.append(f"""
-        <h3 id="deadlock-ranking">死锁分析</h3>
+        <h3 id="deadlock-ranking">Deadlock Analysis</h3>
         <div class="top10-container deadlock-container">
             <div class="top10-section deadlock-section" data-sql-type="deadlock">
-                <h4>死锁会话汇总（死锁：{total_count} 次，显示最近10条）</h4>
+                <h4>Deadlock session summary ({total_count} deadlocks, last 10 shown)</h4>
                 <table class="top10-table deadlock-table">
                     <tr>
-                        <th>序号</th>
-                        <th>发生时间</th>
-                        <th>会话信息(sessionid/txid)</th>
+                        <th>#</th>
+                        <th>Time</th>
+                        <th>Session (sessionid/txid)</th>
                         <th>Unique ID</th>
-                        <th>SQL 摘要</th>
-                        <th>锁类型</th>
-                        <th>检测耗时 (ms)</th>
-                        <th>相关日志</th>
+                        <th>SQL summary</th>
+                        <th>Lock type</th>
+                        <th>Detection time (ms)</th>
+                        <th>Related log</th>
                     </tr>
         """)
 
@@ -16029,16 +16029,16 @@ class ReportGenerator:
                 uid_b_link = '-'
 
             # SQL 摘要（截断显示，hover 通过 title 显示完整，仅显示 SQL 语句）
-            sql_a_escaped = html.escape(sql_a, quote=True) if sql_a else '(未获取到 SQL)'
-            sql_b_escaped = html.escape(sql_b, quote=True) if sql_b else '(未获取到 SQL)'
+            sql_a_escaped = html.escape(sql_a, quote=True) if sql_a else '(SQL not captured)'
+            sql_b_escaped = html.escape(sql_b, quote=True) if sql_b else '(SQL not captured)'
             sql_a_full = html.escape(sql_a, quote=True) if sql_a else ''
             sql_b_full = html.escape(sql_b, quote=True) if sql_b else ''
             sql_a_short = html.escape(sql_a[:30], quote=True) if sql_a else ''
             sql_b_short = html.escape(sql_b[:30], quote=True) if sql_b else ''
             sql_a_display = f"{sql_a_short}..." if len(sql_a) > 30 else sql_a_short
             sql_b_display = f"{sql_b_short}..." if len(sql_b) > 30 else sql_b_short
-            sql_a_span = f'<span class="deadlock-sql-summary" title="{sql_a_full}"><strong>A:</strong> {sql_a_display}</span>' if sql_a else '<span class="deadlock-sql-summary"><strong>A:</strong> (未获取)</span>'
-            sql_b_span = f'<span class="deadlock-sql-summary" title="{sql_b_full}"><strong>B:</strong> {sql_b_display}</span>' if sql_b else '<span class="deadlock-sql-summary"><strong>B:</strong> (未获取)</span>'
+            sql_a_span = f'<span class="deadlock-sql-summary" title="{sql_a_full}"><strong>A:</strong> {sql_a_display}</span>' if sql_a else '<span class="deadlock-sql-summary"><strong>A:</strong> (n/a)</span>'
+            sql_b_span = f'<span class="deadlock-sql-summary" title="{sql_b_full}"><strong>B:</strong> {sql_b_display}</span>' if sql_b else '<span class="deadlock-sql-summary"><strong>B:</strong> (n/a)</span>'
             sql_summary = f'{sql_a_span}<br>{sql_b_span}'
 
             full_context_escaped = html.escape(full_context, quote=True)
@@ -16071,7 +16071,7 @@ class ReportGenerator:
                     )
                 lock_events_html = '<ul class="deadlock-lock-events">' + ''.join(lock_event_lines) + '</ul>'
             else:
-                lock_events_html = '<p class="no-lock-events">未找到相关锁事件</p>'
+                lock_events_html = '<p class="no-lock-events">no related lock events found</p>'
 
             html_parts.append(f"""
                         <tr class="lock-summary-row">
@@ -16092,8 +16092,8 @@ class ReportGenerator:
                             <td>{lock_duration_ms:.3f}</td>
                             <td class="sql-text-col">
                                 <div class="lock-action-btns">
-                                    <button class="lock-detail-btn" onclick="toggleLockDetail(this)" title="查看详情">详情</button>
-                                    <button class="copy-btn" data-copy-text="{full_context_copy}" onclick="copyToClipboard(this)" title="复制相关日志">复制</button>
+                                    <button class="lock-detail-btn" onclick="toggleLockDetail(this)" title="Show detail">Detail</button>
+                                    <button class="copy-btn" data-copy-text="{full_context_copy}" onclick="copyToClipboard(this)" title="Copy related log">Copy</button>
                                 </div>
                             </td>
                         </tr>
@@ -16101,19 +16101,19 @@ class ReportGenerator:
                             <td colspan="8">
                                 <div class="lock-event-detail-card">
                                     <div class="lock-detail-card-header">
-                                        <h5>死锁会话详情</h5>
+                                        <h5>Deadlock session detail</h5>
                                         <span class="lock-detail-card-meta">{timestamp}</span>
                                     </div>
                                     <div class="lock-detail-card-body">
-                                        <p><strong>会话 A SQL:</strong></p>
+                                        <p><strong>Session A SQL:</strong></p>
                                         <pre>{sql_a_escaped}</pre>
-                                        <p><strong>会话 B SQL:</strong></p>
+                                        <p><strong>Session B SQL:</strong></p>
                                         <pre>{sql_b_escaped}</pre>
-                                        <p><strong>死锁行前3行日志:</strong></p>
+                                        <p><strong>3 log lines before the deadlock row:</strong></p>
                                         <pre>{dl_context_escaped}</pre>
-                                        <p><strong>完整死锁上下文:</strong></p>
+                                        <p><strong>Full deadlock context:</strong></p>
                                         <pre>{full_context_escaped}</pre>
-                                        <p><strong>相关锁定事件时间线:</strong></p>
+                                        <p><strong>Related lock event timeline:</strong></p>
                                         {lock_events_html}
                                     </div>
                                 </div>
@@ -16161,10 +16161,10 @@ class ReportGenerator:
 
         html_parts = []
         html_parts.append("""
-        <h3 id="lock-chain-ranking">锁等待链分析</h3>
+        <h3 id="lock-chain-ranking">Lock Wait Chain Analysis</h3>
         <div class="top10-container lock-chain-container">
             <div class="top10-section lock-chain-section" data-sql-type="lock-chain">
-                <h4>按阻塞者事务分组（阻塞链：{} 条）</h4>
+                <h4>Grouped by blocker xact ({} chains)</h4>
         """.format(len(chain_events)))
 
         for holder_txid, events in sorted_groups:
@@ -16195,7 +16195,7 @@ class ReportGenerator:
             else:
                 holder_uid_link = '-'
 
-            # 阻塞者事务语句列表
+            # Blocker statement列表
             holder_sql_html = ''
             if holder_all_sql:
                 holder_sql_items = []
@@ -16205,14 +16205,14 @@ class ReportGenerator:
                         s_escaped += '...'
                     holder_sql_items.append(f"<li><pre>{s_escaped}</pre></li>")
                 if len(holder_all_sql) > 10:
-                    holder_sql_items.append(f"<li>... 共 {len(holder_all_sql)} 条语句</li>")
+                    holder_sql_items.append(f"<li>... {len(holder_all_sql)} statements in total</li>")
                 holder_sql_html = f'<ol class="holder-sql-list">{"".join(holder_sql_items)}</ol>'
             else:
-                holder_sql_html = '<p class="no-holder-sql">未捕获到阻塞者事务语句</p>'
+                holder_sql_html = '<p class="no-holder-sql">blocker statement not captured</p>'
 
             # 等待者列表：所有 acquired 事件（waiting 已合并）
-            # 仅"等待语句列"对同一 unique_id 去重:首条显示完整 SQL,后续用 "(略)" 代替。
-            # 详情卡片、上下文、复制按钮等其他列保持原行为,每条都生成。
+            # 仅"Waiting statement列"对同一 unique_id 去重:首条显示完整 SQL,后续用 "(omitted)" 代替。
+            # Detail卡片、上下文、Copy按钮等其他列保持原行为,每条都生成。
             seen_unique_ids = set()  # 记录已展示过完整 SQL 的 unique_id
             waiter_rows = []
             for ev in events_sorted:
@@ -16231,10 +16231,10 @@ class ReportGenerator:
                 else:
                     ev_uid_link = '-'
 
-                # 仅"等待语句列"对同一 unique_id 去重:首条完整 SQL,后续用 "(略)" 代替
+                # 仅"Waiting statement列"对同一 unique_id 去重:首条完整 SQL,后续用 "(omitted)" 代替
                 if ev_unique_id and ev_unique_id in seen_unique_ids:
-                    ev_sql = '<span class="sql-omitted">(略)</span>'
-                    ev_sql_title = '同 Unique ID 已在上方展示'
+                    ev_sql = '<span class="sql-omitted">(omitted)</span>'
+                    ev_sql_title = 'same Unique ID shown above'
                 else:
                     ev_sql = html.escape(str(ev.get('sql_text', ''))[:150], quote=True)
                     if len(ev.get('sql_text', '')) > 150:
@@ -16269,8 +16269,8 @@ class ReportGenerator:
                         <td class="sql-text-col" title="{ev_sql_title}">{ev_sql}</td>
                         <td>
                             <div class="lock-action-btns">
-                                <button class="lock-detail-btn" onclick="toggleLockDetail(this)" title="查看前后3行日志">详情</button>
-                                <button class="copy-btn" data-copy-text="{lc_context_copy}" onclick="copyToClipboard(this)" title="复制上下文日志">复制</button>
+                                <button class="lock-detail-btn" onclick="toggleLockDetail(this)" title="Show 3 lines before/after">Detail</button>
+                                <button class="copy-btn" data-copy-text="{lc_context_copy}" onclick="copyToClipboard(this)" title="Copy context log">Copy</button>
                             </div>
                         </td>
                     </tr>
@@ -16278,7 +16278,7 @@ class ReportGenerator:
                         <td colspan="8">
                             <div class="lock-event-detail-card">
                                 <div class="lock-detail-card-header">
-                                    <h5>锁等待事件详情</h5>
+                                    <h5>Lock wait event detail</h5>
                                     <span class="lock-detail-card-meta">{ev_timestamp}</span>
                                 </div>
                                 <div class="lock-detail-card-body">
@@ -16293,28 +16293,28 @@ class ReportGenerator:
             html_parts.append(f"""
                 <div class="lock-chain-group">
                     <div class="lock-chain-header">
-                        <span class="lock-chain-holder-badge">阻塞者事务</span>
+                        <span class="lock-chain-holder-badge">Blocker xact</span>
                         <strong>{holder_txid_display}</strong>
                         <span class="lock-chain-session">{html.escape(holder_session, quote=True)}</span>
                         <span class="lock-chain-uid">{holder_uid_link}</span>
                     </div>
                     <div class="lock-chain-body">
                         <div class="lock-chain-holder-sql">
-                            <h5>阻塞者事务语句</h5>
+                            <h5>Blocker statement</h5>
                             {holder_sql_html}
                         </div>
                         <div class="lock-chain-waiters">
-                            <h5>等待者列表（{len(events_sorted)} 个）</h5>
+                            <h5>Waiters ({len(events_sorted)})</h5>
                             <table class="lock-chain-waiter-table">
                                 <tr>
-                                    <th>时间</th>
-                                    <th>会话信息(sessionid/txid)</th>
-                                    <th>锁类型</th>
-                                    <th>锁目标</th>
-                                    <th>等待耗时(s)</th>
+                                    <th>Time</th>
+                                    <th>Session (sessionid/txid)</th>
+                                    <th>Lock type</th>
+                                    <th>Lock target</th>
+                                    <th>Wait time (s)</th>
                                     <th>Unique ID</th>
-                                    <th>等待语句</th>
-                                    <th>相关日志</th>
+                                    <th>Waiting statement</th>
+                                    <th>Related log</th>
                                 </tr>
                                 {''.join(waiter_rows)}
                             </table>
@@ -16333,7 +16333,7 @@ class ReportGenerator:
     @staticmethod
     def generate_lock_event_section(lock_event_list):
         """
-        生成 Top 10 锁定耗时情况 HTML 片段
+        生成 Top 10 Lock Wait Time HTML 片段
 
         Args:
             lock_event_list: 锁事件记录列表，每项包含以下字段：
@@ -16414,21 +16414,21 @@ class ReportGenerator:
 
         html_parts = []
         html_parts.append(f"""
-        <h3 id="lock-event-ranking">Top 10 锁定耗时情况</h3>
+        <h3 id="lock-event-ranking">Top 10 Lock Wait Time</h3>
         <div class="top10-container lock-event-container">
             <div class="top10-section lock-event-section" data-sql-type="lock">
-                <h4>按锁定时间排序（锁定：{total_count} 次）</h4>
+                <h4>Sort by lock time ({total_count} locks)</h4>
                 <table class="top10-table lock-event-table">
                     <tr>
-                        <th>排名</th>
-                        <th>发生时间</th>
-                        <th>会话信息(sessionid/txid)</th>
+                        <th>Rank</th>
+                        <th>Time</th>
+                        <th>Session (sessionid/txid)</th>
                         <th>Unique ID</th>
-                        <th>SQL / 锁目标</th>
-                        <th>等待锁类型</th>
-                        <th>锁定耗时 (s)</th>
-                        <th>连接标识</th>
-                        <th>相关日志</th>
+                        <th>SQL / lock target</th>
+                        <th>Waited lock type</th>
+                        <th>Lock time (s)</th>
+                        <th>Connection</th>
+                        <th>Related log</th>
                     </tr>
         """)
 
@@ -16444,9 +16444,9 @@ class ReportGenerator:
             sql_text = item.get('sql_text', '')
             unique_id = str(item.get('unique_id', '')).strip()
 
-            # 生成跳转锚点 id：与慢SQL 详情中"锁等待详情"的跳转链接保持一致
+            # 生成跳转锚点 id：与慢SQL Detail中"锁等待Detail"的跳转链接保持一致
             # 用 timestamp + lock_type + target 作为唯一标识 seed
-            # 不用 wait_time_ms:Top10 表侧 waiting+acquired 会合并求和,与慢SQL详情侧单条值不一致
+            # 不用 wait_time_ms:Top10 表侧 waiting+acquired 会合并求和,与慢SQLDetail侧单条值不一致
             _le_ts = str(item.get('timestamp', ''))
             _le_lt = str(item.get('lock_type', ''))
             _le_tg = str(item.get('target', ''))
@@ -16508,8 +16508,8 @@ class ReportGenerator:
                             <td class="sql-text-col" title="{connection_key}">{connection_key}</td>
                             <td>
                                 <div class="lock-action-btns">
-                                    <button class="lock-detail-btn" onclick="toggleLockDetail(this)" title="查看前后3行日志">详情</button>
-                                    <button class="copy-btn" data-copy-text="{le_context_copy}" onclick="copyToClipboard(this)" title="复制上下文日志">复制</button>
+                                    <button class="lock-detail-btn" onclick="toggleLockDetail(this)" title="Show 3 lines before/after">Detail</button>
+                                    <button class="copy-btn" data-copy-text="{le_context_copy}" onclick="copyToClipboard(this)" title="Copy context log">Copy</button>
                                 </div>
                             </td>
                         </tr>
@@ -16517,7 +16517,7 @@ class ReportGenerator:
                             <td colspan="9">
                                 <div class="lock-event-detail-card">
                                     <div class="lock-detail-card-header">
-                                        <h5>锁事件详情</h5>
+                                        <h5>Lock event detail</h5>
                                         <span class="lock-detail-card-meta">{timestamp}</span>
                                     </div>
                                     <div class="lock-detail-card-body">
@@ -16644,13 +16644,13 @@ class ReportGenerator:
         
         # 检查时间范围是否有效
         if overall_min_time is None or overall_max_time is None:
-            print("警告: 时间范围无效，无法生成时段分析")
+            print("WARNING: invalid time range, time-of-day analysis skipped")
             return {'by_minute': {'show': False, 'html': '', 'chart_data': {}},
                    'by_10minute': {'show': False, 'html': '', 'chart_data': {}},
                    'by_hour': {'show': False, 'html': '', 'chart_data': {}},
                    'by_day': {'show': False, 'html': '', 'chart_data': {}}}
         
-        # 初始化维度配置（复制基础配置）
+        # 初始化维度配置（Copy基础配置）
         dimensions = [dim.copy() for dim in ReportGenerator.TIME_DIMENSIONS]
         
         # 根据 diff_interval 动态添加额外的维度
@@ -16741,9 +16741,9 @@ class ReportGenerator:
                                 diff_dim_data[time_key][uid] += 1
                         diff_data[dim['id']] = diff_dim_data
                 
-                print(f"找到对比数据，时间范围: {diff_start.strftime('%Y-%m-%d %H:%M:%S')} 至 {diff_end.strftime('%Y-%m-%d %H:%M:%S')}，对比间隔: {diff_interval_str}")
+                print(f"Diff data found, range {diff_start.strftime('%Y-%m-%d %H:%M:%S')} to {diff_end.strftime('%Y-%m-%d %H:%M:%S')}, interval {diff_interval_str}")
             else:
-                print(f"未找到对比时间范围 {diff_start.strftime('%Y-%m-%d %H:%M:%S')} 至 {diff_end.strftime('%Y-%m-%d %H:%M:%S')} 内的数据，不生成对比数据，对比间隔: {diff_interval_str}")
+                print(f"No data in diff range {diff_start.strftime('%Y-%m-%d %H:%M:%S')} to {diff_end.strftime('%Y-%m-%d %H:%M:%S')}, diff section skipped, interval {diff_interval_str}")
         
         # 生成各维度HTML和图表数据
         for dim in dimensions:
@@ -16778,14 +16778,14 @@ class ReportGenerator:
                 combined_html = f'''
                 <div class="time-dimension" id="dim-{dim['id']}">
                     <div style="display: flex; justify-content: space-between; align-items: center;">
-                        <h3>{dim['name']}维度统计 (Top 10)</h3>
-                        <a href="#top10-ranking" class="back-to-top" title="返回Top 10排名" onclick="collapseAllDetails()">↑ Top 10</a>
+                        <h3>{dim['name']} dimension stats (Top 10)</h3>
+                        <a href="#top10-ranking" class="back-to-top" title="Back to Top 10" onclick="collapseAllDetails()">↑ Top 10</a>
                     </div>
                     <div class="time-range-note">
-                        <span>统计时间范围: {overall_min_time.strftime('%Y-%m-%d %H:%M:%S')} 至 {overall_max_time.strftime('%Y-%m-%d %H:%M:%S')}</span>
+                        <span>Stats range: {overall_min_time.strftime('%Y-%m-%d %H:%M:%S')} to {overall_max_time.strftime('%Y-%m-%d %H:%M:%S')}</span>
                         <button class="expand-btn expand-btn-all-inline" onclick="expandPeriodDimensionAll('{dim['id']}', this)" style="display:none;">
-                            <span class="expand-text">展开全部</span>
-                            <span class="collapse-text" style="display:none;">收起全部</span>
+                            <span class="expand-text">Expand all</span>
+                            <span class="collapse-text" style="display:none;">Collapse all</span>
                         </button>
                     </div>
                     <div class="period-sql-type-container" data-sql-type="dml">
@@ -16991,14 +16991,14 @@ class ReportGenerator:
             html_parts.append(f"""
             <div class="time-dimension" id="dim-{dim_id}">
                 <div style="display: flex; justify-content: space-between; align-items: center;">
-                    <h3>{dim_name}维度统计 (Top 10)</h3>
-                    <a href="#top10-ranking" class="back-to-top" title="返回Top 10排名" onclick="collapseAllDetails()">↑ Top 10</a>
+                    <h3>{dim_name} dimension stats (Top 10)</h3>
+                    <a href="#top10-ranking" class="back-to-top" title="Back to Top 10" onclick="collapseAllDetails()">↑ Top 10</a>
                 </div>
                 <div class="time-range-note">
-                    <span>统计时间范围: {start_dt.strftime('%Y-%m-%d %H:%M:%S')} 至 {end_dt.strftime('%Y-%m-%d %H:%M:%S')}</span>
+                    <span>Stats range: {start_dt.strftime('%Y-%m-%d %H:%M:%S')} to {end_dt.strftime('%Y-%m-%d %H:%M:%S')}</span>
                     <button class="expand-btn expand-btn-all-inline" onclick="expandPeriodDimensionAll('{dim_id}', this)" style="display:none;">
-                        <span class="expand-text">展开全部</span>
-                        <span class="collapse-text" style="display:none;">收起全部</span>
+                        <span class="expand-text">Expand all</span>
+                        <span class="collapse-text" style="display:none;">Collapse all</span>
                     </button>
                 </div>
             """)
@@ -17077,7 +17077,7 @@ class ReportGenerator:
                 html_parts.append(f"""
                 <div class="period-table-cell">
                 <table class="period-table" id="{table_id}" data-dim-id="{dim_id}">
-                    <tr><th>当前时间</th><th>对比时间</th><th>Unique ID</th><th>当前次数</th><th>对比次数</th><th>差异</th></tr>
+                    <tr><th>Current time</th><th>Diff time</th><th>Unique ID</th><th>Current count</th><th>Diff count</th><th>Delta</th></tr>
                 """)
                 
                 row_count = 0
@@ -17155,7 +17155,7 @@ class ReportGenerator:
                 html_parts.append(f"""
                 <div class="period-table-cell">
                 <table class="period-table" id="{table_id}" data-dim-id="{dim_id}">
-                    <tr><th>时间段</th><th>Unique ID</th><th>执行次数</th></tr>
+                    <tr><th>Time bucket</th><th>Unique ID</th><th>Calls</th></tr>
                 """)
                 
                 row_count = 0
@@ -17256,12 +17256,12 @@ class ReportGenerator:
         _record_size('lock_chain_section', lock_chain_section)
         _record_size('input_lock_chain_list', f'count={len(lock_chain_list)}', is_html=False)
 
-        # 3. 锁/死锁详情分析部分（独立栏目，无内容时隐藏）
+        # 3. Lock / Deadlock Detail Analysis部分（独立栏目，无内容时隐藏）
         has_lock_content = deadlock_section or lock_event_section or lock_chain_section
         if has_lock_content:
             lock_section_html = f"""
             <section id="lock-section">
-                <h2>锁/死锁详情分析</h2>
+                <h2>Lock / Deadlock Detail Analysis</h2>
                 {lock_event_section}
                 {lock_chain_section}
                 {deadlock_section}
@@ -17270,8 +17270,8 @@ class ReportGenerator:
         else:
             lock_section_html = ''
 
-        # 1. 构建导航栏（无锁定内容时不显示锁详情分析链接）
-        lock_nav_link = '<a href="#lock-section">🔒 锁详情分析</a>' if has_lock_content else ''
+        # 1. 构建导航栏（无锁定内容时不显示锁Detail分析链接）
+        lock_nav_link = '<a href="#lock-section">Lock Detail Analysis</a>' if has_lock_content else ''
         error_section_html = ReportGenerator.generate_error_section(error_list, statement_filter)
         _record_size('error_section', error_section_html)
         _record_size('input_error_list', f'count={len(error_list)}', is_html=False)
@@ -17288,19 +17288,19 @@ class ReportGenerator:
             pass
         nav_html = f"""
         <div id="report-nav">
-            <h2>慢查询分析报告导航</h2>
+            <h2>Slow Query Analysis Report Navigation</h2>
             <div class="nav-links">
-                <a href="#summary-section">📊 SQL汇总统计</a>
-                <a href="#error-section">⚠️ 错误日志分析</a>
+                <a href="#summary-section">SQL Summary Statistics</a>
+                <a href="#error-section">Error Log Analysis</a>
                 {lock_nav_link}
-                <a href="#time-analysis-section">⏰ SQL分时段分析</a>
-                <a href="#detail-section">📋 SQL详情列表</a>
+                <a href="#time-analysis-section">SQL Time-of-Day Analysis</a>
+                <a href="#detail-section">SQL Detail List</a>
             </div>
             <div class="report-meta">
-                <strong>分析时间范围：</strong>{overall_min_time.strftime('%Y-%m-%d %H:%M:%S') if hasattr(overall_min_time, 'strftime') else str(overall_min_time)} 至 {overall_max_time.strftime('%Y-%m-%d %H:%M:%S') if hasattr(overall_max_time, 'strftime') else str(overall_max_time)} ｜
-                <strong>总文件大小：</strong>{total_size_mb_all:.2f} MB ｜
-                <strong>总记录数：</strong>{len(all_total_list)} 条 ｜
-                <strong>总耗时：</strong>{total_elapsed_seconds_all} 秒
+                <strong>Analysis time range: </strong>{overall_min_time.strftime('%Y-%m-%d %H:%M:%S') if hasattr(overall_min_time, 'strftime') else str(overall_min_time)} 至 {overall_max_time.strftime('%Y-%m-%d %H:%M:%S') if hasattr(overall_max_time, 'strftime') else str(overall_max_time)} ｜
+                <strong>Total file size: </strong>{total_size_mb_all:.2f} MB ｜
+                <strong>Total records: </strong>{len(all_total_list)} 条 ｜
+                <strong>Total elapsed: </strong>{total_elapsed_seconds_all} 秒
             </div>
         </div>
         """
@@ -17317,7 +17317,7 @@ class ReportGenerator:
         _record_size('summary_section(总)', summary_section)
         _record_size('summary_info.html', summary_info.get('html', ''))
 
-        # 锁/死锁详情分析部分(组合后体积)
+        # Lock / Deadlock Detail Analysis部分(组合后体积)
         try:
             _lock_section = lock_section_html if 'lock_section_html' in dir() else ''
             _record_size('lock_section_html', _lock_section)
@@ -17327,11 +17327,11 @@ class ReportGenerator:
         # 4. 分时段分析部分（动态处理所有维度）
         time_analysis_html_parts = ['''<section id="time-analysis-section">
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
-                <h2 style="margin: 0;">SQL分时段分析</h2>
+                <h2 style="margin: 0;">SQL Time-of-Day Analysis</h2>
                 <div class="search-box">
-                    <input type="text" id="unique-id-search" placeholder="输入 Unique ID 过滤..." onkeydown="if(event.key==='Enter')applySearch()" />
-                    <button onclick="applySearch()" class="btn-confirm" title="确认搜索">✓</button>
-                    <button onclick="clearSearch()" class="btn-reset" title="清除搜索">×</button>
+                    <input type="text" id="unique-id-search" placeholder="Filter by Unique ID..." onkeydown="if(event.key==='Enter')applySearch()" />
+                    <button onclick="applySearch()" class="btn-confirm" title="Apply search">✓</button>
+                    <button onclick="clearSearch()" class="btn-reset" title="Clear search">×</button>
                 </div>
             </div>
         ''']
@@ -17357,11 +17357,11 @@ class ReportGenerator:
                 _dim_html = time_analysis_info[_key].get('html', '')
                 _record_size(f'time_analysis[{_key}]', _dim_html)
         
-        # 4. 详情部分
+        # 4. Detail部分
         detail_header = ('<section id="detail-section">'
                          '<div style="display: flex; justify-content: space-between; align-items: center;">'
-                         '<h2>SQL详情列表</h2>'
-                         '<a href="#top10-ranking" class="back-to-top" title="返回Top 10排名" onclick="collapseAllDetails()">↑ Top 10</a>'
+                         '<h2>SQL Detail List</h2>'
+                         '<a href="#top10-ranking" class="back-to-top" title="Back to Top 10" onclick="collapseAllDetails()">↑ Top 10</a>'
                          '</div>')
         detail_html_parts = [detail_header + '<table class="detail-table"><thead>']
         detail_html_parts.append("""
@@ -17370,10 +17370,10 @@ class ReportGenerator:
             <th>IP<span class="col-divider"></span></th>
             <th>Database<span class="col-divider"></span></th>
             <th>User<span class="col-divider"></span></th>
-            <th id="query-text-header">Query Text<span class="col-resize-handle" title="双击切换列宽" ondblclick="toggleQueryTextColumn()"></span></th>
+            <th id="query-text-header">Query Text<span class="col-resize-handle" title="Double-click to toggle column width" ondblclick="toggleQueryTextColumn()"></span></th>
             <th>Duration (s)<span class="col-divider"></span></th>
             <th>Calls<span class="col-divider"></span></th>
-            <th id="detail-header">详细执行语句<span class="col-resize-handle" title="双击切换列宽" ondblclick="toggleDetailColumn()"></span></th>
+            <th id="detail-header">Full statements<span class="col-resize-handle" title="Double-click to toggle column width" ondblclick="toggleDetailColumn()"></span></th>
         </tr>
         """)
         detail_html_parts.append('</thead><tbody>')
@@ -17385,12 +17385,12 @@ class ReportGenerator:
             # 进度日志:每 50 行输出一次,以及第 1 行(让用户尽早看到进度)
             if idx == 0 or (idx + 1) % 50 == 0:
                 _elapsed = _time_mod.time() - _detail_t0
-                print(f"[进度] 慢SQL详情生成: {idx + 1}/{_total_detail_rows} 行, 耗时 {_elapsed:.1f}s", file=sys.stderr)
+                print(f"[progress] slow SQL detail rows: {idx + 1}/{_total_detail_rows}, {_elapsed:.1f}s", file=sys.stderr)
             row_class_base = ""
             avg_duration = stat['avg_duration']
             for min_t, max_t, color, rname in ReportGenerator.TIME_RANGES:
                 if min_t <= avg_duration < max_t:
-                    row_class_base = f"range-{rname.replace('以上', 'above').replace('-', 'to').replace('s', '').replace('以下', 'below')}"
+                    row_class_base = f"range-{rname.replace('+', 'plus').replace('<', 'lt').replace('-', 'to').replace('s', '')}"
                     break
             
             row_visibility_class = "" if idx < visible_rows else "detail-row-hidden"
@@ -17399,7 +17399,7 @@ class ReportGenerator:
             # URL 安全标识提前定义：超长 SQL 的下载文件名、行 id 都需要用到
             unique_id_safe = ReportGenerator._make_id_safe(unique_id)
             
-            # 生成详细执行语句HTML：超长 SQL 仅截断展示，完整内容以 Base64 内嵌进
+            # 生成Full statementsHTML：超长 SQL 仅截断展示，完整内容以 Base64 内嵌进
             # data 属性，点击按钮时由前端解码并通过 Blob 触发 txt 下载；避免数百万字符
             # 的 SQL 被 normalize/escape/json.dumps 反复处理导致卡顿
             # 注意:HTML 展示截断阈值 MAX_HTML_INLINE_SQL_LEN(默认 1000)仅控制页面展示体积,
@@ -17411,14 +17411,14 @@ class ReportGenerator:
             is_min_long = len(min_full) > MAX_HTML_INLINE_SQL_LEN
 
             if is_max_long:
-                max_q_disp = normalize_sql_for_display(max_full[:MAX_HTML_INLINE_SQL_LEN]) + "\n... [SQL 过长已截断，点击按钮下载 .gz 压缩包]"
+                max_q_disp = normalize_sql_for_display(max_full[:MAX_HTML_INLINE_SQL_LEN]) + "\n... [SQL too long, truncated; download the .gz archive]"
                 max_b64 = _gz_b64(max_full)
             else:
                 max_q_disp = normalize_sql_for_display(max_full)
                 max_b64 = ''
 
             if is_min_long:
-                min_q_disp = normalize_sql_for_display(min_full[:MAX_HTML_INLINE_SQL_LEN]) + "\n... [SQL 过长已截断，点击按钮下载 .gz 压缩包]"
+                min_q_disp = normalize_sql_for_display(min_full[:MAX_HTML_INLINE_SQL_LEN]) + "\n... [SQL too long, truncated; download the .gz archive]"
                 min_b64 = _gz_b64(min_full)
             else:
                 min_q_disp = normalize_sql_for_display(min_full)
@@ -17448,19 +17448,19 @@ class ReportGenerator:
             # 列表 Query Text 列：截断展示(独立阈值控制 HTML 体积)
             qry_text_cell = html.escape(qry_text_full[:MAX_HTML_INLINE_SQL_LEN], quote=True)
             if is_qry_long:
-                qry_text_cell += ' ...[截断]'
+                qry_text_cell += ' ...[truncated]'
 
             if is_max_long or is_qry_long:
-                # 超长：复制按钮→下载完整 SQL(gzip 压缩)；生成 Prepared→下载预先生成的完整 prepared 文本(gzip 压缩)
-                max_copy_btn = f"<button class='copy-btn' data-sql-b64=\"{max_b64}\" data-filename=\"sql_{unique_id_safe}_max.txt.gz\" onclick=\"downloadEmbeddedText(this)\">📥 下载完整SQL(.gz)</button>"
+                # 超长：Copy按钮→下载完整 SQL(gzip 压缩)；Download Prepared→下载预先生成的完整 prepared 文本(gzip 压缩)
+                max_copy_btn = f"<button class='copy-btn' data-sql-b64=\"{max_b64}\" data-filename=\"sql_{unique_id_safe}_max.txt.gz\" onclick=\"downloadEmbeddedText(this)\">Download full SQL (.gz)</button>"
                 max_prepared_text = _build_prepared_text(qry_text_full, max_execute_stmt, stat.get('qry_params', ''))
-                max_prepared_btn = f"<button class='copy-btn' data-sql-b64=\"{_gz_b64(max_prepared_text)}\" data-filename=\"prepared_{unique_id_safe}_max.txt.gz\" onclick=\"downloadEmbeddedText(this)\">📥 下载 Prepared(.gz)</button>"
+                max_prepared_btn = f"<button class='copy-btn' data-sql-b64=\"{_gz_b64(max_prepared_text)}\" data-filename=\"prepared_{unique_id_safe}_max.txt.gz\" onclick=\"downloadEmbeddedText(this)\">Download Prepared (.gz)</button>"
             else:
                 qry_text_html = html.escape(qry_text_full, quote=True)
                 max_query_copy = html.escape(json.dumps(max_full, ensure_ascii=False), quote=True)
-                max_copy_btn = f"<button class='copy-btn' data-copy-text=\"{max_query_copy}\" onclick=\"copyToClipboard(this)\">复制</button>"
+                max_copy_btn = f"<button class='copy-btn' data-copy-text=\"{max_query_copy}\" onclick=\"copyToClipboard(this)\">Copy</button>"
                 max_param_types_html = html.escape(_prepare_param_types(qry_text_full, stat.get('qry_params', '')), quote=True)
-                max_prepared_btn = f"<button class='copy-btn' data-query-template=\"{qry_text_html}\" data-param-types=\"{max_param_types_html}\" data-execute-stmt=\"{max_execute_html}\" onclick=\"generatePreparedStatement(this)\">生成 Prepared</button>"
+                max_prepared_btn = f"<button class='copy-btn' data-query-template=\"{qry_text_html}\" data-param-types=\"{max_param_types_html}\" data-execute-stmt=\"{max_execute_html}\" onclick=\"generatePreparedStatement(this)\">Download Prepared</button>"
 
             # sqlhc 下载按钮：有数据（--detail）才生成，无数据则隐藏
             sqlhc_content = sqlhc_data.get(str(unique_id).strip(), '')
@@ -17471,15 +17471,15 @@ class ReportGenerator:
                 sqlhc_btn = ''
 
             if is_min_long or is_qry_long:
-                min_copy_btn = f"<button class='copy-btn' data-sql-b64=\"{min_b64}\" data-filename=\"sql_{unique_id_safe}_min.txt.gz\" onclick=\"downloadEmbeddedText(this)\">📥 下载完整SQL(.gz)</button>"
+                min_copy_btn = f"<button class='copy-btn' data-sql-b64=\"{min_b64}\" data-filename=\"sql_{unique_id_safe}_min.txt.gz\" onclick=\"downloadEmbeddedText(this)\">Download full SQL (.gz)</button>"
                 min_prepared_text = _build_prepared_text(qry_text_full, min_execute_stmt, stat.get('qry_params', ''))
-                min_prepared_btn = f"<button class='copy-btn' data-sql-b64=\"{_gz_b64(min_prepared_text)}\" data-filename=\"prepared_{unique_id_safe}_min.txt.gz\" onclick=\"downloadEmbeddedText(this)\">📥 下载 Prepared(.gz)</button>"
+                min_prepared_btn = f"<button class='copy-btn' data-sql-b64=\"{_gz_b64(min_prepared_text)}\" data-filename=\"prepared_{unique_id_safe}_min.txt.gz\" onclick=\"downloadEmbeddedText(this)\">Download Prepared (.gz)</button>"
             else:
                 qry_text_html = html.escape(qry_text_full, quote=True)
                 min_query_copy = html.escape(json.dumps(min_full, ensure_ascii=False), quote=True)
-                min_copy_btn = f"<button class='copy-btn' data-copy-text=\"{min_query_copy}\" onclick=\"copyToClipboard(this)\">复制</button>"
+                min_copy_btn = f"<button class='copy-btn' data-copy-text=\"{min_query_copy}\" onclick=\"copyToClipboard(this)\">Copy</button>"
                 min_param_types_html = html.escape(_prepare_param_types(qry_text_full, stat.get('qry_params', '')), quote=True)
-                min_prepared_btn = f"<button class='copy-btn' data-query-template=\"{qry_text_html}\" data-param-types=\"{min_param_types_html}\" data-execute-stmt=\"{min_execute_html}\" onclick=\"generatePreparedStatement(this)\">生成 Prepared</button>"
+                min_prepared_btn = f"<button class='copy-btn' data-query-template=\"{qry_text_html}\" data-param-types=\"{min_param_types_html}\" data-execute-stmt=\"{min_execute_html}\" onclick=\"generatePreparedStatement(this)\">Download Prepared</button>"
             
             # 格式化时间戳为字符串
             max_times_str = stat['max_times'].strftime('%Y-%m-%d %H:%M:%S.%f')[:-3] if hasattr(stat['max_times'], 'strftime') else str(stat['max_times'])
@@ -17496,19 +17496,19 @@ class ReportGenerator:
             max_lock_wait_str = ""
             if max_lock_wait_time_ms > 0:
                 lock_wait_sec = max_lock_wait_time_ms / 1000.0
-                max_lock_wait_str = f" (其中锁耗时: {lock_wait_sec:.3f}s)"
+                max_lock_wait_str = f" (lock time: {lock_wait_sec:.3f}s)"
             
             # min sql 锁耗时字符串
             min_lock_wait_str = ""
             if min_lock_wait_time_ms > 0:
                 lock_wait_sec = min_lock_wait_time_ms / 1000.0
-                min_lock_wait_str = f" (其中锁耗时: {lock_wait_sec:.3f}s)"
+                min_lock_wait_str = f" (lock time: {lock_wait_sec:.3f}s)"
             
-            # max sql 锁等待详情
+            # max sql 锁等待Detail
             # 注意:log_text 可能极长(几十 KB),必须截断;lock_events 列表本身也可能极长
             # (一条慢 SQL 期间可能产生成千上万条锁事件),必须限制展示数量,否则 HTML 会爆炸
             MAX_LOCK_LOG_TEXT_LEN = 500
-            MAX_LOCK_EVENTS_DISPLAY = 50  # 每条慢 SQL 的详情卡片最多展示 50 条锁事件
+            MAX_LOCK_EVENTS_DISPLAY = 50  # 每条慢 SQL 的Detail卡片最多展示 50 条锁事件
             max_lock_events_html = ""
             if max_lock_events:
                 # 按等待耗时降序取 Top N,保留最有排查价值的锁事件
@@ -17520,31 +17520,31 @@ class ReportGenerator:
                 _truncated_count = len(max_lock_events) - len(_sorted_lock_events)
                 lock_events_lines = []
                 if _truncated_count > 0:
-                    lock_events_lines.append(f"  [共 {len(max_lock_events)} 条锁事件,按等待耗时降序仅展示 Top {MAX_LOCK_EVENTS_DISPLAY} 条]")
+                    lock_events_lines.append(f"  [{len(max_lock_events)} lock events, top {MAX_LOCK_EVENTS_DISPLAY} shown]")
                 for event in _sorted_lock_events:
-                    event_type = "等待" if event['type'] == 'waiting' else "获取"
+                    event_type = "waiting" if event['type'] == 'waiting' else "acquired"
                     lock_events_lines.append(f"  - {event_type} {event['lock_type']}: {event['wait_time_ms']:.3f}ms")
                     # 生成跳转锚点 id：用 timestamp + lock_type + target 唯一标识,与 Top10 锁事件表行 id 对应
-                    # 不用 wait_time_ms:Top10 表侧 waiting+acquired 会合并求和,与慢SQL详情侧单条值不一致
+                    # 不用 wait_time_ms:Top10 表侧 waiting+acquired 会合并求和,与慢SQLDetail侧单条值不一致
                     # timestamp 需归一化到合并组起始(waiting)时间,否则 acquired 链接找不到对应行
                     _ev_ts = ReportGenerator._resolve_lock_anchor_ts(event, max_lock_events)
                     _ev_lt = str(event.get('lock_type', ''))
                     _ev_tg = str(event.get('target', ''))
                     _anchor_seed = f"{_ev_ts}_{_ev_lt}_{_ev_tg}"
                     _anchor_id = f"lock-anchor-{ReportGenerator._make_id_safe(_anchor_seed)}"
-                    lock_events_lines.append(f'    <a href="#{_anchor_id}" class="lock-jump-link" onclick="jumpToLockDetail(\'{_anchor_id}\', event)">🔍 查看锁详情</a>')
+                    lock_events_lines.append(f'    <a href="#{_anchor_id}" class="lock-jump-link" onclick="jumpToLockDetail(\'{_anchor_id}\', event)">View lock detail</a>')
                     _log_text = event.get('log_text') or ''
                     if _log_text:
                         if len(_log_text) > MAX_LOCK_LOG_TEXT_LEN:
-                            lock_events_lines.append(f"    日志: {_log_text[:MAX_LOCK_LOG_TEXT_LEN]} ...[截断,共 {len(_log_text)} 字符]")
+                            lock_events_lines.append(f"    log: {_log_text[:MAX_LOCK_LOG_TEXT_LEN]} ...[truncated, {len(_log_text)} chars total]")
                         else:
-                            lock_events_lines.append(f"    日志: {_log_text}")
+                            lock_events_lines.append(f"    log: {_log_text}")
                 max_lock_events_html = f"""
-                        <p><strong>锁等待详情:</strong></p>
+                        <p><strong>Lock wait detail:</strong></p>
                         <pre style="font-size: 13px; background: #f8f9fa; padding: 8px; border-radius: 4px;">{chr(10).join(lock_events_lines)}</pre>
                 """
 
-            # min sql 锁等待详情
+            # min sql 锁等待Detail
             min_lock_events_html = ""
             if min_lock_events:
                 _sorted_lock_events = sorted(
@@ -17555,34 +17555,34 @@ class ReportGenerator:
                 _truncated_count = len(min_lock_events) - len(_sorted_lock_events)
                 lock_events_lines = []
                 if _truncated_count > 0:
-                    lock_events_lines.append(f"  [共 {len(min_lock_events)} 条锁事件,按等待耗时降序仅展示 Top {MAX_LOCK_EVENTS_DISPLAY} 条]")
+                    lock_events_lines.append(f"  [{len(min_lock_events)} lock events, top {MAX_LOCK_EVENTS_DISPLAY} shown]")
                 for event in _sorted_lock_events:
-                    event_type = "等待" if event['type'] == 'waiting' else "获取"
+                    event_type = "waiting" if event['type'] == 'waiting' else "acquired"
                     lock_events_lines.append(f"  - {event_type} {event['lock_type']}: {event['wait_time_ms']:.3f}ms")
                     # 生成跳转锚点 id：用 timestamp + lock_type + target 唯一标识,与 Top10 锁事件表行 id 对应
-                    # 不用 wait_time_ms:Top10 表侧 waiting+acquired 会合并求和,与慢SQL详情侧单条值不一致
+                    # 不用 wait_time_ms:Top10 表侧 waiting+acquired 会合并求和,与慢SQLDetail侧单条值不一致
                     # timestamp 需归一化到合并组起始(waiting)时间,否则 acquired 链接找不到对应行
                     _ev_ts = ReportGenerator._resolve_lock_anchor_ts(event, min_lock_events)
                     _ev_lt = str(event.get('lock_type', ''))
                     _ev_tg = str(event.get('target', ''))
                     _anchor_seed = f"{_ev_ts}_{_ev_lt}_{_ev_tg}"
                     _anchor_id = f"lock-anchor-{ReportGenerator._make_id_safe(_anchor_seed)}"
-                    lock_events_lines.append(f'    <a href="#{_anchor_id}" class="lock-jump-link" onclick="jumpToLockDetail(\'{_anchor_id}\', event)">🔍 查看锁详情</a>')
+                    lock_events_lines.append(f'    <a href="#{_anchor_id}" class="lock-jump-link" onclick="jumpToLockDetail(\'{_anchor_id}\', event)">View lock detail</a>')
                     _log_text = event.get('log_text') or ''
                     if _log_text:
                         if len(_log_text) > MAX_LOCK_LOG_TEXT_LEN:
-                            lock_events_lines.append(f"    日志: {_log_text[:MAX_LOCK_LOG_TEXT_LEN]} ...[截断,共 {len(_log_text)} 字符]")
+                            lock_events_lines.append(f"    log: {_log_text[:MAX_LOCK_LOG_TEXT_LEN]} ...[truncated, {len(_log_text)} chars total]")
                         else:
-                            lock_events_lines.append(f"    日志: {_log_text}")
+                            lock_events_lines.append(f"    log: {_log_text}")
                 min_lock_events_html = f"""
-                        <p><strong>锁等待详情:</strong></p>
+                        <p><strong>Lock wait detail:</strong></p>
                         <pre style="font-size: 13px; background: #f8f9fa; padding: 8px; border-radius: 4px;">{chr(10).join(lock_events_lines)}</pre>
                 """
             
             # Duration(s) 列中的总锁耗时
             sum_lock_wait_sec = sum_lock_wait_time_ms / 1000.0
 
-            # 等待事件信息仅合并进 SQLHC 文本，详情页不再单独展示，避免 SQL 详情过长
+            # 等待事件信息仅合并进 SQLHC 文本，Detail页不再单独展示，避免 SQL Detail过长
             max_wait_events_html = ''
             min_wait_events_html = ''
 
@@ -17590,12 +17590,12 @@ class ReportGenerator:
                 detail_html = f"""
                 {sqlhc_btn}
                 <details>
-                    <summary onclick="toggleSqlDetail(event, this)">点击详情</summary>
+                    <summary onclick="toggleSqlDetail(event, this)">Detail</summary>
                     <div class='duration-info'>
-                        <p><strong>执行语句 ({stat['max_duration']:.3f}s){max_lock_wait_str}:</strong>
+                        <p><strong>Statement ({stat['max_duration']:.3f}s){max_lock_wait_str}:</strong>
                            <span class="detail-action-btns">{max_copy_btn} {max_prepared_btn}</span>
                         </p>
-                        <p><strong>执行时间点:</strong> {max_times_str}</p>
+                        <p><strong>Exec time:</strong> {max_times_str}</p>
                         <pre>{html.escape(max_q_disp, quote=False)}</pre>
                         {max_lock_events_html}
                         {max_wait_events_html}
@@ -17606,19 +17606,19 @@ class ReportGenerator:
                 detail_html = f"""
                 {sqlhc_btn}
                 <details>
-                    <summary onclick="toggleSqlDetail(event, this)">点击详情</summary>
+                    <summary onclick="toggleSqlDetail(event, this)">Detail</summary>
                     <div class='duration-info'>
-                        <p><strong>最大执行时间语句 ({stat['max_duration']:.3f}s){max_lock_wait_str}:</strong>
+                        <p><strong>Max-time statement ({stat['max_duration']:.3f}s){max_lock_wait_str}:</strong>
                            <span class="detail-action-btns">{max_copy_btn} {max_prepared_btn}</span>
                         </p>
-                        <p><strong>执行时间点:</strong> {max_times_str}</p>
+                        <p><strong>Exec time:</strong> {max_times_str}</p>
                         <pre>{html.escape(max_q_disp, quote=False)}</pre>
                         {max_lock_events_html}
                         {max_wait_events_html}
-                        <p><strong>最小执行时间语句 ({stat['min_duration']:.3f}s){min_lock_wait_str}:</strong>
+                        <p><strong>Min-time statement ({stat['min_duration']:.3f}s){min_lock_wait_str}:</strong>
                            <span class="detail-action-btns">{min_copy_btn} {min_prepared_btn}</span>
                         </p>
-                        <p><strong>执行时间点:</strong> {min_times_str}</p>
+                        <p><strong>Exec time:</strong> {min_times_str}</p>
                         <pre>{html.escape(min_q_disp, quote=False)}</pre>
                         {min_lock_events_html}
                         {min_wait_events_html}
@@ -17649,9 +17649,9 @@ class ReportGenerator:
             </tr>
             """)
 
-        # 详情循环完成日志
+        # Detail循环完成日志
         _detail_elapsed = _time_mod.time() - _detail_t0
-        print(f"[进度] 慢SQL详情生成完成: 共 {_total_detail_rows} 行, 总耗时 {_detail_elapsed:.1f}s", file=sys.stderr)
+        print(f"[progress] slow SQL detail rows done: {_total_detail_rows} rows in {_detail_elapsed:.1f}s", file=sys.stderr)
 
         total_rows = len(sorted_data)
         if total_rows > visible_rows:
@@ -17662,8 +17662,8 @@ class ReportGenerator:
                     加载更多 (剩余 {total_rows - visible_rows} 行)
                 </button>
                 <button class="expand-btn" id="detail-expand-all-btn" onclick="toggleAllDetailRows()">
-                    <span class="expand-text">展开全部</span>
-                    <span class="collapse-text" style="display:none;">收起全部</span>
+                    <span class="expand-text">Expand all</span>
+                    <span class="collapse-text" style="display:none;">Collapse all</span>
                 </button>
             </div>
             </section>
@@ -17671,7 +17671,7 @@ class ReportGenerator:
         else:
             detail_html_parts.append('</tbody></table></section>')
         detail_section = ''.join(detail_html_parts)
-        _record_size('detail_section(慢SQL详情)', detail_section)
+        _record_size('detail_section(慢SQLDetail)', detail_section)
         _record_size('input_sorted_data', f'count={len(sorted_data)}', is_html=False)
         try:
             _total_sql_bytes = sum(
@@ -17963,7 +17963,7 @@ class ReportGenerator:
                 }}
                 .top10-table tr:hover {{ background: #e3f2fd; }}
                 
-                /* 死锁分析表格 */
+                /* Deadlock Analysis表格 */
                 .deadlock-container {{
                     grid-template-columns: 1fr;
                 }}
@@ -18437,7 +18437,7 @@ class ReportGenerator:
                     background: #2980b9;
                 }}
                 
-                /* 详情表格 */
+                /* Detail表格 */
                 .detail-table {{
                     width: 100%;
                     border-collapse: collapse;
@@ -18640,7 +18640,7 @@ class ReportGenerator:
                     outline-offset: -2px;
                 }}
                 
-                /* 详情展开 */
+                /* Detail展开 */
                 details {{ margin: 10px 0; }}
                 summary {{
                     cursor: pointer;
@@ -18699,7 +18699,7 @@ class ReportGenerator:
                     color: #333;
                     transform: scale(0.96);
                 }}
-                /* SQL 详情中的操作按钮组:复制+Prepared 作为一个整体,要么同行要么整体换行 */
+                /* SQL Detail中的操作按钮组:Copy+Prepared 作为一个整体,要么同行要么整体换行 */
                 .detail-action-btns {{
                     display: inline-flex;
                     align-items: center;
@@ -18720,7 +18720,7 @@ class ReportGenerator:
                     color: #0056b3;
                 }}
 
-                /* SQLHC 下载按钮: 与"点击详情"(summary)保持一致的大小形状
+                /* SQLHC 下载按钮: 与"Detail"(summary)保持一致的大小形状
                    button 默认使用浏览器内置较小字号,需显式继承父级字号/字体才与 summary 一致 */
                 .sqlhc-btn {{
                     cursor: pointer;
@@ -18861,7 +18861,7 @@ class ReportGenerator:
                     .nav-links a {{ width: 100%; text-align: center; }}
                 }}
 
-                /* 锁事件跳转链接（慢SQL 详情 -> Top10 锁事件栏目） */
+                /* 锁事件跳转链接（慢SQL Detail -> Top10 锁事件栏目） */
                 .lock-jump-link {{
                     display: inline-block;
                     margin-left: 8px;
@@ -18906,13 +18906,13 @@ class ReportGenerator:
             <!-- 错误日志分析部分 -->
             {error_section_html}
 
-            <!-- 锁/死锁详情分析部分 -->
+            <!-- Lock / Deadlock Detail Analysis部分 -->
             {lock_section_html}
             
             <!-- 分时段分析部分 -->
             {time_analysis_section}
             
-            <!-- SQL详情部分 -->
+            <!-- SQLDetail部分 -->
             {detail_section}
             
             <!-- 内联JavaScript -->
@@ -18920,7 +18920,7 @@ class ReportGenerator:
                 // 图表数据
                 const chartData = {chart_js_data_json};
                 
-                // 复制到剪贴板函数
+                // Copy到剪贴板函数
                 function copyToClipboard(button) {{
                     const text = JSON.parse(button.getAttribute('data-copy-text'));
                     const originalText = button.textContent;
@@ -18930,7 +18930,7 @@ class ReportGenerator:
                         button.classList.remove(copiedClass);
                     }};
                     const markCopied = () => {{
-                        button.textContent = '已复制';
+                        button.textContent = '已Copy';
                         button.classList.add(copiedClass);
                         setTimeout(reset, 600);
                     }};
@@ -18938,7 +18938,7 @@ class ReportGenerator:
                         navigator.clipboard.writeText(text).then(() => {{
                             markCopied();
                         }}, (err) => {{
-                            console.error('无法复制文本: ', err);
+                            console.error('无法Copy文本: ', err);
                             reset();
                         }});
                     }} else {{
@@ -18954,7 +18954,7 @@ class ReportGenerator:
                             document.execCommand('copy');
                             markCopied();
                         }} catch (err) {{
-                            console.error('无法复制文本: ', err);
+                            console.error('无法Copy文本: ', err);
                             reset();
                         }}
                         document.body.removeChild(textArea);
@@ -19011,13 +19011,13 @@ class ReportGenerator:
                     }}
                 }}
 
-                // 复制 Base64 编码的文本（用于执行计划等含换行的内容）
+                // Copy Base64 编码的文本（用于执行计划等含换行的内容）
                 function copyBase64Text(button) {{
                     const b64 = button.getAttribute('data-b64-text') || '';
-                    if (!b64) {{ alert('无可复制内容'); return; }}
+                    if (!b64) {{ alert('无可Copy内容'); return; }}
                     const originalText = button.textContent;
                     const markCopied = () => {{
-                        button.textContent = '已复制';
+                        button.textContent = '已Copy';
                         setTimeout(() => {{ button.textContent = originalText; }}, 600);
                     }};
                     try {{
@@ -19028,7 +19028,7 @@ class ReportGenerator:
                         const text = new TextDecoder('utf-8').decode(bytes);
                         if (navigator.clipboard && window.isSecureContext) {{
                             navigator.clipboard.writeText(text).then(markCopied, (err) => {{
-                                console.error('无法复制文本: ', err);
+                                console.error('无法Copy文本: ', err);
                             }});
                         }} else {{
                             const textArea = document.createElement("textarea");
@@ -19040,12 +19040,12 @@ class ReportGenerator:
                             textArea.focus();
                             textArea.select();
                             try {{ document.execCommand('copy'); markCopied(); }}
-                        catch (err) {{ console.error('无法复制文本: ', err); }}
+                        catch (err) {{ console.error('无法Copy文本: ', err); }}
                         document.body.removeChild(textArea);
                         }}
                     }} catch (err) {{
-                        console.error('复制失败: ', err);
-                        alert('复制失败: ' + err);
+                        console.error('Copy失败: ', err);
+                        alert('Copy失败: ' + err);
                     }}
                 }}
 
@@ -19081,12 +19081,12 @@ class ReportGenerator:
                     // 组合完整语句
                     const fullStmt = prepareStmt + '\\n' + executeStmt;
                     
-                    // 复制到剪贴板
+                    // Copy到剪贴板
                     if (navigator.clipboard && window.isSecureContext) {{
                         navigator.clipboard.writeText(fullStmt).then(() => {{
-                                alert('Prepared语句已复制到剪贴板!\\n 参数类型取自日志 type 标注，缺失时回退为text');
+                                alert('Prepared语句已Copy到剪贴板!\\n 参数类型取自日志 type 标注，缺失时回退为text');
                         }}, (err) => {{
-                            console.error('无法复制文本: ', err);
+                            console.error('无法Copy文本: ', err);
                         }});
                     }} else {{
                         const textArea = document.createElement("textarea");
@@ -19099,9 +19099,9 @@ class ReportGenerator:
                         textArea.select();
                         try {{
                             document.execCommand('copy');
-                            alert('Prepared语句已复制到剪贴板!\\n 参数类型取自日志 type 标注，缺失时回退为text');
+                            alert('Prepared语句已Copy到剪贴板!\\n 参数类型取自日志 type 标注，缺失时回退为text');
                         }} catch (err) {{
-                            console.error('无法复制文本: ', err);
+                            console.error('无法Copy文本: ', err);
                         }}
                         document.body.removeChild(textArea);
                     }}
@@ -19157,9 +19157,9 @@ class ReportGenerator:
                         
                         svg += `<path d="${{pathData}}" fill="${{item.color}}" stroke="white" stroke-width="2" 
                                   data-name="${{item.name}}" data-count="${{item.count}}" data-percent="${{(percent*100).toFixed(1)}}%"
-                                  onmouseover="showTooltip(event, '${{item.name}}: ${{item.count}}条 (${{(percent*100).toFixed(1)}}%)')"
+                                  onmouseover="showTooltip(event, '${{item.name}}: ${{item.count}} (${{(percent*100).toFixed(1)}}%)')"
                                   onmouseout="hideTooltip()">`;
-                        svg += `<title>${{item.name}}: ${{item.count}}条 (${{(percent*100).toFixed(1)}}%)</title>`;
+                        svg += `<title>${{item.name}}: ${{item.count}} (${{(percent*100).toFixed(1)}}%)</title>`;
                         svg += `</path>`;
                         
                         startAngle = endAngle;
@@ -19168,7 +19168,7 @@ class ReportGenerator:
                     // 添加中心文字
                     svg += `<circle cx="${{centerX}}" cy="${{centerY}}" r="${{radius*0.3}}" fill="white" stroke="#ddd" stroke-width="1"/>`;
                     svg += `<text x="${{centerX}}" y="${{centerY-10}}" text-anchor="middle" font-weight="bold" font-size="16">总计</text>`;
-                    svg += `<text x="${{centerX}}" y="${{centerY+15}}" text-anchor="middle" font-size="14">${{total}} 条</text>`;
+                    svg += `<text x="${{centerX}}" y="${{centerY+15}}" text-anchor="middle" font-size="14">${{total}}</text>`;
                     
                     svg += `</svg>`;
                     
@@ -19570,12 +19570,12 @@ class ReportGenerator:
                     hideTooltip();
                 }}
 
-                // 点击线条跳转到对应的详情行
+                // 点击线条跳转到对应的Detail行
                 function clickLine(uid) {{
                     goToDetail(uid);
                 }}
                 
-                // 通过 Unique ID 跳转到详情行（自动展开、高亮、居中）
+                // 通过 Unique ID 跳转到Detail行（自动展开、高亮、居中）
                 function goToDetail(uid, event) {{
                     if (event) {{
                         event.preventDefault();
@@ -19659,7 +19659,7 @@ class ReportGenerator:
                     hideTooltip();
                 }}
                 
-                // 控制 SQL 详情列表中 "点击详情" 的展开/收起，并同步高亮当前行
+                // 控制 SQL Detail列表中 "Detail" 的展开/收起，并同步高亮当前行
                 function toggleSqlDetail(event, summary) {{
                     event.preventDefault();
                     event.stopPropagation();
@@ -19670,7 +19670,7 @@ class ReportGenerator:
                     const row = details.closest('tr');
                     const wasOpen = details.open;
                     
-                    // 先关闭所有其他已展开的 SQL 详情
+                    // 先关闭所有其他已展开的 SQL Detail
                     document.querySelectorAll('#detail-section details[open]').forEach(openDetails => {{
                         if (openDetails !== details) {{
                             openDetails.removeAttribute('open');
@@ -19682,19 +19682,19 @@ class ReportGenerator:
                     }});
                     
                     if (wasOpen) {{
-                        // 收起当前详情
+                        // 收起当前Detail
                         details.removeAttribute('open');
                         if (row) {{
                             row.classList.remove('highlighted');
                         }}
-                        // 检查是否还有展开的详情，没有则恢复列宽
+                        // 检查是否还有展开的Detail，没有则恢复列宽
                         if (document.querySelectorAll('#detail-section details[open]').length === 0) {{
                             queryTextExpanded = true;
                             detailColumnExpanded = false;
                             updateColumnWidths();
                         }}
                     }} else {{
-                        // 展开当前详情
+                        // 展开当前Detail
                         details.setAttribute('open', 'open');
                         // 取消所有高亮
                         document.querySelectorAll('.detail-table tr.highlighted').forEach(hlRow => {{
@@ -19742,12 +19742,12 @@ class ReportGenerator:
                     // 构建饼图容器
                     const pieContainer = document.createElement('div');
                     pieContainer.className = 'chart-container pie-layout';
-                    pieContainer.innerHTML = '<h3 class="chart-title" style="width:100%;text-align:center;">慢SQL耗时分布</h3>' +
+                    pieContainer.innerHTML = '<h3 class="chart-title" style="width:100%;text-align:center;">Slow SQL Duration Distribution</h3>' +
                         '<div class="pie-body">' +
                             '<div class="pie-chart-area"><div class="chart-box" id="pie-chart-main"></div></div>' +
                             '<div class="pie-side">' +
-                                '<button class="pie-toggle-btn' + (activeType === 'dml' ? ' active' : '') + '" id="pie-btn-dml" onclick="window.switchPieChart(&quot;dml&quot;)">DQL<span class="pie-toggle-count">' + totalDml + '条</span></button>' +
-                                '<button class="pie-toggle-btn' + (activeType === 'ddl' ? ' active' : '') + '" id="pie-btn-ddl" onclick="window.switchPieChart(&quot;ddl&quot;)">DDL<span class="pie-toggle-count">' + totalDdl + '条</span></button>' +
+                                '<button class="pie-toggle-btn' + (activeType === 'dml' ? ' active' : '') + '" id="pie-btn-dml" onclick="window.switchPieChart(&quot;dml&quot;)">DQL<span class="pie-toggle-count">' + totalDml + '</span></button>' +
+                                '<button class="pie-toggle-btn' + (activeType === 'ddl' ? ' active' : '') + '" id="pie-btn-ddl" onclick="window.switchPieChart(&quot;ddl&quot;)">DDL<span class="pie-toggle-count">' + totalDdl + '</span></button>' +
                             '</div>' +
                         '</div>' +
                         '<div class="pie-legend-area" id="pie-legend-main"></div>';
@@ -19781,7 +19781,7 @@ class ReportGenerator:
                             var total = data.reduce(function(s, item) {{ return s + item.count; }}, 0);
                             var html = '<div class="chart-legend vertical">';
                             data.forEach(function(item) {{
-                                html += '<div class="legend-item"><div class="legend-color" style="background-color: ' + item.color + ';"></div><span>' + item.name + ' (' + item.count + '条, ' + item.percent.toFixed(1) + '%)</span></div>';
+                                html += '<div class="legend-item"><div class="legend-color" style="background-color: ' + item.color + ';"></div><span>' + item.name + ' (' + item.count + ', ' + item.percent.toFixed(1) + '%)</span></div>';
                             }});
                             html += '</div>';
                             legendEl.innerHTML = html;
@@ -19843,10 +19843,10 @@ class ReportGenerator:
                     // 定义维度顺序和名称映射
                     const dimOrder = ['by_minute', 'by_10minute', 'by_hour', 'by_day'];
                     const dimNames = {{
-                        'by_minute': '每分钟慢SQL执行趋势 (Top 10)',
-                        'by_10minute': '每10分钟慢SQL执行趋势 (Top 10)',
-                        'by_hour': '每小时慢SQL执行趋势 (Top 10)',
-                        'by_day': '每日慢SQL执行趋势 (Top 10)'
+                        'by_minute': 'Slow SQL per minute (Top 10)',
+                        'by_10minute': 'Slow SQL per 10 minutes (Top 10)',
+                        'by_hour': 'Slow SQL per hour (Top 10)',
+                        'by_day': 'Slow SQL per day (Top 10)'
                     }};
 
                     // 收集所有有数据的维度（DML 和 DDL 分开）
@@ -19975,7 +19975,7 @@ class ReportGenerator:
                     // 监听hash变化
                     window.addEventListener('hashchange', highlightTargetRow);
                     
-                    // 设置详情展开/折叠监听器
+                    // 设置Detail展开/折叠监听器
                     setupDetailsToggleListeners();
                 }});
                 
@@ -20166,7 +20166,7 @@ class ReportGenerator:
                         }}, 50);
                     }} else {{
                         cardRow.style.display = 'none';
-                        btn.textContent = '详情';
+                        btn.textContent = 'Detail';
                         summaryRow.classList.remove('lock-row-expanded');
                         summaryRow.classList.remove('deadlock-row-expanded');
                         cardRow.classList.remove('lock-row-expanded');
@@ -20175,8 +20175,8 @@ class ReportGenerator:
                 }}
 
                 // ============================================================
-                // 锁事件跳转：从慢SQL 详情中的"锁等待详情"跳转到 Top10 锁事件栏目的对应行
-                // 跳转流程：阻止默认行为 -> 查找目标元素 -> 自动展开详情卡片 ->
+                // 锁事件跳转：从慢SQL Detail中的"锁等待Detail"跳转到 Top10 锁事件栏目的对应行
+                // 跳转流程：阻止默认行为 -> 查找目标元素 -> 自动展开Detail卡片 ->
                 //          移除旧高亮 -> 添加新高亮 -> 更新 URL hash -> 平滑滚动居中
                 // 失败排查：浏览器 F12 控制台查看 [jumpToLockDetail] 开头的日志
                 // ============================================================
@@ -20200,7 +20200,7 @@ class ReportGenerator:
                         console.error('[jumpToLockDetail] ✗ 未找到锚点元素: #' + anchorId);
                         console.warn('[jumpToLockDetail] 可能原因:')
                         console.warn('[jumpToLockDetail]   1) Top10 锁事件栏目未渲染该事件(可能被 Top50 限制截断)');
-                        console.warn('[jumpToLockDetail]   2) 锚点 id 不匹配(慢SQL 详情与 Top10 表生成的 id 不一致)');
+                        console.warn('[jumpToLockDetail]   2) 锚点 id 不匹配(慢SQL Detail与 Top10 表生成的 id 不一致)');
                         console.warn('[jumpToLockDetail]   3) 锁事件栏目在隐藏的 tab/折叠面板中');
                         // 输出现有所有 lock-anchor 元素列表,便于诊断
                         const allLockAnchors = document.querySelectorAll('[id^="lock-anchor-"]');
@@ -20208,7 +20208,7 @@ class ReportGenerator:
                         allLockAnchors.forEach((el, i) => {{
                             console.log('[jumpToLockDetail]   [' + i + '] id=' + el.id + ' tagName=' + el.tagName + ' class=' + el.className);
                         }});
-                        alert('未找到锁详情锚点: ' + anchorId + '\\n请查看浏览器控制台(F12)获取详细诊断信息');
+                        alert('未找到锁Detail锚点: ' + anchorId + '\\n请查看浏览器控制台(F12)获取详细诊断信息');
                         return;
                     }}
                     console.log('[jumpToLockDetail] ✓ 找到目标元素: tagName=' + targetElement.tagName + ' id=' + targetElement.id + ' class=' + targetElement.className);
@@ -20229,16 +20229,16 @@ class ReportGenerator:
                         console.log('[jumpToLockDetail] ✓ 目标元素所有祖先均可见');
                     }}
 
-                    // 如果目标行处于折叠状态,自动展开详情卡片(便于查看上下文)
+                    // 如果目标行处于折叠状态,自动展开Detail卡片(便于查看上下文)
                     if (targetElement.classList.contains('lock-summary-row')) {{
                         const detailBtn = targetElement.querySelector('.lock-detail-btn');
                         if (detailBtn) {{
-                            console.log('[jumpToLockDetail] 详情按钮当前文本: "' + detailBtn.textContent.trim() + '"');
-                            if (detailBtn.textContent.trim() === '详情') {{
+                            console.log('[jumpToLockDetail] Detail按钮当前文本: "' + detailBtn.textContent.trim() + '"');
+                            if (detailBtn.textContent.trim() === 'Detail') {{
                                 console.log('[jumpToLockDetail] 目标行处于折叠状态,自动展开...');
                                 try {{
                                     toggleLockDetail(detailBtn);
-                                    console.log('[jumpToLockDetail] ✓ 已调用 toggleLockDetail 展开详情');
+                                    console.log('[jumpToLockDetail] ✓ 已调用 toggleLockDetail 展开Detail');
                                 }} catch (e) {{
                                     console.error('[jumpToLockDetail] 调用 toggleLockDetail 失败:', e);
                                 }}
@@ -20550,7 +20550,7 @@ class ReportGenerator:
                         btn.textContent = '收起';
                     }} else {{
                         detail.style.display = 'none';
-                        btn.textContent = '详情';
+                        btn.textContent = 'Detail';
                     }}
                 }}
 
@@ -20672,7 +20672,7 @@ class ReportGenerator:
                 }}            </script>
         </body>
         <div style="text-align: center; margin: 20px 0;">
-            <a href="#top10-ranking" class="back-to-top" title="返回Top 10排名" onclick="collapseAllDetails()">↑ Top 10</a>
+            <a href="#top10-ranking" class="back-to-top" title="Back to Top 10" onclick="collapseAllDetails()">↑ Top 10</a>
         </div>
         </html>
         """
@@ -20681,11 +20681,11 @@ class ReportGenerator:
             _record_size('full_html(最终)', full_html)
             _elapsed = _time_mod.time() - _html_size_t0
             print("\n" + "=" * 80)
-            print(f"[HTML 体积统计] generate_full_html_report 耗时: {_elapsed:.2f}s")
-            print(f"[HTML 体积统计] 最终 HTML 字符数: {len(full_html):,}  字节(UTF-8): {len(full_html.encode('utf-8')):,}  ({len(full_html.encode('utf-8'))/1024/1024:.2f} MB)")
+            print(f"[HTML size stats] generate_full_html_report took {_elapsed:.2f}s")
+            print(f"[HTML size stats] final HTML chars: {len(full_html):,}  UTF-8 bytes: {len(full_html.encode('utf-8')):,}  ({len(full_html.encode('utf-8'))/1024/1024:.2f} MB)")
             print("-" * 80)
             _sorted_stats = sorted(_html_size_stats.items(), key=lambda x: x[1].get('bytes', 0), reverse=True)
-            print(f"{'栏目':<50} {'字符数':>15} {'字节(MB)':>12} {'<tr行数':>10}")
+            print(f"{'section':<50} {'chars':>15} {'MB':>12} {'<tr rows':>10}")
             print("-" * 80)
             for _name, _st in _sorted_stats:
                 _mb = _st.get('bytes', 0) / 1024 / 1024
@@ -20873,7 +20873,7 @@ def parse_all_events(start_n, blocks, total_list, deadlock_list, lock_event_list
         return None, None, None, None, None
 
     def _parse_lock_target(match_text):
-        """从锁事件文本中解析锁目标及阻塞者事务号。"""
+        """从锁事件文本中解析锁目标及Blocker xact号。"""
         target = ''
         holder_txid = None
         m = LOCK_TARGET_PATTERN.search(match_text)
@@ -20994,7 +20994,7 @@ def parse_all_events(start_n, blocks, total_list, deadlock_list, lock_event_list
 
                 # 收集前后3行日志上下文,按会话ID(thread_id)过滤
                 # 默认窗口:前后各3行(按位置),在窗口内只保留匹配会话ID或无会话ID的行
-                # 如果窗口内没有匹配行,context_before/after 为空,详情卡片只显示当前块
+                # 如果窗口内没有匹配行,context_before/after 为空,Detail卡片只显示当前块
                 context_lines = []
                 context_before = []
                 context_after = []
@@ -21177,7 +21177,7 @@ def parse_all_events(start_n, blocks, total_list, deadlock_list, lock_event_list
                         event_kind = 'waiting'
 
                     # 统一 target/lock_type 来源：优先使用 _match_lock_event 的结果,
-                    # 与慢 SQL 详情侧 pending_lock_events 的 target 保持一致,
+                    # 与慢 SQL Detail侧 pending_lock_events 的 target 保持一致,
                     # 否则 LOCK_EVENT_PATTERN 会把 "transaction 1234" 提取为 "1234",
                     # 导致两侧 lock-anchor id 不一致、跳转失败
                     if target_from_match:
@@ -21336,14 +21336,14 @@ def parse_all_events(start_n, blocks, total_list, deadlock_list, lock_event_list
                     except Exception:
                         pass
 
-                    # ---- 锁等待链：关联阻塞者事务及其语句 ----
+                    # ---- 锁等待链：关联Blocker xact及其语句 ----
                     holder_session = ''
                     holder_unique_id = ''
                     holder_sql = ''
                     holder_all_sql = []
                     holder_txid_val = merged_holder_txid
                     if holder_txid_val and holder_txid_val != '0':
-                        # 从 tx_activity 中查找阻塞者事务的语句
+                        # 从 tx_activity 中查找Blocker xact的语句
                         holder_activity = tx_activity.get(holder_txid_val, [])
                         if holder_activity:
                             holder_all_sql = [act['sql_text'] for act in holder_activity]
@@ -21418,7 +21418,7 @@ def parse_all_events(start_n, blocks, total_list, deadlock_list, lock_event_list
             detect_match = DEADLOCK_DETECT_PATTERN.search(log_block)
             if detect_match:
                 if args.debug:
-                    print(f"[DEBUG] 检测到死锁行，ts={timestamp_str}, thread={detect_match.group(1)}, txid={detect_match.group(3)}")
+                    print(f"[DEBUG] deadlock line detected, ts={timestamp_str}, thread={detect_match.group(1)}, txid={detect_match.group(3)}")
                 _cleanup_lock_event_buffer(current_ts)
 
                 detail_for_parsing = log_block
@@ -21437,7 +21437,7 @@ def parse_all_events(start_n, blocks, total_list, deadlock_list, lock_event_list
 
                 if args.debug:
                     _has_process_sql_flag = bool(re.search(r'Process\s+\d+:\s', detail_for_parsing, re.IGNORECASE))
-                    print(f"[DEBUG] 预存死锁候选，ts={timestamp_str}, detail_len={len(detail_for_parsing)}, has_process_sql={_has_process_sql_flag}")
+                    print(f"[DEBUG] deadlock candidate parked, ts={timestamp_str}, detail_len={len(detail_for_parsing)}, has_process_sql={_has_process_sql_flag}")
 
                 deadlock_candidates.append({
                     'timestamp_str': timestamp_str,
@@ -21566,7 +21566,7 @@ def parse_all_events(start_n, blocks, total_list, deadlock_list, lock_event_list
 
     # ---- 3.1 循环结束后统一解析死锁候选 ----
     if args.debug:
-        print(f"[DEBUG] 主循环结束，死锁候选总数: {len(deadlock_candidates)}")
+        print(f"[DEBUG] main loop done, deadlock candidates total: {len(deadlock_candidates)}")
 
     for candidate in deadlock_candidates:
         timestamp_str = candidate['timestamp_str']
@@ -21579,13 +21579,13 @@ def parse_all_events(start_n, blocks, total_list, deadlock_list, lock_event_list
         has_process_sql = bool(re.search(r'Process\s+\d+:\s', detail_for_parsing, re.IGNORECASE))
         if not has_process_sql:
             if args.debug:
-                print(f"[DEBUG] 死锁候选无 Process SQL，跳过，ts={timestamp_str}")
+                print(f"[DEBUG] deadlock candidate has no Process SQL, skipped, ts={timestamp_str}")
             continue
 
         detect_match = DEADLOCK_DETECT_PATTERN.search(log_block)
         if not detect_match:
             if args.debug:
-                print(f"[DEBUG] 死锁候选未匹配 DEADLOCK_DETECT_PATTERN，跳过，ts={timestamp_str}")
+                print(f"[DEBUG] deadlock candidate did not match DEADLOCK_DETECT_PATTERN, skipped, ts={timestamp_str}")
             continue
 
         process_a = detect_match.group(1)
@@ -21594,7 +21594,7 @@ def parse_all_events(start_n, blocks, total_list, deadlock_list, lock_event_list
         wait_ms = float(detect_match.group(4))
 
         if args.debug:
-            print(f"[DEBUG] 开始解析死锁候选，ts={timestamp_str}, process_a={process_a}, lock_type={lock_type}")
+            print(f"[DEBUG] parsing deadlock candidate, ts={timestamp_str}, process_a={process_a}, lock_type={lock_type}")
 
         process_b = None
         full_context_parts = [log_block.strip()]
@@ -21690,7 +21690,7 @@ def parse_all_events(start_n, blocks, total_list, deadlock_list, lock_event_list
                     break
 
         if args.debug:
-            print(f"[DEBUG] 死锁候选解析结果，ts={timestamp_str}, process_a={process_a}, process_b={process_b}, sql_map_keys={list(sql_map.keys())}")
+            print(f"[DEBUG] deadlock candidate parsed, ts={timestamp_str}, process_a={process_a}, process_b={process_b}, sql_map_keys={list(sql_map.keys())}")
 
         if process_b:
             current_deadlock_event = {
@@ -21771,10 +21771,10 @@ def parse_all_events(start_n, blocks, total_list, deadlock_list, lock_event_list
                     'context_before': dl_context_before
                 })
                 if args.debug:
-                    print(f"[DEBUG] 成功加入死锁记录，ts={timestamp_str}, process_a={process_a}, process_b={process_b}")
+                    print(f"[DEBUG] deadlock record added, ts={timestamp_str}, process_a={process_a}, process_b={process_b}")
 
     if args.debug:
-        print(f"[DEBUG] 统一解析死锁候选完成，最终死锁记录数: {len(deadlock_list)}")
+        print(f"[DEBUG] unified deadlock parse done, final deadlock records: {len(deadlock_list)}")
 
     show_progress(total_blocks, total_blocks, "解析事件", start_time, total_elapsed_time)
 
@@ -21802,8 +21802,8 @@ def parse_all_events(start_n, blocks, total_list, deadlock_list, lock_event_list
 
 # 解析日志格式
 log_format_info = parse_log_prefix_format(log_prefix)
-print(f"日志格式: {log_format_info['format_name']}")
-print(f"字段顺序: {', '.join(log_format_info['fields'])}")
+print(f"Log format: {log_format_info['format_name']}")
+print(f"Field order: {', '.join(log_format_info['fields'])}")
 
 if __name__ == "__main__":
     # 处理多个日志文件，获取所有数据
@@ -21900,29 +21900,29 @@ if __name__ == "__main__":
                 if error_times:
                     overall_min_time = min(error_times)
                     overall_max_time = max(error_times)
-                    print(f"未找到慢SQL记录，使用错误日志时间范围: {overall_min_time} 至 {overall_max_time}")
+                    print(f"No slow SQL records; using error log time range: {overall_min_time} to {overall_max_time}")
                 else:
                     # 既无慢SQL也无错误日志时间,使用脚本执行时间作为占位,继续生成空框架报告
                     overall_min_time = datetime.now()
                     overall_max_time = datetime.now()
-                    print("提示: 未找到有效的日志数据,将生成空框架报告")
+                    print("Note: no valid log data found; an empty skeleton report will be generated")
             else:
                 # 既无慢SQL也无错误日志,使用脚本执行时间作为占位,继续生成空框架报告
                 overall_min_time = datetime.now()
                 overall_max_time = datetime.now()
-                print("提示: 未找到有效的日志数据,将生成空框架报告")
+                print("Note: no valid log data found; an empty skeleton report will be generated")
         
             # 使用新的ReportGenerator生成报告
         import time as _main_timer
         _t0 = _main_timer.time()
-        print(f"[进度] 开始生成 SQL 汇总 (共 {len(all_total_list)} 条记录)...", file=sys.stderr)
+        print(f"[progress] building SQL summary ({len(all_total_list)} records)...", file=sys.stderr)
         summary_info = ReportGenerator.generate_sql_summary(stats, all_total_list)
-        print(f"[进度] SQL 汇总完成, 耗时 {_main_timer.time() - _t0:.1f}s", file=sys.stderr)
+        print(f"[progress] SQL summary done in {_main_timer.time() - _t0:.1f}s", file=sys.stderr)
 
         _t0 = _main_timer.time()
-        print(f"[进度] 开始生成时间维度分析 (共 {len(all_total_list)} 条记录, 4 个维度)...", file=sys.stderr)
+        print(f"[progress] building time-dimension analysis ({len(all_total_list)} records, 4 dimensions)...", file=sys.stderr)
         time_analysis_info = ReportGenerator.generate_time_analysis(all_total_list, overall_min_time, overall_max_time, diff_interval, args.diff)
-        print(f"[进度] 时间维度分析完成, 耗时 {_main_timer.time() - _t0:.1f}s", file=sys.stderr)
+        print(f"[progress] time-dimension analysis done in {_main_timer.time() - _t0:.1f}s", file=sys.stderr)
 
         # --detail：查询慢SQL的等待事件信息（仅查询分析范围内最大/最小执行时间点）
         wait_events_data = {}
@@ -21932,10 +21932,10 @@ if __name__ == "__main__":
             detail_mode, detail_topn = args.detail
             if detail_mode == 'top':
                 uids_to_query = ReportGenerator._collect_top10_uids(stats, topn=detail_topn)
-                print(f"[进度] --detail top:{detail_topn}: 需查询 {len(uids_to_query)} 个去重后的 Top{detail_topn} SQL ID 的等待事件", file=sys.stderr)
+                print(f"[progress] --detail top:{detail_topn}: querying wait events for {len(uids_to_query)} deduped Top{detail_topn} SQL IDs", file=sys.stderr)
             else:  # 'all'
                 uids_to_query = set(stats.keys())
-                print(f"[进度] --detail all: 需查询 {len(uids_to_query)} 个慢SQL ID 的等待事件", file=sys.stderr)
+                print(f"[progress] --detail all: querying wait events for {len(uids_to_query)} slow SQL IDs", file=sys.stderr)
             try:
                 wait_events_data, wait_events_warning = query_wait_events_for_sql_ids(
                     uids_to_query, overall_min_time, overall_max_time,
@@ -21944,22 +21944,22 @@ if __name__ == "__main__":
                 wait_events_data = {}
                 wait_events_warning = f"等待事件反查失败: {e}"
                 print(f"WARNING: {wait_events_warning}", file=sys.stderr)
-            print(f"[进度] 等待事件查询完成, 耗时 {_main_timer.time() - _t0:.1f}s", file=sys.stderr)
+            print(f"[progress] wait events done in {_main_timer.time() - _t0:.1f}s", file=sys.stderr)
 
         # 数据库版本/优化器参数（opt params）始终查询，展示到汇总信息，不受 --detail 控制
         opt_params_info = {'version': '', 'params_text': '', 'error': None}
         _t0 = _main_timer.time()
-        print("[进度] 查询数据库版本与优化器参数 (opt params)...", file=sys.stderr)
+        print("[progress] querying DB version and optimizer params...", file=sys.stderr)
         opt_params_info = query_sqlhc_opt_params(timeout=args.detail_timeout, debug=args.debug)
         if opt_params_info.get('error'):
-            print(f"WARNING: opt params 查询失败: {opt_params_info['error']}", file=sys.stderr)
-        print(f"[进度] opt params 查询完成, 耗时 {_main_timer.time() - _t0:.1f}s", file=sys.stderr)
+            print(f"WARNING: opt params query failed: {opt_params_info['error']}", file=sys.stderr)
+        print(f"[progress] opt params done in {_main_timer.time() - _t0:.1f}s", file=sys.stderr)
 
         # --detail：收集 sqlhc 信息（sqlstat + tabstat + tabsize，SQL 取自 vb_tool v2.0.8）
         sqlhc_data = {}
         if args.detail:
             _t0 = _main_timer.time()
-            print(f"[进度] 开始收集 sqlhc 信息 (共 {len(uids_to_query)} 个 SQL ID, 批量模式)...", file=sys.stderr)
+            print(f"[progress] collecting sqlhc info ({len(uids_to_query)} SQL IDs, batch mode)...", file=sys.stderr)
             try:
                 # 批量收集：减少 vsql 进程数，N 个 SQL 原本最多 4N 次 vsql →
                 # 1 次 postgres(sqlstat) + 每个库 1 次 schema 解析 + 每个库 1 次(tabstat+tabsize)
@@ -21973,7 +21973,7 @@ if __name__ == "__main__":
                 _t1 = _main_timer.time()
                 statement_stats_map = batch_query_sqlhc_statement_stats(
                     uid_list, timeout=args.detail_timeout, debug=args.debug)
-                print(f"[进度] sqlhc sqlstat 批量完成: {len(statement_stats_map)}/{len(uid_list)}, 耗时 {_main_timer.time() - _t1:.1f}s", file=sys.stderr)
+                print(f"[progress] sqlhc sqlstat batch done: {len(statement_stats_map)}/{len(uid_list)}, 耗时 {_main_timer.time() - _t1:.1f}s", file=sys.stderr)
 
                 # 2. 按 uid 提取表 + 按库分组批量解析 schema
                 _t1 = _main_timer.time()
@@ -22000,7 +22000,7 @@ if __name__ == "__main__":
                     for uid_str, tables in uid_to_tables.items():
                         if uid_to_db[uid_str] == db_name and tables:
                             uid_to_resolved[uid_str] = _apply_schema_resolution(tables, resolved)
-                print(f"[进度] sqlhc schema 解析完成: {len(uid_to_resolved)} 个 SQL 有表, 耗时 {_main_timer.time() - _t1:.1f}s", file=sys.stderr)
+                print(f"[progress] sqlhc schema resolve done: {len(uid_to_resolved)} SQLs have tables, in {_main_timer.time() - _t1:.1f}s", file=sys.stderr)
 
                 # 3. 按库分组批量查 tabstat + tabsize（每库一次会话）
                 _t1 = _main_timer.time()
@@ -22019,7 +22019,7 @@ if __name__ == "__main__":
                         timeout=args.detail_timeout, debug=args.debug)
                     tabstats_map.update(ts)
                     tabsize_map.update(sz)
-                print(f"[进度] sqlhc tabstat/tabsize 批量完成: {len(tabstats_map)}/{sum(len(v) for v in db_uid_tables.values())} 块, 耗时 {_main_timer.time() - _t1:.1f}s", file=sys.stderr)
+                print(f"[progress] sqlhc tabstat/tabsize batch done: {len(tabstats_map)}/{sum(len(v) for v in db_uid_tables.values())} 块, 耗时 {_main_timer.time() - _t1:.1f}s", file=sys.stderr)
 
                 # 4. 按 uid 组装 sqlhc 文本，批量缺失的回退单查保证容错
                 for uid_str in uid_list:
@@ -22040,10 +22040,10 @@ if __name__ == "__main__":
                 sqlhc_data = {}
                 sqlhc_warning = f"sqlhc 信息收集失败: {e}"
                 print(f"WARNING: {sqlhc_warning}", file=sys.stderr)
-            print(f"[进度] sqlhc 信息收集完成, 耗时 {_main_timer.time() - _t0:.1f}s", file=sys.stderr)
+            print(f"[progress] sqlhc info collected in {_main_timer.time() - _t0:.1f}s", file=sys.stderr)
 
         _t0 = _main_timer.time()
-        print(f"[进度] 开始生成完整 HTML 报告 (共 {len(sorted_data)} 行详情)...", file=sys.stderr)
+        print(f"[progress] building full HTML report ({len(sorted_data)} detail rows)...", file=sys.stderr)
         full_html = ReportGenerator.generate_full_html_report(
                 sorted_data=sorted_data,
                 summary_info=summary_info,
@@ -22062,35 +22062,35 @@ if __name__ == "__main__":
                 opt_params_info=opt_params_info,
                 debug=args.debug
             )
-        print(f"[进度] HTML 报告生成完成, 耗时 {_main_timer.time() - _t0:.1f}s, HTML 大小 {len(full_html)/1024/1024:.1f} MB", file=sys.stderr)
+        print(f"[progress] HTML report done in {_main_timer.time() - _t0:.1f}s, size {len(full_html)/1024/1024:.1f} MB", file=sys.stderr)
 
             # 写入HTML文件
         _t0 = _main_timer.time()
-        print(f"[进度] 开始写入 HTML 文件到磁盘...", file=sys.stderr)
+        print(f"[progress] writing HTML file to disk...", file=sys.stderr)
         with open(output_path, "w", encoding='utf-8') as f:
                 f.write(full_html)
-        print(f"[进度] HTML 文件写入完成, 耗时 {_main_timer.time() - _t0:.1f}s", file=sys.stderr)
+        print(f"[progress] HTML file written in {_main_timer.time() - _t0:.1f}s", file=sys.stderr)
 
         # 用 gzip 压缩并删除原 HTML，仅保留压缩包（解压 gunzip 直接得到 html，无路径层级）
         _t0 = _main_timer.time()
-        print(f"[进度] 开始 gzip 压缩 HTML 文件...", file=sys.stderr)
+        print(f"[progress] gzipping HTML file...", file=sys.stderr)
         gz_path = output_path + '.gz'
         result = subprocess.run(['gzip', '-f', output_path],
                                 stderr=subprocess.PIPE)
         if result.returncode != 0:
-            print('错误: gzip 压缩失败: {}'.format(result.stderr.decode('utf-8', errors='ignore').strip()))
+            print('Error: gzip failed: {}'.format(result.stderr.decode('utf-8', errors='ignore').strip()))
         else:
             os.chmod(gz_path, 0o544)
-            print(f"[进度] gzip 压缩完成, 耗时 {_main_timer.time() - _t0:.1f}s", file=sys.stderr)
-            print('已生成HTML压缩包: {}'.format(os.path.abspath(gz_path)))
+            print(f"[progress] gzip done in {_main_timer.time() - _t0:.1f}s", file=sys.stderr)
+            print('HTML archive written: {}'.format(os.path.abspath(gz_path)))
             # 输出最终文件体积对比(仅 debug 模式)
             if args.debug:
                 try:
                     _html_size = os.path.getsize(output_file)
                     _gz_size = os.path.getsize(gz_path)
-                    print(f"[体积对比] HTML 原文件: {_html_size:,} 字节 ({_html_size/1024/1024:.2f} MB)")
-                    print(f"[体积对比] GZ  压缩后: {_gz_size:,} 字节 ({_gz_size/1024/1024:.2f} MB)")
-                    print(f"[体积对比] 压缩率: {(_html_size - _gz_size) / _html_size * 100:.1f}%")
+                    print(f"[size compare] HTML raw: {_html_size:,} bytes ({_html_size/1024/1024:.2f} MB)")
+                    print(f"[size compare] GZ packed: {_gz_size:,} bytes ({_gz_size/1024/1024:.2f} MB)")
+                    print(f"[size compare] ratio: {(_html_size - _gz_size) / _html_size * 100:.1f}%")
                 except Exception:
                     pass
             
