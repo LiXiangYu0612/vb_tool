@@ -4696,6 +4696,7 @@ WITH aa AS (
         c.relname AS "ind_name",
         case when i.indisusable then 'usable' else 'unusable' end status,
         case when i.indisprimary='t' then 1 else 0 end AS is_primary,
+        case when i.indisunique='t' then 1 else 0 end AS is_unique,
         REGEXP_REPLACE(
             TRIM(BOTH FROM 
                 SUBSTRING(
@@ -4740,7 +4741,7 @@ WITH aa AS (
         AND n.nspname <> 'information_schema'
 ),
 bb as (select * from (
-select ind_owner,tab_schema,tab_name,ind_name,col_list,col_count,row_number()over(partition by tab_schema,tab_name,col_list order by is_primary desc,ind_name) rn from aa where status='usable') where rn=1)
+select ind_owner,tab_schema,tab_name,ind_name,col_list,col_count,is_unique,row_number()over(partition by tab_schema,tab_name,col_list order by is_primary desc,is_unique desc,ind_name) rn from aa where status='usable') where rn=1)
 select tab_schema,tab_name,ind_name,col_list,redundant_ind,redundant_ind_cols from (
 SELECT 
     a1.tab_schema,a1.tab_name,
