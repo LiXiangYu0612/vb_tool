@@ -4694,7 +4694,7 @@ WITH aa AS (
         n1.nspname as tab_schema,
         c2.relname AS "tab_name",
         c.relname AS "ind_name",
-        decode(i.indisusable,'t','usable','unusable') status,
+        case when i.indisusable then 'usable' else 'unusable' end status,
         case when i.indisprimary='t' then 1 else 0 end AS is_primary,
         REGEXP_REPLACE(
             TRIM(BOTH FROM 
