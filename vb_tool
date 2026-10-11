@@ -11353,36 +11353,74 @@ statement_re = re.compile(r'(?:LOG|INFO):\s+statement:\s+(.+)$', re.IGNORECASE)
 detail_re    = re.compile(r'DETAIL:\s+parameters:\s+(.+)$',       re.IGNORECASE)
 
 _READ_LOG_MAX_BYTES = 2 * 1024 * 1024 * 1024  # 2GB guard, same as analyze v2
+_READ_LOG_BACK  = 10001                       # lines kept before the hit (the look-back scans <=10000)
+_READ_LOG_AHEAD = 20000                       # lines kept after the hit
 
-def read_log_lines(path):
-    # Log files may be UTF-8 (default), GB18030/GBK (Chinese sites) or anything
-    # else; detect per file so Chinese text survives, latin-1 stays as the
-    # never-fail fallback (it used to be hardwired -> mojibake on UTF-8 logs).
+def read_log_lines(path, needle):
+    """Return ONLY a bounded slice around the FIRST line of `path` that contains
+    `needle`: the `_READ_LOG_BACK` lines before it, that line, and the
+    `_READ_LOG_AHEAD` lines after it. Both callers stop at the first match
+    (their print_sql_text/print_result ends in sys.exit(0)) and the look-back
+    scan reaches at most 10000 lines, so the slice is all they ever touch.
+
+    Peak memory is O(back+ahead) lines, NOT O(file): the old fh.read(2GB)
+    allocated a 2GB buffer up front (MemoryError on a host with <2GB free, which
+    the caller swallowed as "unique_id not found"), and any whole-file read
+    would hold a multi-GB log in RAM. An over-size file is rejected by SIZE
+    (O(1) for plain files; a .gz is counted while streaming)."""
     import gzip
-    opener = gzip.open if path.endswith('.gz') else open
-    with opener(path, 'rb') as fh:
-        raw = fh.read(_READ_LOG_MAX_BYTES)
-    if len(raw) >= _READ_LOG_MAX_BYTES:
-        print("Error: %s is too large (>= %d bytes); truncate or split it first"
-              % (path, _READ_LOG_MAX_BYTES), file=sys.stderr)
-        sys.exit(1)
-    text = None
-    for enc in ('utf-8', 'gb18030'):
+    import os
+    from collections import deque
+    is_gz = path.endswith('.gz')
+    if not is_gz:
         try:
-            text = raw.decode(enc)
-            break
-        except (UnicodeDecodeError, ValueError):
-            continue
-    if text is None:
-        text = raw.decode('latin-1')
-    lines = text.split('\n')
-    if lines and lines[-1] == '':
-        lines.pop()
-    return [l.rstrip('\r\n') for l in lines]
+            if os.path.getsize(path) >= _READ_LOG_MAX_BYTES:
+                print("Error: %s is too large (>= %d bytes); truncate or split it first"
+                      % (path, _READ_LOG_MAX_BYTES), file=sys.stderr)
+                sys.exit(1)
+        except OSError:
+            pass
+    opener = gzip.open if is_gz else open
+
+    # Log files may be UTF-8 (default), GB18030/GBK (Chinese sites) or anything
+    # else; decode per line (a 0x0A newline never falls inside a multi-byte
+    # sequence), latin-1 is the never-fail fallback.
+    def _decode(bl):
+        for enc in ('utf-8', 'gb18030'):
+            try:
+                return bl.decode(enc)
+            except (UnicodeDecodeError, ValueError):
+                continue
+        return bl.decode('latin-1')
+
+    win = deque(maxlen=_READ_LOG_BACK)
+    total = 0
+    hit_line = None
+    tail = []
+    with opener(path, 'rb') as fh:
+        for bl in fh:
+            total += len(bl)
+            if total >= _READ_LOG_MAX_BYTES:
+                print("Error: %s is too large (>= %d bytes); truncate or split it first"
+                      % (path, _READ_LOG_MAX_BYTES), file=sys.stderr)
+                sys.exit(1)
+            line = _decode(bl).rstrip('\r\n')
+            if hit_line is None:
+                if needle in line:
+                    hit_line = line
+                else:
+                    win.append(line)
+                continue
+            tail.append(line)
+            if len(tail) >= _READ_LOG_AHEAD:
+                break
+    if hit_line is None:
+        return []
+    return list(win) + [hit_line] + tail
 
 for logfile in logfiles:
     try:
-        lines = read_log_lines(logfile)
+        lines = read_log_lines(logfile, unique_id)
     except Exception:
         continue
 
@@ -22897,35 +22935,73 @@ statement_re = re.compile(r'(?:LOG|INFO):\s+statement:\s+(.+)$', re.IGNORECASE)
 detail_re    = re.compile(r'DETAIL:\s+parameters:\s+(.+)$',       re.IGNORECASE)
 
 _READ_LOG_MAX_BYTES = 2 * 1024 * 1024 * 1024  # 2GB guard, same as analyze v2
-def read_log_lines(path):
-    # Log files may be UTF-8 (default), GB18030/GBK (Chinese sites) or anything
-    # else; detect per file so Chinese text survives, latin-1 stays as the
-    # never-fail fallback (it used to be hardwired -> mojibake on UTF-8 logs).
+_READ_LOG_BACK  = 10001                       # lines kept before the hit (the look-back scans <=10000)
+_READ_LOG_AHEAD = 20000                       # lines kept after the hit
+def read_log_lines(path, needle):
+    """Return ONLY a bounded slice around the FIRST line of `path` that contains
+    `needle`: the `_READ_LOG_BACK` lines before it, that line, and the
+    `_READ_LOG_AHEAD` lines after it. Both callers stop at the first match
+    (their print_sql_text/print_result ends in sys.exit(0)) and the look-back
+    scan reaches at most 10000 lines, so the slice is all they ever touch.
+
+    Peak memory is O(back+ahead) lines, NOT O(file): the old fh.read(2GB)
+    allocated a 2GB buffer up front (MemoryError on a host with <2GB free, which
+    the caller swallowed as "unique_id not found"), and any whole-file read
+    would hold a multi-GB log in RAM. An over-size file is rejected by SIZE
+    (O(1) for plain files; a .gz is counted while streaming)."""
     import gzip
-    opener = gzip.open if path.endswith('.gz') else open
-    with opener(path, 'rb') as fh:
-        raw = fh.read(_READ_LOG_MAX_BYTES)
-    if len(raw) >= _READ_LOG_MAX_BYTES:
-        print("Error: %s is too large (>= %d bytes); truncate or split it first"
-              % (path, _READ_LOG_MAX_BYTES), file=sys.stderr)
-        sys.exit(1)
-    text = None
-    for enc in ('utf-8', 'gb18030'):
+    import os
+    from collections import deque
+    is_gz = path.endswith('.gz')
+    if not is_gz:
         try:
-            text = raw.decode(enc)
-            break
-        except (UnicodeDecodeError, ValueError):
-            continue
-    if text is None:
-        text = raw.decode('latin-1')
-    lines = text.split('\n')
-    if lines and lines[-1] == '':
-        lines.pop()
-    return [l.rstrip('\r\n') for l in lines]
+            if os.path.getsize(path) >= _READ_LOG_MAX_BYTES:
+                print("Error: %s is too large (>= %d bytes); truncate or split it first"
+                      % (path, _READ_LOG_MAX_BYTES), file=sys.stderr)
+                sys.exit(1)
+        except OSError:
+            pass
+    opener = gzip.open if is_gz else open
+
+    # Log files may be UTF-8 (default), GB18030/GBK (Chinese sites) or anything
+    # else; decode per line (a 0x0A newline never falls inside a multi-byte
+    # sequence), latin-1 is the never-fail fallback.
+    def _decode(bl):
+        for enc in ('utf-8', 'gb18030'):
+            try:
+                return bl.decode(enc)
+            except (UnicodeDecodeError, ValueError):
+                continue
+        return bl.decode('latin-1')
+
+    win = deque(maxlen=_READ_LOG_BACK)
+    total = 0
+    hit_line = None
+    tail = []
+    with opener(path, 'rb') as fh:
+        for bl in fh:
+            total += len(bl)
+            if total >= _READ_LOG_MAX_BYTES:
+                print("Error: %s is too large (>= %d bytes); truncate or split it first"
+                      % (path, _READ_LOG_MAX_BYTES), file=sys.stderr)
+                sys.exit(1)
+            line = _decode(bl).rstrip('\r\n')
+            if hit_line is None:
+                if needle in line:
+                    hit_line = line
+                else:
+                    win.append(line)
+                continue
+            tail.append(line)
+            if len(tail) >= _READ_LOG_AHEAD:
+                break
+    if hit_line is None:
+        return []
+    return list(win) + [hit_line] + tail
 
 for logfile in logfiles:
     try:
-        lines = read_log_lines(logfile)
+        lines = read_log_lines(logfile, unique_id)
     except Exception:
         continue
 
