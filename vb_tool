@@ -12189,8 +12189,8 @@ def query_wait_events_for_sql_ids(sql_ids, start_time, end_time, batch_size=500,
         # 两轮尝试: 先按日志时间范围过滤; 查不到则去掉时间过滤兜底重查
         batch_hit = 0
         for attempt, (q_start, q_end, tag) in enumerate([
-                (start_str, end_str, '按日志时间范围'),
-                (None, None, '不限时间(兜底)')], 1):
+                (start_str, end_str, 'log time range'),
+                (None, None, 'no time filter (fallback)')], 1):
             query = _build_wait_events_query(ids_csv, q_start, q_end)
             if debug:
                 print(f"[DEBUG] wait events command({tag}): vsql -d postgres -q -A -t -c <query>", file=sys.stderr)
@@ -13766,52 +13766,52 @@ def parse_datetime(date_str):
 
 # Argument parsing
 parser = argparse.ArgumentParser(
-    description='Vastbase/PostgreSQL 慢查询日志分析工具 - 分析日志并生成HTML格式的报告',
+    description='Vastbase/PostgreSQL slow-query log analyzer - parse logs and build an HTML report',
     formatter_class=argparse.RawDescriptionHelpFormatter,
     epilog="""
-使用示例:
-  # 分析单个日志文件，输出HTML报告
+Examples:
+  # analyze one log file, write an HTML report
   python analyze_log.py -f /path/to/postgresql-2025-01-01.log
 
-  # 分析多个日志文件
+  # analyze several log files
   python analyze_log.py -f /path/to/log1.log /path/to/log2.log
 
-  # 分析多个日志文件,正则表达式匹配
+  # analyze log files matched by a glob
   python analyze_log.py -f /path/to/*.log
 
-  #指定输出html路径,默认在当前位置输出,使用默认命名规则
+  # choose the output html path (default: current dir, default naming)
   python analyze_log.py -f /path/to/log.log -o /path/to/my_report.html
 
-  # 指定时间范围分析
+  # analyze a time range
   python analyze_log.py -f /path/to/log.log -b "2025-01-01 00:00:00" -e "2025-01-02 23:59:59"
 
-  # 指定日志前缀格式（不从数据库获取）
+  # force the log prefix format (skip the database lookup)
   python analyze_log.py -f /path/to/log.log -p "%%m %%u %%d %%r %%p %%S [%%x]"
 
-  # 生成对比报告（对比1天前的数据）
+  # diff report (against data 1 day ago)
   python analyze_log.py -f /path/to/log.log --diff 1d
 
-  # 生成对比报告（对比1小时前的数据）
+  # diff report (against data 1 hour ago)
   python analyze_log.py -f /path/to/log.log --diff 1h
 
-  # 生成对比报告（对比30分钟前的数据）
+  # diff report (against data 30 minutes ago)
   python analyze_log.py -f /path/to/log.log --diff 30m
 
-  # 不指定文件时自动从数据库获取日志目录并分析最近2天日志
+  # without -f: fetch the log directory from the database, analyze the last 2 days
   python analyze_log.py
-  # 分析最近3天的日志
+  # analyze the last 3 days
   python analyze_log.py -d 3
-  # 分析最近30天的日志
+  # analyze the last 30 days
   python analyze_log.py --days 30
-  # 查看版本
+  # show version
   python analyze_log.py -v
-  # 分析 SQL 语句 (DML+DDL)，不分析错误日志（默认）
+  # analyze SQL statements only (DML+DDL), no error logs (default)
   python analyze_log.py -f /path/to/log.log -m query
-  # 仅分析错误日志 (ERROR/WARNING/FATAL/PANIC)，不分析 SQL
+  # analyze error logs only (ERROR/WARNING/FATAL/PANIC), no SQL
   python analyze_log.py -f /path/to/log.log -m error
-  # 分析所有内容（SQL + 错误日志）
+  # analyze everything (SQL + error logs)
   python analyze_log.py -f /path/to/log.log -m all
-  # 启用调试输出
+  # enable debug output
   python analyze_log.py -f /path/to/log.log --debug
 """)
 parser.add_argument('-f', '--file', type=str, nargs='+', 
@@ -14692,7 +14692,7 @@ def expand_file_patterns(file_patterns):
     expanded_files = sorted(list(set(expanded_files)))
     return expanded_files
 
-def show_progress(current, total, prefix="处理进度", start_time=None, total_elapsed_time=0):
+def show_progress(current, total, prefix="progress", start_time=None, total_elapsed_time=0):
     """显示处理进度"""
     bar_length = 50
     if total <= 0:
@@ -17352,7 +17352,7 @@ class ReportGenerator:
             {summary_info['html']}
         </section>
         """
-        _record_size('summary_section(总)', summary_section)
+        _record_size('summary_section(total)', summary_section)
         _record_size('summary_info.html', summary_info.get('html', ''))
 
         # Lock / Deadlock Detail Analysis部分(组合后体积)
@@ -17387,7 +17387,7 @@ class ReportGenerator:
             time_analysis_html_parts.append(time_analysis_info[key]['html'])
         time_analysis_html_parts.append('</section>')
         time_analysis_section = ''.join(time_analysis_html_parts)
-        _record_size('time_analysis_section(总)', time_analysis_section)
+        _record_size('time_analysis_section(total)', time_analysis_section)
         _record_size('input_all_total_list', f'count={len(all_total_list)}', is_html=False)
         # 同时按维度单独统计
         for _key in time_analysis_info:
@@ -17709,7 +17709,7 @@ class ReportGenerator:
         else:
             detail_html_parts.append('</tbody></table></section>')
         detail_section = ''.join(detail_html_parts)
-        _record_size('detail_section(慢SQLDetail)', detail_section)
+        _record_size('detail_section(SQLDetail)', detail_section)
         _record_size('input_sorted_data', f'count={len(sorted_data)}', is_html=False)
         try:
             _total_sql_bytes = sum(
@@ -20716,7 +20716,7 @@ class ReportGenerator:
         """
         # ===== 体积统计输出(仅 debug 模式) =====
         if _debug:
-            _record_size('full_html(最终)', full_html)
+            _record_size('full_html(final)', full_html)
             _elapsed = _time_mod.time() - _html_size_t0
             print("\n" + "=" * 80)
             print(f"[HTML size stats] generate_full_html_report took {_elapsed:.2f}s")
@@ -20992,7 +20992,7 @@ def parse_all_events(start_n, blocks, total_list, deadlock_list, lock_event_list
     for i in range(start_n, len(blocks), 2):
         processed += 1
         if processed % 500 == 0:
-            show_progress(processed, total_blocks, "解析事件", start_time, total_elapsed_time)
+            show_progress(processed, total_blocks, "parsing events", start_time, total_elapsed_time)
 
         timestamp_str = blocks[i]
         log_block = blocks[i + 1]
@@ -21006,7 +21006,7 @@ def parse_all_events(start_n, blocks, total_list, deadlock_list, lock_event_list
 
         if args.debug and 'deadlock' in log_block.lower():
             _log_block_preview = log_block[:200].replace('\n', ' | ')
-            print(f"[DEBUG] 块含 deadlock 关键词，ts={timestamp_str}, has_deadlock={has_deadlock}, DEADLOCK_DETECT_PATTERN={bool(DEADLOCK_DETECT_PATTERN.search(log_block))}, preview={_log_block_preview}")
+            print(f"[DEBUG] block has deadlock keyword, ts={timestamp_str}, has_deadlock={has_deadlock}, DEADLOCK_DETECT_PATTERN={bool(DEADLOCK_DETECT_PATTERN.search(log_block))}, preview={_log_block_preview}")
 
         # 按需解析前缀
         connection_key = thread_id = None
@@ -21814,7 +21814,7 @@ def parse_all_events(start_n, blocks, total_list, deadlock_list, lock_event_list
     if args.debug:
         print(f"[DEBUG] unified deadlock parse done, final deadlock records: {len(deadlock_list)}")
 
-    show_progress(total_blocks, total_blocks, "解析事件", start_time, total_elapsed_time)
+    show_progress(total_blocks, total_blocks, "parsing events", start_time, total_elapsed_time)
 
     # 内存优化收尾:把每类(按归一化消息聚合)首尾 2 条记录的 context/full_log 填回 error_list
     # 中间记录保持轻量(context 为空),前端聚合取首尾时正好能拿到完整上下文
@@ -21980,7 +21980,7 @@ if __name__ == "__main__":
                     timeout=args.detail_timeout, debug=args.debug)
             except Exception as e:
                 wait_events_data = {}
-                wait_events_warning = f"等待事件反查失败: {e}"
+                wait_events_warning = f"wait-events lookup failed: {e}"
                 print(f"WARNING: {wait_events_warning}", file=sys.stderr)
             print(f"[progress] wait events done in {_main_timer.time() - _t0:.1f}s", file=sys.stderr)
 
@@ -22011,7 +22011,7 @@ if __name__ == "__main__":
                 _t1 = _main_timer.time()
                 statement_stats_map = batch_query_sqlhc_statement_stats(
                     uid_list, timeout=args.detail_timeout, debug=args.debug)
-                print(f"[progress] sqlhc sqlstat batch done: {len(statement_stats_map)}/{len(uid_list)}, 耗时 {_main_timer.time() - _t1:.1f}s", file=sys.stderr)
+                print(f"[progress] sqlhc sqlstat batch done: {len(statement_stats_map)}/{len(uid_list)}, elapsed {_main_timer.time() - _t1:.1f}s", file=sys.stderr)
 
                 # 2. 按 uid 提取表 + 按库分组批量解析 schema
                 _t1 = _main_timer.time()
@@ -22057,7 +22057,7 @@ if __name__ == "__main__":
                         timeout=args.detail_timeout, debug=args.debug)
                     tabstats_map.update(ts)
                     tabsize_map.update(sz)
-                print(f"[progress] sqlhc tabstat/tabsize batch done: {len(tabstats_map)}/{sum(len(v) for v in db_uid_tables.values())} 块, 耗时 {_main_timer.time() - _t1:.1f}s", file=sys.stderr)
+                print(f"[progress] sqlhc tabstat/tabsize batch done: {len(tabstats_map)}/{sum(len(v) for v in db_uid_tables.values())} blocks, elapsed {_main_timer.time() - _t1:.1f}s", file=sys.stderr)
 
                 # 4. 按 uid 组装 sqlhc 文本，批量缺失的回退单查保证容错
                 for uid_str in uid_list:
@@ -22076,7 +22076,7 @@ if __name__ == "__main__":
                     sqlhc_data[uid_str] = sqlhc_content
             except Exception as e:
                 sqlhc_data = {}
-                sqlhc_warning = f"sqlhc 信息收集失败: {e}"
+                sqlhc_warning = f"sqlhc info collection failed: {e}"
                 print(f"WARNING: {sqlhc_warning}", file=sys.stderr)
             print(f"[progress] sqlhc info collected in {_main_timer.time() - _t0:.1f}s", file=sys.stderr)
 
