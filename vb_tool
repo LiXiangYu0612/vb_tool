@@ -3591,7 +3591,7 @@ run_recover_table() {
     local db_name=""
     local schema_name=""
     local table_name=""
-    local rows_per_page="100"  
+    local rows_per_page="300"
     
     while getopts ":d:s:t:n:" opt; do
       case $opt in
