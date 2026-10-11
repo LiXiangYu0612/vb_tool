@@ -10887,7 +10887,7 @@ run_sqltext() {
     local unique_id="$1"
 
     local gauss_log
-    gauss_log=$(env | grep -iw GAUSSLOG | cut -d'=' -f2)
+    gauss_log="${GAUSSLOG:-}"
     if [[ -z "$gauss_log" ]]; then
         echo "Error: not found GAUSSLOG path" >&2
         return 1
@@ -22227,7 +22227,7 @@ local output_to_file=0
     fi
 
     local gauss_log
-    gauss_log=$(env | grep -iw GAUSSLOG | cut -d'=' -f2)
+    gauss_log="${GAUSSLOG:-}"
     if [[ -z "$gauss_log" ]]; then
         echo "Error: not found GAUSSLOG path" >&2
         return 1
