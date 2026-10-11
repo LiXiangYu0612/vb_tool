@@ -13049,17 +13049,17 @@ def _build_sqlhc_statement_stats_query(uid):
 \\echo '======================'
 \\echo '                          '
 SELECT user_name,n_calls,
-round(db_time/1e3/nullif(n_calls,0),1) avg_db_ms,
-round(execution_time/1e3/nullif(n_calls,0),1) avg_et_ms,
-round(cpu_time/1e3/nullif(n_calls,0),1) avg_cpu_ms,
-round(data_io_time/1e3/nullif(n_calls,0),1) avg_io_ms,
-round((parse_time+plan_time+rewrite_time)/1e3/nullif(n_calls,0),1) avg_plan_ms,
-round(pl_execution_time/1e3/nullif(n_calls,0),1) avg_plsql_ms,
-round(sort_time/1e3/nullif(n_calls,0),1) a_sort_ms,
-round(hash_time/1e3/nullif(n_calls,0),1) a_hash_ms,
-round(n_blocks_fetched/nullif(n_calls,0),1) avg_cr,
-round((n_blocks_fetched-n_blocks_hit)/nullif(n_calls,0),1) avg_pr,
-round((n_returned_rows+n_tuples_inserted+n_tuples_updated+n_tuples_deleted)/nullif(n_calls,0),1) avg_rows
+coalesce(round(db_time/1e3/nullif(n_calls,0),1)::text,'-') avg_db_ms,
+coalesce(round(execution_time/1e3/nullif(n_calls,0),1)::text,'-') avg_et_ms,
+coalesce(round(cpu_time/1e3/nullif(n_calls,0),1)::text,'-') avg_cpu_ms,
+coalesce(round(data_io_time/1e3/nullif(n_calls,0),1)::text,'-') avg_io_ms,
+coalesce(round((parse_time+plan_time+rewrite_time)/1e3/nullif(n_calls,0),1)::text,'-') avg_plan_ms,
+coalesce(round(pl_execution_time/1e3/nullif(n_calls,0),1)::text,'-') avg_plsql_ms,
+coalesce(round(sort_time/1e3/nullif(n_calls,0),1)::text,'-') a_sort_ms,
+coalesce(round(hash_time/1e3/nullif(n_calls,0),1)::text,'-') a_hash_ms,
+coalesce(round(n_blocks_fetched/nullif(n_calls,0),1)::text,'-') avg_cr,
+coalesce(round((n_blocks_fetched-n_blocks_hit)/nullif(n_calls,0),1)::text,'-') avg_pr,
+coalesce(round((n_returned_rows+n_tuples_inserted+n_tuples_updated+n_tuples_deleted)/nullif(n_calls,0),1)::text,'-') avg_rows
 FROM dbe_perf.statement WHERE unique_sql_id={uid};
 """
 
@@ -27519,8 +27519,10 @@ Usage: vb_tool awr <create|enable|disable|awrrpt|awrdiff|baseline|topsql|event|s
                             Immediately purges already-expired snaps,
                             repl/slot/walrcv/os/lt/stack logs and html reports.
   config  interval <min>    set sampling interval in minutes (default 60,
-                            1-60, cron minute-field limit). If periodic capture
-                            is enabled the crontab entry is rewritten at once.
+                            1-1440). The per-minute cron wakes every minute and
+                            fires only at multiples of this value; a change
+                            takes effect at the next boundary (legacy crontab
+                            forms are migrated on change).
 
 Storage (per snapshot; <root> = $VB_TOOL_HOME/awrs/<port>, per instance):
   snapshot:   <root>/snap_<id>/{meta.json, os/<proc files>, db/<views>.csv}
@@ -34996,6 +34998,7 @@ def main():
     text_db = text_schema = text_table = text_event_name = text_sql_id = None
     metric = "dbtime"
     metric_given = False
+    sql_id_given = False
     top_n = 30
     n_given = False
     i = 0
@@ -35033,7 +35036,7 @@ def main():
         elif a == "--text" and i + 1 < len(argv):
             text_section = argv[i + 1]; i += 2
         elif a == "--sql-id" and i + 1 < len(argv):
-            text_sql_id = argv[i + 1]; i += 2
+            text_sql_id = argv[i + 1]; sql_id_given = True; i += 2
         elif a == "--event" or (a == "-E" and i + 1 < len(argv)):
             if i + 1 >= len(argv):
                 sys.stderr.write("Error: %s requires a value\n" % a); return 2
@@ -35113,10 +35116,12 @@ def main():
         #   (html 模式的 -m/-n 不在此列。)
         if text_section:
             _opt_owner = {"m": ("topsql",), "n": ("topsql",), "E": ("event",),
-                          "d": ("tabstat",), "s": ("tabstat",), "t": ("tabstat",)}
+                          "d": ("tabstat",), "s": ("tabstat",), "t": ("tabstat",),
+                          "sql-id": ("sqlhist",)}
             for _opt, _owners in _opt_owner.items():
                 _given = {"m": metric_given, "n": n_given, "E": bool(text_event_name),
-                          "d": bool(text_db), "s": bool(text_schema), "t": bool(text_table)}.get(_opt, False)
+                          "d": bool(text_db), "s": bool(text_schema), "t": bool(text_table),
+                          "sql-id": sql_id_given}.get(_opt, False)
                 if _given and text_section not in _owners:
                     sys.stderr.write("Error: -%s is only valid for 'awr %s' (got section '%s')\n"
                                      % (_opt, "'|'".join(_owners), text_section)); return 2
@@ -36670,7 +36675,7 @@ _awr_config() {
         else echo "  retention : ${r} days"; fi
         echo "  interval  : ${i} min"
         echo "usage: vb_tool awr config retention <days>   (0 = never purge, max 3650)"
-        echo "       vb_tool awr config interval <min>     (1-60)"
+        echo "       vb_tool awr config interval <min>     (1-1440)"
         return 0
     fi
     local val="${2:-}"
