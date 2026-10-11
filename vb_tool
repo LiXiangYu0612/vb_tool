@@ -11177,6 +11177,47 @@ def _psql_query(db, sql):
     except Exception:
         return None
 
+_SQLTEXT_SCHEMA_CACHE = {}
+
+def _lookup_schema(db_name, raw_user, uid):
+    """按 unique_query_id 反查 statement_history.schema_name(=执行时 search_path 原串),
+    按 PG 规则解析($user 展开/去引号/逐项验 pg_namespace, 取第一个真实存在的项)。
+    与 sqlhc 的 lookup_schema 同规则同口径(用户 2026-10-11: sqltext 也要走反查);
+    连接库先试语句自己的库再试 postgres(204 实测可见性怪癖), 失败/超时一律回落 None。"""
+    uid = (uid or '').strip()
+    if not uid.isdigit():
+        return None
+    key = (db_name, uid)
+    if key in _SQLTEXT_SCHEMA_CACHE:
+        return _SQLTEXT_SCHEMA_CACHE[key]
+    resolved = None
+    try:
+        lit = uid.replace("'", "''")
+        q = ("select schema_name from dbe_perf.statement_history "
+             "where unique_query_id = '%s' and schema_name is not null "
+             "order by start_time desc limit 1" % lit)
+        rows = []
+        for cand_db in ([db_name] if db_name == 'postgres' else [db_name, 'postgres']):
+            rows = _psql_query(cand_db, q)
+            if rows:
+                break
+        if rows:
+            existing = set((_psql_query(db_name, "select nspname from pg_namespace")
+                            or '').split())
+            for raw in rows[0].split(','):
+                cand = raw.strip().strip('"').strip()
+                if not cand:
+                    continue
+                if cand == '$user':
+                    cand = raw_user
+                if cand in existing:
+                    resolved = cand
+                    break
+    except Exception:
+        resolved = None
+    _SQLTEXT_SCHEMA_CACHE[key] = resolved
+    return resolved
+
 def _line_schema(line):
     """行内字面量 schema=xxx (用户 2026-10-11: 日志前缀写 dbname=x user=y schema=z)。
     没有则 None(204 前缀是占位符式, 无 schema 位)。"""
@@ -11184,6 +11225,7 @@ def _line_schema(line):
     return m.group(1) if m else None
 
 def print_sql_text(db_name, user_name, sql_raw, params, line_schema=None):
+    raw_user   = user_name.strip()               # 反查里 $user 的展开源(未 normalize)
     user_name  = normalize_user(user_name)
     sql_final  = replace_params(sql_raw, params) if params else sql_raw
     formatted  = format_sql(sql_final)
@@ -11198,6 +11240,9 @@ def print_sql_text(db_name, user_name, sql_raw, params, line_schema=None):
     # ---- part 2: EXPLAIN in the parsed database (user's call 2026-10-11):
     # plain EXPLAIN only -- never ANALYZE, the statement is NOT executed.
     # vb_version() >= 3.0.9 -> explain (outline); below -> plain explain.
+    # ★search_path 取值顺序与 sqlhc 对齐 (用户 2026-10-11): ① 按 unique_query_id
+    #   反查 statement_history(执行时 search_path 原串, PG 规则解析) ② 日志行内
+    #   schema=xxx 字面量 ③ SQL 首个限定表名推导 ④ 都无=会话默认。
     ver = None
     if db_name:
         ver = _psql_query(db_name, 'select vb_version()')
@@ -11223,8 +11268,11 @@ def print_sql_text(db_name, user_name, sql_raw, params, line_schema=None):
                         sql_final, re.IGNORECASE)
         if msp:
             sp = msp.group(1)
-        if line_schema:
-            sp = line_schema          # 行内 schema=xxx 优先(日志前缀原生口径)
+        sh_schema = _lookup_schema(db_name, raw_user, unique_id)
+        if sh_schema:
+            sp = sh_schema            # ① statement_history 反查(sqlhc 同规则)
+        elif line_schema:
+            sp = line_schema          # ② 行内 schema=xxx 字面量
         env = dict(os.environ)
         if sp:
             env['PGOPTIONS'] = (env.get('PGOPTIONS', '') +
