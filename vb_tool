@@ -4755,6 +4755,13 @@ where
     AND a1.tab_name = a2.tab_name
     AND a1.ind_name <> a2.ind_name
     AND a1.col_count <= a2.col_count
+    -- a unique index only counts as redundant when the covering index is ALSO
+    -- unique on EXACTLY the same columns -- then the two enforce the same
+    -- uniqueness and dropping one loses nothing (a constraint-carrying index must
+    -- never be flagged against a mere prefix cover). Non-unique candidates keep
+    -- the plain prefix rule. PK indexes carry indisunique='t', so they are judged
+    -- by the same rule (a PK is not redundant w.r.t. a wider non-unique index).
+    AND (a1.is_unique = 0 OR (a2.is_unique = 1 AND a2.col_list = a1.col_list))
     AND (a2.col_list LIKE a1.col_list || ',%' or a2.col_list=a1.col_list)) where rn=1 order by 1,2,3;
 \echo ''	
 \echo '==============================='
