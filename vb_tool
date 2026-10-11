@@ -11204,7 +11204,8 @@ def _lookup_schema(db_name, raw_user, uid):
         if rows:
             existing = set((_psql_query(db_name, "select nspname from pg_namespace")
                             or '').split())
-            for raw in rows[0].split(','):
+            _sh_row = rows.splitlines()[0] if rows.splitlines() else ''
+            for raw in _sh_row.split(','):
                 cand = raw.strip().strip('"').strip()
                 if not cand:
                     continue
@@ -24352,7 +24353,8 @@ _vtop_cmd_line() { # $1 = text that arrived right behind the ESC (may be empty)
     #   60s idle   -> cancel (timer restarts on every key)
     # Chars are echoed BY US: the tty stays -echo for the whole time (the old
     # temporary `stty echo` around one big read is gone with it).
-    local pre="${1:-}" buf="$pre" ch rc=0
+    local pre="${1:-}" ch rc=0
+    local buf="$pre"
     _vtop_cmd=""
     printf 'Enter: %s' "$buf"
     while :; do
@@ -27239,7 +27241,7 @@ while [ $# -gt 0 ]; do
             export PGPORT="$2"; shift 2;;
         -P[0-9]*)
             _vb_p="${1#-P}"
-            if [ "$_vb_p" -lt 1 ] || [ "$_vb_p" -gt 65535 ]; then
+            if ! printf '%s' "$_vb_p" | grep -qE '^[0-9]+$' || [ "$_vb_p" -lt 1 ] || [ "$_vb_p" -gt 65535 ]; then
                 echo "Error: -P expects a port number (1-65535), e.g. -P 5433" >&2
                 exit 2
             fi
@@ -27846,7 +27848,7 @@ _awr_collect() {
                       print k "|" live[k]+0 "|" dcount[k]+0; seen[k] = 1
                   }
                   ng = split(ghcfg, carr, "|")
-                  for (i = 1; i <= nc; i++) {
+                  for (i = 1; i <= ng; i++) {
                       k = carr[i]; if (k == "") continue
                       print k "|" live[k]+0 "|" dcount[k]+0; seen[k] = 1
                   }
@@ -36977,7 +36979,7 @@ case "$1" in
             se_help
             exit 0
         fi
-        run_se "$2"
+        run_se "$2" "${3:-}"
         rc=$?
         [ "$rc" = "2" ] && se_help
         exit $rc
