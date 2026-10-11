@@ -6510,13 +6510,13 @@ EOF
 echo '=========================================='
 echo '         top cpu usage info               '
 echo '=========================================='
-psql -P footer=off -d postgres -c "with tmp as (SELECT split_part(result, ',', 1) AS lwpid, split_part(result, ',', 2) AS cpu_usage FROM regexp_split_to_table('$(top -b -n1 -H -p $pid | awk '/^ *PID USER/ {ci=0; for(i=1;i<=NF;i++) if($i=="%CPU") ci=i; while (getline) if(ci && $ci!="") print $1 "," $ci}'| paste -sd ";")', ';') AS result) select round(sum(tmp.cpu_usage),2)||'%' cpu_usage,s.thread_name,a.unique_sql_id,min(s.pid) one_pid,count(*) pid_cnt,min(substr(REGEXP_REPLACE(REGEXP_REPLACE(query, '(\r|\n)+', ' '),' {2,}', ' '),1,50)) sqltext from pg_os_threads s right join tmp on s.lwpid=tmp.lwpid  left join pg_stat_activity a on s.pid=a.pid  where (a.state in ('active') or a.state is null) group by s.thread_name,a.unique_sql_id having sum(tmp.cpu_usage)>0 order by round(sum(tmp.cpu_usage),2)::numeric desc limit 10"
+psql -P footer=off -d postgres -c "with tmp as (SELECT split_part(result, ',', 1) AS lwpid, split_part(result, ',', 2) AS cpu_usage FROM regexp_split_to_table('$(LC_ALL=C top -b -n1 -H -p $pid | awk '/^ *PID USER/ {ci=0; for(i=1;i<=NF;i++) if($i=="%CPU") ci=i; while (getline) if(ci && $ci!="") print $1 "," $ci}'| paste -sd ";")', ';') AS result) select round(sum(tmp.cpu_usage),2)||'%' cpu_usage,s.thread_name,a.unique_sql_id,min(s.pid) one_pid,count(*) pid_cnt,min(substr(REGEXP_REPLACE(REGEXP_REPLACE(query, '(\r|\n)+', ' '),' {2,}', ' '),1,50)) sqltext from pg_os_threads s right join tmp on s.lwpid=tmp.lwpid  left join pg_stat_activity a on s.pid=a.pid  where (a.state in ('active') or a.state is null) group by s.thread_name,a.unique_sql_id having sum(tmp.cpu_usage)>0 order by round(sum(tmp.cpu_usage),2)::numeric desc limit 10"
 
 echo '=========================================='
 echo '         top I/O usage info               '
 echo '=========================================='
 export S_TIME_FORMAT=ISO
-psql -P footer=off -d postgres -c "with tmp as (SELECT split_part(result, ',', 1) AS lwpid, split_part(result, ',', 2) AS kb_rd,split_part(result, ',', 3) AS kb_wr FROM regexp_split_to_table('$(pidstat -hdt -p $pid 1 1 | awk 'NR>4 {print $4 "," $5 "," $6}' | paste -sd ";")', ';') AS result) select sum(tmp.kb_rd) read_kb,sum(tmp.kb_wr) write_kb,s.thread_name,a.unique_sql_id,min(s.pid) one_pid,count(*) pid_cnt,min(substr(REGEXP_REPLACE(REGEXP_REPLACE(query, '(\r|\n)+', ' '),' {2,}', ' '),1,50)) sqltext from pg_os_threads s right join tmp on s.lwpid=tmp.lwpid left join pg_stat_activity a on s.pid=a.pid where (a.state in ('active') or a.state is null) group by s.thread_name,a.unique_sql_id having sum(tmp.kb_rd)::numeric+sum(tmp.kb_wr)::numeric>0 order by sum(tmp.kb_rd)::numeric+sum(tmp.kb_wr)::numeric desc limit 10" 
+psql -P footer=off -d postgres -c "with tmp as (SELECT split_part(result, ',', 1) AS lwpid, split_part(result, ',', 2) AS kb_rd,split_part(result, ',', 3) AS kb_wr FROM regexp_split_to_table('$(LC_ALL=C S_TIME_FORMAT=ISO pidstat -hdt -p $pid 1 1 | awk 'NR>4 {print $4 "," $5 "," $6}' | paste -sd ";")', ';') AS result) select sum(tmp.kb_rd) read_kb,sum(tmp.kb_wr) write_kb,s.thread_name,a.unique_sql_id,min(s.pid) one_pid,count(*) pid_cnt,min(substr(REGEXP_REPLACE(REGEXP_REPLACE(query, '(\r|\n)+', ' '),' {2,}', ' '),1,50)) sqltext from pg_os_threads s right join tmp on s.lwpid=tmp.lwpid left join pg_stat_activity a on s.pid=a.pid where (a.state in ('active') or a.state is null) group by s.thread_name,a.unique_sql_id having sum(tmp.kb_rd)::numeric+sum(tmp.kb_wr)::numeric>0 order by sum(tmp.kb_rd)::numeric+sum(tmp.kb_wr)::numeric desc limit 10" 
 
  else
     psql -d postgres -P footer=off <<EOF
@@ -6584,13 +6584,13 @@ EOF
 echo '=========================================='
 echo '         top cpu usage info               '
 echo '=========================================='
-psql -P footer=off -d postgres -c "with tmp as (SELECT split_part(result, ',', 1) AS lwpid, split_part(result, ',', 2) AS cpu_usage FROM regexp_split_to_table('$(top -b -n1 -H -p $pid | awk '/^ *PID USER/ {ci=0; for(i=1;i<=NF;i++) if($i=="%CPU") ci=i; while (getline) if(ci && $ci!="") print $1 "," $ci}'| paste -sd ";")', ';') AS result) select sum(tmp.cpu_usage)||'%' cpu_usage,s.thread_name,a.query_id,min(s.pid) one_pid,count(*) pid_cnt,min(substr(REGEXP_REPLACE(REGEXP_REPLACE(query, '(\r|\n)+', ' '),' {2,}', ' '),1,50)) sqltext from pg_os_threads s join tmp on s.lwpid=tmp.lwpid  left join pg_stat_activity a on s.pid=a.pid  where (a.state in ('active') or a.state is null) group by s.thread_name,a.query_id having sum(tmp.cpu_usage)>0 order by round(sum(tmp.cpu_usage),2)::numeric desc limit 10"
+psql -P footer=off -d postgres -c "with tmp as (SELECT split_part(result, ',', 1) AS lwpid, split_part(result, ',', 2) AS cpu_usage FROM regexp_split_to_table('$(LC_ALL=C top -b -n1 -H -p $pid | awk '/^ *PID USER/ {ci=0; for(i=1;i<=NF;i++) if($i=="%CPU") ci=i; while (getline) if(ci && $ci!="") print $1 "," $ci}'| paste -sd ";")', ';') AS result) select sum(tmp.cpu_usage)||'%' cpu_usage,s.thread_name,a.query_id,min(s.pid) one_pid,count(*) pid_cnt,min(substr(REGEXP_REPLACE(REGEXP_REPLACE(query, '(\r|\n)+', ' '),' {2,}', ' '),1,50)) sqltext from pg_os_threads s join tmp on s.lwpid=tmp.lwpid  left join pg_stat_activity a on s.pid=a.pid  where (a.state in ('active') or a.state is null) group by s.thread_name,a.query_id having sum(tmp.cpu_usage)>0 order by round(sum(tmp.cpu_usage),2)::numeric desc limit 10"
 
 echo '=========================================='
 echo '         top I/O usage info               '
 echo '=========================================='
 export S_TIME_FORMAT=ISO
-psql -P footer=off -d postgres -c "with tmp as (SELECT split_part(result, ',', 1) AS lwpid, split_part(result, ',', 2) AS kb_rd,split_part(result, ',', 3) AS kb_wr FROM regexp_split_to_table('$(pidstat -hdt -p $pid 1 1 | awk 'NR>4 {print $4 "," $5 "," $6}' | paste -sd ";")', ';') AS result) select sum(tmp.kb_rd) read_kb,sum(tmp.kb_wr) write_kb,s.thread_name,a.query_id,min(s.pid) one_pid,count(*) pid_cnt,min(substr(REGEXP_REPLACE(REGEXP_REPLACE(query, '(\r|\n)+', ' '),' {2,}', ' '),1,50)) sqltext from pg_os_threads s join tmp on s.lwpid=tmp.lwpid left join pg_stat_activity a on s.pid=a.pid where (a.state in ('active') or a.state is null) group by s.thread_name,a.query_id having sum(tmp.kb_rd)::numeric+sum(tmp.kb_wr)::numeric>0 order by sum(tmp.kb_rd)::numeric+sum(tmp.kb_wr)::numeric desc limit 10" 
+psql -P footer=off -d postgres -c "with tmp as (SELECT split_part(result, ',', 1) AS lwpid, split_part(result, ',', 2) AS kb_rd,split_part(result, ',', 3) AS kb_wr FROM regexp_split_to_table('$(LC_ALL=C S_TIME_FORMAT=ISO pidstat -hdt -p $pid 1 1 | awk 'NR>4 {print $4 "," $5 "," $6}' | paste -sd ";")', ';') AS result) select sum(tmp.kb_rd) read_kb,sum(tmp.kb_wr) write_kb,s.thread_name,a.query_id,min(s.pid) one_pid,count(*) pid_cnt,min(substr(REGEXP_REPLACE(REGEXP_REPLACE(query, '(\r|\n)+', ' '),' {2,}', ' '),1,50)) sqltext from pg_os_threads s join tmp on s.lwpid=tmp.lwpid left join pg_stat_activity a on s.pid=a.pid where (a.state in ('active') or a.state is null) group by s.thread_name,a.query_id having sum(tmp.kb_rd)::numeric+sum(tmp.kb_wr)::numeric>0 order by sum(tmp.kb_rd)::numeric+sum(tmp.kb_wr)::numeric desc limit 10" 
 fi
 }
 
@@ -24329,6 +24329,7 @@ _vtop_istrow() { # one load-profile line: $1=label $2=begin $3=end $4=window_ms 
     #   (仅 buffer_hit% 行恰好是累计口径)。2026-10-10 对齐: 值跟表头走, 速率列
     #   仍按窗口差分不变。
     [ -z "${2:-}" ] && { printf '%-26s %-16s %s\n' "$1" '-' '-'; return 0; }
+    [ -z "${3:-}" ] && { printf '%-26s %-16s %s\n' "$1" '-' '-'; return 0; }
     r=$(_vtop_rate "$2" "$3" "$4")
     t=${3:--}
     if [ "$5" = "bytes" ]; then r=$(_vtop_fmt_b "$r"); t=$(_vtop_fmt_b "$t"); fi
@@ -25496,7 +25497,7 @@ _vtop_screen_topsql() { # TOPSQL page -- EXACTLY the two rankings the `as` scrip
     # %CPU = 进程生命周期平均, 与 as 同源同值。2026-09-27 版的 -d0.3 -n2 瞬时帧
     # 与 as 的数字对不上, 以 as 为准 (主屏 [TOPSQL] 同步改, 两处同一条链路)。
     if [ -n "$ts_pm" ]; then
-        ts_pairs=$(timeout 5 top -b -n1 -H -p "$ts_pm" 2>/dev/null \
+        ts_pairs=$(LC_ALL=C timeout 5 top -b -n1 -H -p "$ts_pm" 2>/dev/null \
             | awk '/^ *PID USER/ {ci=0; for(i=1;i<=NF;i++) if($i=="%CPU") ci=i; while (getline) if(ci && $ci!="") print $1 "," $ci}' \
             | paste -sd ';')
     fi
@@ -25539,7 +25540,7 @@ order by round(sum(tmp.cpu_usage),2)::numeric desc limit 15")
     #   解析口径与 as 完全一致, as 出数这里就出数; 若 as 在同一台机器也不出数,
     #   则是该机 pidstat/内核 task io accounting 的问题, 不在本工具层。
     if [ -n "$ts_pm" ]; then
-        ts_pairs=$(S_TIME_FORMAT=ISO timeout 5 pidstat -hdt -p "$ts_pm" 1 1 2>/dev/null \
+        ts_pairs=$(LC_ALL=C S_TIME_FORMAT=ISO timeout 5 pidstat -hdt -p "$ts_pm" 1 1 2>/dev/null \
             | awk 'NR>4 {print $4 "," $5 "," $6}' \
             | paste -sd ';')
     fi
@@ -26187,7 +26188,10 @@ where pid <> pg_backend_pid();
 \echo ===ISTAT
 select coalesce(sum(xact_commit),0), coalesce(sum(xact_rollback),0),
        coalesce(sum(blks_read),0), coalesce(sum(blks_hit),0), coalesce(sum(temp_bytes),0),
-       pg_xlog_location_diff(pg_current_xlog_location(), '0/0')::bigint,
+       case when pg_is_in_recovery()
+            then (select pg_xlog_location_diff(receiver_received_location,'0/0')
+                  from pg_stat_get_wal_receiver())
+            else pg_xlog_location_diff(pg_current_xlog_location(),'0/0') end::bigint,
        (select coalesce(sum(n_calls),0) from dbe_perf.statement),
        (select coalesce(sum(pgwr_actual_flush_total_num),0) from dbe_perf.global_pagewriter_status),
        coalesce(sum(deadlocks),0)
@@ -26830,7 +26834,7 @@ order by s.sz desc;"
         # 以 as 为准。as 的 -n1 首帧偶发毛刺 (当年实测 1/10) 一并继承 —— 与 as 完全
         # 同算法是本口径的第一优先级。
         if [ -n "$pm_pid" ]; then
-            cpupairs=$(timeout 5 top -b -n1 -H -p "$pm_pid" 2>/dev/null \
+            cpupairs=$(LC_ALL=C timeout 5 top -b -n1 -H -p "$pm_pid" 2>/dev/null \
                 | awk '/^ *PID USER/ {ci=0; for(i=1;i<=NF;i++) if($i=="%CPU") ci=i; while (getline) if(ci && $ci!="") print $1 "," $ci}' \
                 | paste -sd ';')
         fi
@@ -26919,6 +26923,14 @@ limit 1;
             r_app="" r_state="" r_sync="" r_sent="" r_wr="" r_fl="" r_rp="" r_slot=""
             r_dsent="" r_dwr="" r_dfl="" r_drp="" r_net="" r_fs="" r_ap="" r_tot=""
             x_cur="" x_ckr="" x_old="" x_cbm="" x_cnt="" x_sz="" x_rest="" x_arch=""
+            # ★同理补 s_*/w_*/m_*/lk_*/h_*/ist_* (2026-10-11 审查: 单段 SQL 失败/超时
+            #   被取消时, 这些区的 read 不执行, 旧值原样上屏当"实时")
+            h_node="" h_ver="" h_up=""
+            s_tot="" s_act="" s_iit="" s_idle="" s_ltx="" s_avac="" s_smp="" s_jdbc=""
+            w_io="" w_lock="" w_lwlock="" w_stat="" w_cpu=""
+            m_used="" m_max="" m_shmax="" m_shused="" m_dyu="" m_dym="" m_dyp="" m_shr="" m_shrp="" m_other="" m_sbuf=""
+            lk_chains="" lk_blocked="" lk_w_rel="" lk_w_xid="" lk_w_vxid="" lk_w_tuple="" lk_w_part=""
+            ist_qps="" ist_cm="" ist_roll="" ist_tps="" ist_lg="" ist_ph="" ist_pw="" ist_rd="" ist_tp="" ist_dl=""
             while IFS= read -r line; do
                 case "$line" in
                     ===HDR)  section=HDR; continue;;
