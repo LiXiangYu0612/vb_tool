@@ -151,7 +151,7 @@ recover_table_help() {
     echo "    -d: database name (required)"
     echo "    -s: schema name (required)"
     echo "    -t: table name (required)"
-    echo "    -n: rows per page (optional, default: 100)"
+    echo "    -n: rows per page (optional, default: 300)"
     echo ""
 }
 
