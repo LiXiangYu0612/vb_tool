@@ -11142,7 +11142,48 @@ def display_width(s):
         w += 2 if ea in ('W', 'F', 'A') else 1
     return w
 
-def print_sql_text(db_name, user_name, sql_raw, params):
+def _explain_version_tuple(ver_str, _depth=0):
+    """vb_version()/version.cfg 的 G100 版本串 -> (major, minor, patch)。
+    ★vb_version() 是多行输出(204 实测): 同串含 'version:V3.0 (Build 8)' 与
+    'openGauss version:6.0.0' —— 裸抓首个 X.Y.Z 会拿 6.0.0 误开 outline。
+    优先解析专门的 'version:' 行; 没有才回落整串首个 X.Y.Z; 'V3.0 (Build 8)'
+    形态映射 (3,0,8)。内核 'PostgreSQL 9.2.4' 类不认。"""
+    if ver_str is None:
+        return None
+    if _depth == 0:
+        mv = re.search(r'(?im)^\s*version:\s*(.+)$', ver_str)
+        if mv:
+            t = _explain_version_tuple(mv.group(1).strip(), 1)
+            if t:
+                return t
+    m = re.search(r'(\d+)\.(\d+)\.(\d+)', ver_str)
+    if m:
+        return (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    m = re.search(r'V(\d+)[^)]*?Build\s+(\d+)', ver_str, re.IGNORECASE)
+    if m:
+        return (int(m.group(1)), 0, int(m.group(2)))
+    return None
+
+def _psql_query(db, sql):
+    try:
+        p = subprocess.Popen(['psql', '-X', '-t', '-A', '-c', sql, '-d', db],
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                             universal_newlines=True)
+        try:
+            out, _ = p.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            p.kill(); p.communicate(); return None
+        return out.strip() if p.returncode == 0 else None
+    except Exception:
+        return None
+
+def _line_schema(line):
+    """行内字面量 schema=xxx (用户 2026-10-11: 日志前缀写 dbname=x user=y schema=z)。
+    没有则 None(204 前缀是占位符式, 无 schema 位)。"""
+    m = re.search(r'(?:^|\s)schema=([^\s,]+)', line or '')
+    return m.group(1) if m else None
+
+def print_sql_text(db_name, user_name, sql_raw, params, line_schema=None):
     user_name  = normalize_user(user_name)
     sql_final  = replace_params(sql_raw, params) if params else sql_raw
     formatted  = format_sql(sql_final)
@@ -11153,6 +11194,59 @@ def print_sql_text(db_name, user_name, sql_raw, params):
     print(title)
     print(sep)
     print(formatted)
+
+    # ---- part 2: EXPLAIN in the parsed database (user's call 2026-10-11):
+    # plain EXPLAIN only -- never ANALYZE, the statement is NOT executed.
+    # vb_version() >= 3.0.9 -> explain (outline); below -> plain explain.
+    ver = None
+    if db_name:
+        ver = _psql_query(db_name, 'select vb_version()')
+        vt = _explain_version_tuple(ver)
+        if vt is None:
+            # vb_version() absent/unparseable: fall back to version.cfg (the
+            # `version` command's own fallback); kernel version() is never
+            # trusted here (9.2.4 would wrongly pass the >=3.0.9 gate)
+            try:
+                gh = os.environ.get('GAUSSHOME', '')
+                cfg = os.path.join(gh, 'version.cfg') if gh else ''
+                if cfg and os.path.isfile(cfg):
+                    vt = _explain_version_tuple(open(cfg, encoding='utf-8',
+                                                     errors='replace').read(512))
+            except Exception:
+                pass
+        outline = bool(vt and vt >= (3, 0, 9))
+        # best-effort schema: log prefix carries no schema; take the first
+        # schema-qualified table in the SQL itself so unqualified refs in the
+        # same statement resolve. Plain-identifier schemas only (no injection).
+        sp = ''
+        msp = re.search(r'(?:from|join|update|into)\s+([A-Za-z_][\w$]*)\.',
+                        sql_final, re.IGNORECASE)
+        if msp:
+            sp = msp.group(1)
+        if line_schema:
+            sp = line_schema          # 行内 schema=xxx 优先(日志前缀原生口径)
+        env = dict(os.environ)
+        if sp:
+            env['PGOPTIONS'] = (env.get('PGOPTIONS', '') +
+                                (' ' if env.get('PGOPTIONS') else '') +
+                                '-c search_path=' + sp).strip()
+        sql_clean = sql_final.strip().rstrip(';').strip()
+        if sql_clean:
+            expl = ('explain (outline) ' if outline else 'explain ') + sql_clean
+            t2 = 'sqlplan(explain%s database: %s%s)' % (
+                ' outline' if outline else '', db_name,
+                '  search_path: ' + sp if sp else '')
+            print()
+            print('=' * display_width(t2))
+            print(t2)
+            print('=' * display_width(t2))
+            try:
+                p = subprocess.Popen(['psql', '-X', '-P', 'footer=off',
+                                      '-d', db_name, '-c', expl],
+                                     env=env, universal_newlines=True)
+                p.communicate()
+            except Exception as e:
+                print('(explain failed: %s)' % e, file=sys.stderr)
     sys.exit(0)
 
 uid_esc          = re.escape(unique_id)
@@ -11252,14 +11346,14 @@ for logfile in logfiles:
             db_name, user_name, _ = extract_meta(line)
             sql_body = m3.group(3).strip()
             full_sql, params = collect_sql_and_params(i + 1, sql_body)
-            print_sql_text(db_name, user_name, full_sql, params)
+            print_sql_text(db_name, user_name, full_sql, params, _line_schema(line))
 
         m_inline = inline_statement_re.search(line) if not m3 else None
         if m_inline:
             db_name, user_name, _ = extract_meta(line)
             sql_body = m_inline.group(3).strip()
             full_sql, _ = collect_sql_and_params(i + 1, sql_body)
-            print_sql_text(db_name, user_name, full_sql, None)
+            print_sql_text(db_name, user_name, full_sql, None, _line_schema(line))
 
         m1 = format1_re.search(line) if not (m3 or m_inline) else None
         m2 = format2_re.search(line) if (not m1 and not m3 and not m_inline) else None
@@ -11269,7 +11363,7 @@ for logfile in logfiles:
             db_name, user_name, _ = extract_meta(line)
             sql_body = m_exec.group(1).strip()
             full_sql, params = collect_sql_and_params(i + 1, sql_body)
-            print_sql_text(db_name, user_name, full_sql, params)
+            print_sql_text(db_name, user_name, full_sql, params, _line_schema(line))
 
         elif duration_only_re.search(line) and not (m3 or m_inline):
             db_name, user_name, pid = extract_meta(line)
@@ -11291,7 +11385,7 @@ for logfile in logfiles:
                     full_sql = ' '.join([sql_head] + cont)
                     break
             if full_sql:
-                print_sql_text(db_name, user_name, full_sql, None)
+                print_sql_text(db_name, user_name, full_sql, None, _line_schema(line))
 
 print(f"not found unique_id: {unique_id}", file=sys.stderr)
 sys.exit(1)
