@@ -761,6 +761,7 @@ run_tps() {
     # coalesce then applies the documented defaults).
     local _vb_sql _vb_pv="" _vb_rc
     _vb_sql=$(mktemp /tmp/vb_tps.XXXXXX.sql) || { echo "Error: mktemp failed" >&2; return 1; }
+    trap 'rm -f "$_vb_sql"' RETURN
     {
         [ -t 0 ] && printf '\\prompt %s\n' "'please input begin date: ' begin_date" "'please input end date: ' end_date"
         cat <<'VBTPSQLEOF'
@@ -784,6 +785,7 @@ VBTPSQLEOF
 
 run_lsds() {
     TEMP_SCRIPT=$(mktemp)
+    trap 'rm -f "$TEMP_SCRIPT"' RETURN
     cat << 'PYTHON_EOF' > "$TEMP_SCRIPT"
 #!/usr/bin/env python3
 
@@ -2993,8 +2995,8 @@ FLAMEGRAPH_PL_EOF
 
     # ---------- generate flame graph ----------
     echo "Generating folded stack data..."
-    perf script -i "$OUTPUT_DIR/perf.data" > "$OUTPUT_DIR/perf.unfolded" || { echo "Error: perf script failed" >&2; return 1; }
-    perl "$FLAMEGRAPH_DIR/stackcollapse-perf.pl" --all "$OUTPUT_DIR/perf.unfolded" > "$OUTPUT_DIR/perf.folded" || { echo "Error: stackcollapse-perf.pl failed" >&2; return 1; }
+    perf script -i "$OUTPUT_DIR/perf.data" > "$OUTPUT_DIR/perf.unfolded" || { echo "Error: perf script failed" >&2; rm -f "$OUTPUT_DIR/perf.data"; return 1; }
+    perl "$FLAMEGRAPH_DIR/stackcollapse-perf.pl" --all "$OUTPUT_DIR/perf.unfolded" > "$OUTPUT_DIR/perf.folded" || { echo "Error: stackcollapse-perf.pl failed" >&2; rm -f "$OUTPUT_DIR/perf.data"; return 1; }
 
     echo "Generating flame graph..."
     perl "$FLAMEGRAPH_DIR/flamegraph.pl" "$OUTPUT_DIR/perf.folded" > "$SVG_FILE"
@@ -3608,6 +3610,9 @@ run_recover_table() {
         exit 1
     fi
     
+    case "${rows_per_page:-}" in ''|*[!0-9]*)
+        echo "Error: -n expects a positive integer, got '${rows_per_page:-}'" >&2
+        exit 1;; esac
     echo "Starting table recovery: database=$db_name, schema=$schema_name, table=$table_name, rows_per_page=$rows_per_page"
     
     psql -d "$db_name" <<EOF
@@ -5468,8 +5473,6 @@ run_wdr_topsql() {
     local order_type="1"
     local found_b=0
     local found_e=0
-    local found_n=0
-    local found_t=0
     
     while [[ $# -gt 0 ]]; do
         case $1 in
@@ -5532,7 +5535,6 @@ run_wdr_topsql() {
                     return 1
                 fi
                 top_n="$1"
-                found_n=1
                 shift
                 ;;
             -t)
@@ -5546,7 +5548,6 @@ run_wdr_topsql() {
                     return 1
                 fi
                 order_type="$1"
-                found_t=1
                 shift
                 ;;
             -*)
@@ -6644,10 +6645,13 @@ schemacondition="AND 1=1"
 tablecondition="AND 1=1"
 
 if [ -z "$number" ]; then
-   echo "错误: 必需的选项 -n 未提供。"
-   echo "-n number, e.g:-n 5"
-   exit 1 # 非零退出码表示错误
+   echo "Error: required option -n is missing." >&2
+   echo "-n number, e.g:-n 5" >&2
+   exit 1
 fi
+case "$number" in ''|*[!0-9]*)
+   echo "Error: -n expects a positive integer, got '$number'" >&2
+   exit 1;; esac
 
 # 检查是否传入参数
 if [ -n "$dbname" ]; then
@@ -6677,7 +6681,9 @@ if [ -n "$number" ]; then
     number=${number}
 fi
 
-cat <<EOF > /tmp/query.sql
+local _tsq; _tsq=$(mktemp /tmp/vb_tabsize.$$.XXXXXX.sql) || { echo "Error: cannot create temp file" >&2; return 1; }
+trap 'rm -f "$_tsq"' RETURN
+cat <<EOF > "$_tsq"
 
 select dbname, schemaname, tablename,
 pg_size_pretty(table_size) as "table_size",
@@ -6758,23 +6764,25 @@ order by tt.total_size desc;
 
 EOF
 
-psql -P footer=off -d ${dbname} -f /tmp/query.sql
+psql -P footer=off -d ${dbname} -f "$_tsq"
 
 }
 
 run_repl() {
-rm -f /tmp/repl.txt
+local _rf="/tmp/vb_repl.$$.txt"
+trap 'rm -f "$_rf"' RETURN
+rm -f "$_rf"
 psql -d postgres -c "
 COPY (
   SELECT slot_name, pg_current_xlog_location(), receiver_replay_location
   FROM pg_stat_replication a, pg_replication_slots b
   WHERE a.application_name LIKE '%'||b.slot_name||'%' 
   AND slot_type='physical'
-) TO '/tmp/repl.txt' WITH DELIMITER ',';
+) TO '$_rf' WITH DELIMITER ',';
 " >/dev/null 2>&1
 
 sleep 5
-[ -f /tmp/repl.txt ] || { echo "Error: COPY to /tmp/repl.txt failed (privileges / no physical slots?)" >&2; return 1; }
+[ -f "$_rf" ] || { echo "Error: COPY to $_rf failed (privileges / no physical slots?)" >&2; return 1; }
 
 psql -d postgres -c "
 WITH aa AS (
@@ -6782,7 +6790,7 @@ WITH aa AS (
     split_part(result, ',', 1) AS slot_name,
     split_part(result, ',', 2) AS prim_curr_loc,
     split_part(result, ',', 3) AS recv_replay_loc 
-  FROM regexp_split_to_table('$(cat /tmp/repl.txt | paste -sd ';')', ';') AS result
+  FROM regexp_split_to_table('$(cat "$_rf" | paste -sd ";")', ';') AS result
 )
 SELECT 
   split_part(client_addr::text,'/',1)||'-'||b.slot_name||'('||
@@ -6812,6 +6820,7 @@ run_slow() {
     # empty -v defaults (SQL falls back to last-5-min/top10 defaults)
     local _vb_sql _vb_pv="" _vb_rc
     _vb_sql=$(mktemp /tmp/vb_slow.XXXXXX.sql) || { echo "Error: mktemp failed" >&2; return 1; }
+    trap 'rm -f "$_vb_sql"' RETURN
     {
         [ -t 0 ] && printf '\\prompt %s\n' "'Enter begin date: ' begin_date" "'Enter end date: ' end_date" "'Enter top_n: ' top_n"
         cat <<'VBSLOWEOF'
@@ -7136,6 +7145,7 @@ run_relxlog() {
 }
 
 run_analyze() {
+    export PYTHONIOENCODING=utf-8
     # Check if python3 is available
     if ! command -v python3 &> /dev/null; then
         echo "Error: python3 is required for log analysis but not found" >&2
@@ -7144,6 +7154,7 @@ run_analyze() {
 
     # Create a temporary python script
     TEMP_SCRIPT=$(mktemp)
+    trap 'rm -f "$TEMP_SCRIPT"' RETURN
     cat << 'EOF' > "$TEMP_SCRIPT"
 #!/usr/bin/env
 
@@ -7207,6 +7218,9 @@ def parse_datetime(date_str):
 
 # Read the log file content
 file_list = glob.glob(file_name)
+if not file_list:
+    print("Error: no log file matches %r (check the path/pattern)" % file_name, file=sys.stderr)
+    sys.exit(1)
 content = ''
 for file_path in file_list:
     with open(file_path, "r",encoding=args.encode) as file:
@@ -7364,25 +7378,25 @@ if e_type == 'plan':
     report_name = f"{base_filename}_query_plan_report"
 
     if args.output == 'html':
-        with open(f"{report_name}.html", "w") as f:
+        with open(f"{report_name}.html", "w", encoding="utf-8") as f:
             f.write("<html><body><h1>Query Plan Analysis Report</h1><table border='1' cellpadding='5'><tr><th>Query Text</th><th>Time Range</th><th>IP</th><th>Database</th><th>User</th><th>Query Plan</th><th>Duration (sum/max/min/avg)</th><th>Calls</th></tr>")
             for idx, (qry_text, stat) in enumerate(sorted_data):
                 row_color = "lightyellow" if idx % 2 == 0 else "lightblue"
                 duration_class = "normal" if stat['avg_duration'] < 2 else "warning" if stat['avg_duration'] < 5 else "critical"
                 f.write(f"<tr bgcolor='{row_color}' class='{duration_class}'><td>{qry_text}</td><td>{stat['min_times']} - {stat['max_times']}</td><td>{stat['IP']}</td><td>{stat['database']}</td><td>{stat['user']}</td><td>{stat['qry_plan']}</td><td>{stat['sum_duration']},{stat['max_duration']},{stat['min_duration']},{stat['avg_duration']}</td><td>{stat['count']}</td></tr>")
             f.write("</table></body></html>")
-        print('Susscessful export data to {}.html'.format(report_name))
+        print('Successful export data to {}.html'.format(report_name))
     
     elif args.output == 'csv':
-        with open(f"{report_name}.csv", "w") as f:
+        with open(f"{report_name}.csv", "w", encoding="utf-8") as f:
             f.write("Query Text,Time Range,IP,Database,User,Query Plan,Duration (sum/max/min/avg),Calls\n")
             for qry_text, stat in sorted_data:
                 qry_text = qry_text.replace('"','""')
                 f.write(f"{qry_text},{stat['min_times']} - {stat['max_times']},{stat['IP']},{stat['database']},{stat['user']},{stat['qry_plan']},{stat['sum_duration']}/{stat['max_duration']}/{stat['min_duration']}/{stat['avg_duration']},{stat['count']}\n")
-        print('Susscessful export data to {}.csv'.format(report_name))
+        print('Successful export data to {}.csv'.format(report_name))
     
     elif args.output == 'txt':
-        with open(f"{report_name}.txt", "w") as f:
+        with open(f"{report_name}.txt", "w", encoding="utf-8") as f:
             for qry_text, stat in sorted_data:
                 f.write(f"Query Text: {qry_text}\n")
                 f.write(f"Time Range: {stat['min_times']} - {stat['max_times']}\n")
@@ -7393,7 +7407,7 @@ if e_type == 'plan':
                 f.write(f"Duration (sum/max/min/avg): {stat['sum_duration']}/{stat['max_duration']}/{stat['min_duration']}/{stat['avg_duration']}\n")
                 f.write(f"Calls: {stat['count']}\n")
                 f.write("-" * 50 + "\n")
-        print('Susscessful export data to {}.txt'.format(report_name))
+        print('Successful export data to {}.txt'.format(report_name))
 
 elif e_type == 'slow':
     parse_slow_sql(start_n, blocks)
@@ -7424,27 +7438,27 @@ elif e_type == 'slow':
     report_name = f"{base_filename}_slow_query_report"
 
     if args.output == 'html':
-        with open(f"{report_name}.html", "w") as f:
+        with open(f"{report_name}.html", "w", encoding="utf-8") as f:
             f.write("<html><body><h1>Slow Query Analysis Report</h1><table border='1' cellpadding='5'><tr><th>Unique ID</th><th>Time Range</th><th>IP</th><th>Database</th><th>User</th><th>Query Text</th><th>Params</th><th>Duration (sum/max/min/avg)</th><th>Calls</th></tr>")
             for idx, (unique_id, stat) in enumerate(sorted_data):
                 row_color = "lightyellow" if idx % 2 == 0 else "lightblue"
                 duration_class = "normal" if stat['avg_duration'] < 2 else "warning" if stat['avg_duration'] < 5 else "critical"
                 f.write(f"<tr bgcolor='{row_color}' class='{duration_class}'><td>{unique_id}</td><td>{stat['min_times']} - {stat['max_times']}</td><td>{stat['IP']}</td><td>{stat['database']}</td><td>{stat['user']}</td><td>{stat['qry_text']}</td><td>{stat['qry_params']}</td><td><p>sum:{stat['sum_duration']}<br />max:{stat['max_duration']}<br />min:{stat['min_duration']}<br />avg:{stat['avg_duration']}</p></td><td>{stat['count']}</td></tr>")
             f.write("</table></body></html>")
-        print('Susscessful export data to {}.html'.format(report_name))
+        print('Successful export data to {}.html'.format(report_name))
 
     elif args.output == 'csv':
-        with open(f"{report_name}.csv", "w") as f:
+        with open(f"{report_name}.csv", "w", encoding="utf-8") as f:
             f.write("Unique ID,Time Range,IP,Database,User,Query Text,Params,Duration (sum/max/min/avg),Calls\n")
             #print(sorted_data)
             for unique_id, stat in sorted_data:
                 qry_text = stat['qry_text'].replace('"','""')
                 qry_params = stat['qry_params']
                 f.write(f"{unique_id},{stat['min_times']} - {stat['max_times']},{stat['IP']},{stat['database']},{stat['user']},\"{qry_text}\",\"{qry_params}\",{stat['sum_duration']}/{stat['max_duration']}/{stat['min_duration']}/{stat['avg_duration']},{stat['count']}\n")
-        print('Susscessful export data to {}.csv'.format(report_name))
+        print('Successful export data to {}.csv'.format(report_name))
     
     elif args.output == 'txt':
-        with open(f"{report_name}.txt", "w") as f:
+        with open(f"{report_name}.txt", "w", encoding="utf-8") as f:
             for unique_id, stat in sorted_data:
                 f.write(f"Unique ID: {unique_id}\n")
                 f.write(f"Time Range: {stat['min_times']} - {stat['max_times']}\n")
@@ -7456,7 +7470,7 @@ elif e_type == 'slow':
                 f.write(f"Duration (sum/max/min/avg)  sum:{stat['sum_duration']}/  max:{stat['max_duration']}/  min:{stat['min_duration']}/  avg:{stat['avg_duration']}\n")
                 f.write(f"Calls: {stat['count']}\n")
                 f.write("-" * 50 + "\n")
-        print('Susscessful export data to {}.txt'.format(report_name))
+        print('Successful export data to {}.txt'.format(report_name))
 
 else:
     print(f'Error: not support type {e_type}')
@@ -10248,7 +10262,7 @@ run_collect_log(){
 
         # --- Argument Reconstruction ---
         # Sanitize arguments by removing the -u flag and its value to prevent recursion
-        local local pass_args=("collect_log")
+        local pass_args=("collect_log")
         local skip_next=false
         for arg in "${original_args[@]}"; do
             if [ "$skip_next" = true ]; then skip_next=false; continue; fi
@@ -11290,10 +11304,15 @@ def print_sql_text(db_name, user_name, sql_raw, params, line_schema=None):
             print(t2)
             print('=' * display_width(t2))
             try:
+                env['PGCONNECT_TIMEOUT'] = env.get('PGCONNECT_TIMEOUT') or '5'
                 p = subprocess.Popen(['psql', '-X', '-P', 'footer=off',
                                       '-d', db_name, '-c', expl],
                                      env=env, universal_newlines=True)
-                p.communicate()
+                try:
+                    p.communicate(timeout=60)
+                except subprocess.TimeoutExpired:
+                    p.kill(); p.communicate()
+                    print('(explain timed out after 60s)', file=sys.stderr)
             except Exception as e:
                 print('(explain failed: %s)' % e, file=sys.stderr)
     sys.exit(0)
@@ -11333,6 +11352,8 @@ duration_only_re = re.compile(
 statement_re = re.compile(r'(?:LOG|INFO):\s+statement:\s+(.+)$', re.IGNORECASE)
 detail_re    = re.compile(r'DETAIL:\s+parameters:\s+(.+)$',       re.IGNORECASE)
 
+_READ_LOG_MAX_BYTES = 2 * 1024 * 1024 * 1024  # 2GB guard, same as analyze v2
+
 def read_log_lines(path):
     # Log files may be UTF-8 (default), GB18030/GBK (Chinese sites) or anything
     # else; detect per file so Chinese text survives, latin-1 stays as the
@@ -11340,7 +11361,11 @@ def read_log_lines(path):
     import gzip
     opener = gzip.open if path.endswith('.gz') else open
     with opener(path, 'rb') as fh:
-        raw = fh.read()
+        raw = fh.read(_READ_LOG_MAX_BYTES)
+    if len(raw) >= _READ_LOG_MAX_BYTES:
+        print("Error: %s is too large (>= %d bytes); truncate or split it first"
+              % (path, _READ_LOG_MAX_BYTES), file=sys.stderr)
+        sys.exit(1)
     text = None
     for enc in ('utf-8', 'gb18030'):
         try:
@@ -22871,6 +22896,7 @@ duration_only_re = re.compile(
 statement_re = re.compile(r'(?:LOG|INFO):\s+statement:\s+(.+)$', re.IGNORECASE)
 detail_re    = re.compile(r'DETAIL:\s+parameters:\s+(.+)$',       re.IGNORECASE)
 
+_READ_LOG_MAX_BYTES = 2 * 1024 * 1024 * 1024  # 2GB guard, same as analyze v2
 def read_log_lines(path):
     # Log files may be UTF-8 (default), GB18030/GBK (Chinese sites) or anything
     # else; detect per file so Chinese text survives, latin-1 stays as the
@@ -22878,7 +22904,11 @@ def read_log_lines(path):
     import gzip
     opener = gzip.open if path.endswith('.gz') else open
     with opener(path, 'rb') as fh:
-        raw = fh.read()
+        raw = fh.read(_READ_LOG_MAX_BYTES)
+    if len(raw) >= _READ_LOG_MAX_BYTES:
+        print("Error: %s is too large (>= %d bytes); truncate or split it first"
+              % (path, _READ_LOG_MAX_BYTES), file=sys.stderr)
+        sys.exit(1)
     text = None
     for enc in ('utf-8', 'gb18030'):
         try:
@@ -27707,7 +27737,7 @@ _awr_collect() {
             done
         fi
         local _pref="base|base/pgsql_tmp|global|pg_xlog|pg_wal|pg_arch|pg_clog|pg_csnlog|pg_multixact|pg_twophase|pg_log|pg_audit|pg_replslot|pg_stat_tmp|pgsql_tmp|pg_tblspc|pg_location|pg_logical|pg_notify|pg_perf|pg_serial|pg_snapshots|mem_log|pg_errorinfo|pg_llog|undo"
-        _arc=$(PGCONNECT_TIMEOUT=3 psql -d postgres -tAc "show archive_dest" 2>/dev/null | head -1 | tr -d ' ')
+        _arc=$(PGCONNECT_TIMEOUT=3 PGOPTIONS='-c statement_timeout=5000' psql -d postgres -tAc "show archive_dest" 2>/dev/null | head -1 | tr -d ' ')
         case "$_arc" in
             /*) _pref="$_pref|$_arc" ;;
             ??*) [ -n "$_pd" ] && _pref="$_pref|$_pd$_arc" ;;
