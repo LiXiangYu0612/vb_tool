@@ -28518,6 +28518,18 @@ PSQL4
       for _odb in $_odbs; do
           PGCONNECT_TIMEOUT=$_ct PGOPTIONS="$_st" psql -d "$_odb" -tAF',' -c "select '$_odb',schemaname,relname,coalesce(heap_blks_read,0),coalesce(heap_blks_hit,0),coalesce(idx_blks_read,0),coalesce(idx_blks_hit,0),coalesce(toast_blks_read,0),coalesce(toast_blks_hit,0),coalesce(tidx_blks_read,0),coalesce(tidx_blks_hit,0) from dbe_perf.statio_all_tables where schemaname <> 'pg_toast'" 2>/dev/null
       done; } > "$dbd/object_iostat.csv"
+    # ---- per-index buffer I/O across all databases (2026-10-15; source =
+    # dbe_perf.statio_all_indexes; feeds the Top-Tables First/Second/Third
+    # index columns). A partitioned parent gets ONE kernel-aggregated row
+    # (pg_stat_get_blocks_hit/fetched expand a partitioned-index oid into its
+    # full partition list and sum -- OG pgstatfuncs.cpp, verified live on the
+    # 204 VB instance) keyed by parent table + parent index names, so NO
+    # pg_partition resolution chain is needed. pg_toast rows excluded: the
+    # owning table's tidx columns already count that I/O. ----
+    { echo "dbname,schema,object,index,idx_blks_read,idx_blks_hit"
+      for _odb in $_odbs; do
+          PGCONNECT_TIMEOUT=$_ct PGOPTIONS="$_st" psql -d "$_odb" -tAF',' -c "select '$_odb',schemaname,relname,indexrelname,coalesce(idx_blks_read,0),coalesce(idx_blks_hit,0) from dbe_perf.statio_all_indexes where schemaname <> 'pg_toast'" 2>/dev/null
+      done; } > "$dbd/object_index_iostat.csv"
     # ---- instance-wide physical I/O totals (2026-09-16; replaces the per-file
     # gs_file_stat capture AND the Top-10 file-IO report tables). Source =
     # pg_catalog.get_local_rel_iostat(): the kernel fileIOStat DIRECT counters
@@ -28849,7 +28861,7 @@ def load_window(d):
             w["os"][(phase, f)] = _read_os_text(p) if os.path.isfile(p) else ""
         for t in ("statement", "statement_mem", "wait_events", "instance_time", "database", "pagewriter",
                   "memory_node_detail", "shared_memory", "session_memory", "session_by_sess",
-                  "object_tables", "object_dead", "object_iostat"):
+                  "object_tables", "object_dead", "object_iostat", "object_index_iostat"):
             w["db"][(phase, t)] = read_csv_rows(os.path.join(d, "db", phase, t + ".csv"))
     return w
 
@@ -28881,7 +28893,7 @@ def load_snap(d, tables=None):
     _DB_TABLES = ("statement", "statement_mem", "wait_events", "instance_time", "database", "pagewriter",
                  "memory_node_detail", "shared_memory", "session_memory", "session_by_sess",
                  "pg_settings",
-                 "object_tables", "object_dead", "object_iostat", "walreceiver",
+                 "object_tables", "object_dead", "object_iostat", "object_index_iostat", "walreceiver",
                  "replication", "replication_slots",
                  "rel_iostat", "file_redo_iostat")
     if tables is None:
@@ -28984,7 +28996,7 @@ def build_window_from_snaps(begin_dir, end_dir, sqltext_root=None, load_sqltext=
     for t in ("statement", "statement_mem", "wait_events", "instance_time", "database", "pagewriter",
               "memory_node_detail", "shared_memory", "session_memory", "session_by_sess",
               "pg_settings",
-              "object_tables", "object_dead", "object_iostat", "walreceiver",
+              "object_tables", "object_dead", "object_iostat", "object_index_iostat", "walreceiver",
               "replication", "replication_slots",
               "rel_iostat", "file_redo_iostat"):
         win["db"][("begin", t)] = b["db"].get(t, [])
@@ -29457,10 +29469,10 @@ def loadprofile_iostat_rows(win, duration):
         return sum(to_num(r.get(col, 0)) for r in win["db"].get((phase, "rel_iostat"), []))
     ok = bool(win["db"].get(("begin", "rel_iostat"))) and bool(win["db"].get(("end", "rel_iostat")))
     rows = []
-    for label, col, mode in (("read iops (phyrds)", "phyrds", "count"),
-                             ("write iops (phywrts)", "phywrts", "count"),
-                             ("read data (phyblkrd)", "phyblkrd", "blocks"),
-                             ("write data (phyblkwrt)", "phyblkwrt", "blocks")):
+    for label, col, mode in (("read iops", "phyrds", "count"),
+                             ("write iops", "phywrts", "count"),
+                             ("read data", "phyblkrd", "blocks"),
+                             ("write data", "phyblkwrt", "blocks")):
         b, e = _sum("begin", col), _sum("end", col)
         rows.append((label, b, e, e - b, ((e - b) / duration) if duration else 0.0, mode, ok))
     return rows
@@ -29481,8 +29493,8 @@ def loadprofile_wal_pw_rows(win, duration):
     tim_ok = (any("writetim" in r for r in win["db"].get(("end", "file_redo_iostat"), []))
               and any("writetim" in r for r in win["db"].get(("begin", "file_redo_iostat"), [])))
     rows = []
-    for label, table, col in (("WAL writes (phywrts)", "file_redo_iostat", "phywrts"),
-                              ("WAL blocks written (phyblkwrt)", "file_redo_iostat", "phyblkwrt"),
+    for label, table, col in (("WAL writes", "file_redo_iostat", "phywrts"),
+                              ("WAL blocks written", "file_redo_iostat", "phyblkwrt"),
                               ("WAL write time (ms)", "file_redo_iostat", "writetim")):
         b, e = _sum("begin", table, col), _sum("end", table, col)
         ok = (col != "writetim") or tim_ok
@@ -32810,15 +32822,43 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                      % (esc(label), fmt_int(_b), fmt_int(_e),
                         fmt_blocks(_d) if blocks else fmt_int(_d),
                         fmt_blocks_ps(_d / duration) if blocks else fmt_num(_d / duration)))
-    lp("blocks read (blks_read)", "blks_read", blocks=True)
-    lp("blocks hit (blks_hit)", "blks_hit", blocks=True)
-    lp("rows returned (tup_returned)", "tup_returned")
-    lp("rows fetched (tup_fetched)", "tup_fetched")
-    lp("rows inserted (tup_inserted)", "tup_inserted")
-    lp("rows updated (tup_updated)", "tup_updated")
-    lp("rows deleted (tup_deleted)", "tup_deleted")
-    lp("commits (xact_commit)", "xact_commit")
-    lp("rollbacks (xact_rollback)", "xact_rollback")
+    # logical reads = buffer hits + disk reads (the combined convention);
+    # physical reads = blocks read off disk. Bare professional labels, no raw
+    # counter suffixes; SQL calls sits directly under rollbacks (user 2026-10-15)
+    def lp2(label, cols, blocks=False):
+        _b = sum(_dbsum("begin", c) for c in cols); _e = sum(_dbsum("end", c) for c in cols)
+        _d = _e - _b
+        parts.append('<tr><td>%s</td><td class="n">%s</td><td class="n">%s</td>'
+                     '<td class="n">%s</td><td class="n">%s</td></tr>'
+                     % (esc(label), fmt_int(_b), fmt_int(_e),
+                        fmt_blocks(_d) if blocks else fmt_int(_d),
+                        fmt_blocks_ps(_d / duration) if blocks else fmt_num(_d / duration)))
+    lp2("logical reads", ("blks_hit", "blks_read"), blocks=True)
+    lp2("physical reads", ("blks_read",), blocks=True)
+    lp("rows returned", "tup_returned")
+    lp("rows fetched", "tup_fetched")
+    lp("rows inserted", "tup_inserted")
+    lp("rows updated", "tup_updated")
+    lp("rows deleted", "tup_deleted")
+    lp("commits", "xact_commit")
+    lp("rollbacks", "xact_rollback")
+    # ---- SQL calls (dbe_perf.statement n_calls sum; Per Second = QPS) ----
+    _scb = win["db"].get(("begin", "statement"), [])
+    _sce = win["db"].get(("end", "statement"), [])
+    _sc_ok = bool(_scb or _sce)
+    _sc_b = sum(to_num(r.get("n_calls", 0) or 0) for r in _scb)
+    _sc_e = sum(to_num(r.get("n_calls", 0) or 0) for r in _sce)
+    _sc_d = _sc_e - _sc_b
+    parts.append('<tr><td>SQL calls</td><td class="n">%s</td><td class="n">%s</td>'
+                 '<td class="n">%s</td><td class="n">%s</td></tr>'
+                 % (fmt_int(_sc_b) if _sc_ok else "-",
+                    fmt_int(_sc_e) if _sc_ok else "-",
+                    fmt_int(_sc_d) if _sc_ok else "-",
+                    # QPS needs decimals (fmt_num floors sub-1 rates to 0)
+                    ("%.2f" % (_sc_d / duration)) if (_sc_ok and duration) else "-"))
+    if _sc_d < 0:
+        note("WARNING: negative SQL calls delta — possible unique-SQL stats reset "
+             "(instr_unique_sql_count change / reset).")
     lp("deadlocks", "deadlocks")
     lp("conflicts", "conflicts")
     lp("temp bytes", "temp_bytes")
@@ -32834,16 +32874,16 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             _wr_es = _wre[0].get("receiver_replay_location", "") or "-"
             _wr_d = (sum(_lsn_to_int(r.get("receiver_replay_location", "")) for r in _wre)
                      - sum(_lsn_to_int(r.get("receiver_replay_location", "")) for r in _wrb))
-            parts.append('<tr><td>WAL replayed (receiver replay lsn)</td><td class="n">%s</td><td class="n">%s</td>'
+            parts.append('<tr><td>WAL replayed</td><td class="n">%s</td><td class="n">%s</td>'
                          '<td class="n">%s</td><td class="n">%s</td></tr>'
                          % (esc(_wr_bs), esc(_wr_es), fmt_bytes(_wr_d), fmt_bytes(_wr_d / duration)))
         else:
-            parts.append('<tr><td>WAL replayed (receiver replay lsn)</td><td class="n">-</td><td class="n">-</td>'
+            parts.append('<tr><td>WAL replayed</td><td class="n">-</td><td class="n">-</td>'
                          '<td class="n">-</td><td class="n">-</td></tr>')
     else:
         _wal_bs = _pwlsn_str("begin", "current_xlog_insert_lsn"); _wal_es = _pwlsn_str("end", "current_xlog_insert_lsn")
         _wal_d = _pwlsn("end", "current_xlog_insert_lsn") - _pwlsn("begin", "current_xlog_insert_lsn")
-        parts.append('<tr><td>WAL written (xlog insert lsn)</td><td class="n">%s</td><td class="n">%s</td>'
+        parts.append('<tr><td>WAL written</td><td class="n">%s</td><td class="n">%s</td>'
                      '<td class="n">%s</td><td class="n">%s</td></tr>'
                      % (esc(_wal_bs), esc(_wal_es), fmt_bytes(_wal_d), fmt_bytes(_wal_d / duration)))
     # ---- WAL writes + pagewriter flushes (v2.4.5; the old 'pagewriter written
@@ -32872,23 +32912,6 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                      '<td class="n">%s</td><td class="n">%s</td></tr>'
                      % (esc(_lbl), fmt_int(_b) if _ok else "-", fmt_int(_e) if _ok else "-",
                         _cf(_d), _pf(_ps)))
-    # ---- SQL calls (dbe_perf.statement n_calls sum; Per Second = QPS) ----
-    _scb = win["db"].get(("begin", "statement"), [])
-    _sce = win["db"].get(("end", "statement"), [])
-    _sc_ok = bool(_scb or _sce)
-    _sc_b = sum(to_num(r.get("n_calls", 0) or 0) for r in _scb)
-    _sc_e = sum(to_num(r.get("n_calls", 0) or 0) for r in _sce)
-    _sc_d = _sc_e - _sc_b
-    parts.append('<tr><td>SQL calls (n_calls)</td><td class="n">%s</td><td class="n">%s</td>'
-                 '<td class="n">%s</td><td class="n">%s</td></tr>'
-                 % (fmt_int(_sc_b) if _sc_ok else "-",
-                    fmt_int(_sc_e) if _sc_ok else "-",
-                    fmt_int(_sc_d) if _sc_ok else "-",
-                    # QPS needs decimals (fmt_num floors sub-1 rates to 0)
-                    ("%.2f" % (_sc_d / duration)) if (_sc_ok and duration) else "-"))
-    if _sc_d < 0:
-        note("WARNING: negative SQL calls delta — possible unique-SQL stats reset "
-             "(instr_unique_sql_count change / reset).")
     parts.append('</table>')
 
     # ================= Cache Hit Ratio =================
@@ -33266,13 +33289,18 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
          ("n_tup_ins", "d"), ("n_tup_upd", "d"), ("n_tup_del", "d"), ("n_tup_hot_upd", "d"),
          ("n_live_tup", "e"), ("n_dead_tup", "be")],
         lambda v: (v["seq_tup_read"][1] - v["seq_tup_read"][0]) + (v["idx_tup_fetch"][1] - v["idx_tup_fetch"][0]))
-    def object_iostat_table(label, begin_rows, end_rows, mode, top=30):
+    def object_iostat_table(label, begin_rows, end_rows, mode, top=30,
+                            idx_begin_rows=None, idx_end_rows=None):
         # object_iostat.csv <- dbe_perf.statio_all_tables (cumulative buffer
         # counters per table, system catalogs included; renderer computes end-begin). All buffer
         # traffic rolls up to the table row: heap + index (all its indexes) +
         # toast + toast index. Partitioned parents aggregate heap/index
         # kernel-side; their toast/tidx columns are NULL -> 0 (2026-10-15).
         # mode "logical" ranks by fetched (read+hit), "physical" by read only.
+        # object_index_iostat.csv (statio_all_indexes, same key family) feeds
+        # the First/Second/Third index columns: per-index window delta of the
+        # SAME dimension, top-3 on the table, "index(value)", "-" when fewer
+        # (user 2026-10-15).
         sub(label)
         def _key(r):
             return (r.get("dbname", ""), r.get("schema", ""), r.get("object", ""))
@@ -33300,6 +33328,33 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         if not _rows:
             parts.append('<div class="note">no data</div>')
             return
+        # ---- per-index top-3: {(table_key, index_name): delta of the dim} ----
+        _idx_cols = bool(idx_begin_rows) and bool(idx_end_rows)
+        _idx_note = (bool(idx_begin_rows) != bool(idx_end_rows))
+        _by_tbl = {}
+        if _idx_cols:
+            def _iagg(rows):
+                out = {}
+                for r in rows:
+                    k = ((r.get("dbname", ""), r.get("schema", ""), r.get("object", "")),
+                         r.get("index", ""))
+                    br = to_num(r.get("idx_blks_read", 0) or 0); bh = to_num(r.get("idx_blks_hit", 0) or 0)
+                    pv, lv = out.get(k, (0, 0))
+                    out[k] = (pv + br, lv + bh + br)
+                return out
+            _ib = _iagg(idx_begin_rows); _ie = _iagg(idx_end_rows)
+            for k in set(_ib) | set(_ie):
+                v = _ie.get(k, (0, 0))[0 if mode == "physical" else 1] \
+                    - _ib.get(k, (0, 0))[0 if mode == "physical" else 1]
+                _by_tbl.setdefault(k[0], []).append((v, k[1]))
+            for tk in _by_tbl:
+                _by_tbl[tk].sort(key=lambda t: (-t[0], t[1]))
+        def _idx_cells(k):
+            # top-3 index cells: "name(value)"; "-" once the table runs out
+            # of indexes (count-based -- an idle index still shows as name(0))
+            t = _by_tbl.get(k, [])
+            return ''.join('<td>%s(%s)</td>' % (esc(t[j][1]), fmt_int(t[j][0]))
+                           if j < len(t) else '<td>-</td>' for j in range(3))
         def _pct(x, y):
             return "%.1f" % (x * 100.0 / y) if y > 0 else "0.0"
         _metric = "Logical Reads" if mode == "logical" else "Physical Reads"
@@ -33307,7 +33362,9 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             + ''.join('<th>%s</th>' % esc(c) for c in ("dbname", "schema", "object"))
             + '<th class="n">' + _metric + '</th><th class="n">%Total</th>'
               '<th class="n">Heap</th><th class="n">Index</th><th class="n">Toast</th>'
-              '<th class="n">heap%</th><th class="n">index%</th><th class="n">toast%</th></tr>')
+              '<th class="n">heap%</th><th class="n">index%</th><th class="n">toast%</th>'
+            + ('<th>First index</th><th>Second index</th><th>Third index</th>' if _idx_cols else '')
+            + '</tr>')
         for k, d in _rows:
             m = _main(d)
             parts.append('<tr>' + ''.join('<td>%s</td>' % esc(x) for x in k)
@@ -33315,14 +33372,22 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                 + '<td class="n">%s</td>' % _pct(m, _tot_main)
                 + ''.join('<td class="n">%s</td>' % fmt_int(d[i]) for i in _idx3)
                 + ''.join('<td class="n">%s</td>' % _pct(d[i], m) for i in _idx3)
+                + (_idx_cells(k) if _idx_cols else '')
                 + '</tr>')
         parts.append('</table>')
+        if _idx_note:
+            parts.append('<div class="note">index detail skipped: per-index capture '
+                         'missing on one side of the window (older snapshot)</div>')
     object_iostat_table("Top Tables by Logical Reads",
         win["db"].get(("begin", "object_iostat"), []),
-        win["db"].get(("end", "object_iostat"), []), "logical")
+        win["db"].get(("end", "object_iostat"), []), "logical",
+        idx_begin_rows=win["db"].get(("begin", "object_index_iostat"), []),
+        idx_end_rows=win["db"].get(("end", "object_index_iostat"), []))
     object_iostat_table("Top Tables by Physical Reads",
         win["db"].get(("begin", "object_iostat"), []),
-        win["db"].get(("end", "object_iostat"), []), "physical")
+        win["db"].get(("end", "object_iostat"), []), "physical",
+        idx_begin_rows=win["db"].get(("begin", "object_index_iostat"), []),
+        idx_end_rows=win["db"].get(("end", "object_index_iostat"), []))
     # ================= Active Session History =================
     # gs_asp/local_active_session = persisted 1-second kernel ASP samples;
     # every create flushes [prev snap, now]; the window unions every flush
@@ -34000,22 +34065,44 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     parts.append('<table class="t"><tr><th>Metric</th><th class="n">P1 total</th>'
                  '<th class="n">P2 total</th><th class="n">&Delta;</th>'
                  '<th class="n">P1 /s</th><th class="n">P2 /s</th></tr>')
-    for lbl, col in [("blocks read", "blks_read"), ("blocks hit", "blks_hit"),
+    # logical reads = blks_hit + blks_read (awrrpt parity, user 2026-10-15);
+    # SQL calls sits directly under rollbacks
+    def _lrow(lbl, v1, v2, fb, fn):
+        parts.append('<tr><td>%s</td><td class="n">%s</td><td class="n">%s</td><td class="n">%s</td>'
+                     '<td class="n">%s</td><td class="n">%s</td></tr>' % (
+                         esc(lbl), fb(v1), fb(v2), fb(v2 - v1), fn(v1 / dur1), fn(v2 / dur2)))
+    _lrow("logical reads",
+          _dbsum(db1, "blks_hit") + _dbsum(db1, "blks_read"),
+          _dbsum(db2, "blks_hit") + _dbsum(db2, "blks_read"), fmt_blocks, fmt_blocks_ps)
+    for lbl, col in [("physical reads", "blks_read"),
                      ("rows returned", "tup_returned"), ("rows fetched", "tup_fetched"),
                      ("rows inserted", "tup_inserted"), ("rows updated", "tup_updated"),
                      ("rows deleted", "tup_deleted"), ("commits", "xact_commit"),
-                     ("rollbacks", "xact_rollback"), ("deadlocks", "deadlocks"),
+                     ("rollbacks", "xact_rollback")]:
+        v1 = _dbsum(db1, col); v2 = _dbsum(db2, col)
+        if col == "blks_read":
+            fb, fn = fmt_blocks, fmt_blocks_ps
+        else:
+            fb = fn = fmt_int
+        _lrow(lbl, v1, v2, fb, fn)
+    # SQL calls (QPS) P1 vs P2: dbe_perf.statement n_calls window deltas
+    _scd1 = (sum(to_num(r.get("n_calls", 0) or 0) for r in win1["db"].get(("end", "statement"), []))
+             - sum(to_num(r.get("n_calls", 0) or 0) for r in win1["db"].get(("begin", "statement"), [])))
+    _scd2 = (sum(to_num(r.get("n_calls", 0) or 0) for r in win2["db"].get(("end", "statement"), []))
+             - sum(to_num(r.get("n_calls", 0) or 0) for r in win2["db"].get(("begin", "statement"), [])))
+    parts.append('<tr><td>SQL calls</td><td class="n">%s</td><td class="n">%s</td><td class="n">%s</td>'
+                 '<td class="n">%s</td><td class="n">%s</td></tr>'
+                 % (fmt_int(_scd1), fmt_int(_scd2), fmt_int(_scd2 - _scd1),
+                    ("%.2f" % (_scd1 / dur1)) if dur1 else "-",
+                    ("%.2f" % (_scd2 / dur2)) if dur2 else "-"))
+    for lbl, col in [("deadlocks", "deadlocks"),
                      ("conflicts", "conflicts"), ("temp bytes", "temp_bytes")]:
         v1 = _dbsum(db1, col); v2 = _dbsum(db2, col)
         if col == "temp_bytes":
             fb = fn = fmt_bytes
-        elif col in ("blks_read", "blks_hit"):
-            fb, fn = fmt_blocks, fmt_blocks_ps
         else:
             fb = fn = fmt_int
-        parts.append('<tr><td>%s</td><td class="n">%s</td><td class="n">%s</td><td class="n">%s</td>'
-                     '<td class="n">%s</td><td class="n">%s</td></tr>' % (
-                         esc(lbl), fb(v1), fb(v2), fb(v2 - v1), fn(v1 / dur1), fn(v2 / dur2)))
+        _lrow(lbl, v1, v2, fb, fn)
     # role-aware WAL movement: a standby writes no local WAL (xlog insert lsn
     # sits at a static near-zero there) -- on standby windows use the standby's
     # own walreceiver replay lsn delta; "-" when that window has no
@@ -34031,7 +34118,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                 - sum(_lsn(r.get("receiver_replay_location", "")) for r in rb))
     _sb1 = "standby" in str(m1.get("db_role", "")); _sb2 = "standby" in str(m2.get("db_role", ""))
     _w1 = _walval(win1, _sb1); _w2 = _walval(win2, _sb2)
-    _wl = ("WAL replayed (receiver replay lsn)" if _sb1 and _sb2 else
+    _wl = ("WAL replayed" if _sb1 and _sb2 else
            ("WAL written / WAL replayed (P1 / P2)" if _sb1 or _sb2 else "WAL written"))
     _fmtw = lambda v: "-" if v is None else fmt_bytes(v)
     parts.append('<tr><td>%s</td><td class="n">%s</td><td class="n">%s</td><td class="n">%s</td>'
@@ -34068,16 +34155,6 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             _lpw_neg = True
     if _lpw_neg:
         note("WARNING: negative delta in WAL/pagewriter counters — possible counter reset (switchover/promote); these rows may be unreliable.")
-    # SQL calls (QPS) P1 vs P2: dbe_perf.statement n_calls window deltas
-    _scd1 = (sum(to_num(r.get("n_calls", 0) or 0) for r in win1["db"].get(("end", "statement"), []))
-             - sum(to_num(r.get("n_calls", 0) or 0) for r in win1["db"].get(("begin", "statement"), [])))
-    _scd2 = (sum(to_num(r.get("n_calls", 0) or 0) for r in win2["db"].get(("end", "statement"), []))
-             - sum(to_num(r.get("n_calls", 0) or 0) for r in win2["db"].get(("begin", "statement"), [])))
-    parts.append('<tr><td>SQL calls (n_calls)</td><td class="n">%s</td><td class="n">%s</td><td class="n">%s</td>'
-                 '<td class="n">%s</td><td class="n">%s</td></tr>'
-                 % (fmt_int(_scd1), fmt_int(_scd2), fmt_int(_scd2 - _scd1),
-                    ("%.2f" % (_scd1 / dur1)) if dur1 else "-",
-                    ("%.2f" % (_scd2 / dur2)) if dur2 else "-"))
     _lio2 = {r[0]: r for r in loadprofile_iostat_rows(win2, dur2)}
     for _lbl, _b1, _e1, _d1, _ps1, _md1, _ok1 in loadprofile_iostat_rows(win1, dur1):
         _lbl, _b2, _e2, _d2, _ps2, _md2, _ok2 = _lio2[_lbl]
