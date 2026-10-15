@@ -33086,6 +33086,8 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
          "physical reads/exec = (n_blocks_fetched - n_blocks_hit) / n_calls.\n"
          "rows/exec = n_returned_rows / n_calls.\n"
          "plan_time / sort_time / hash_time = per-execution (ms).\n"
+         "Memory Used = delta(sort_mem_used + hash_mem_used), Temp Spill = delta(sort_spill_size + hash_spill_size), KB; /exec = divided by n_calls.\n"
+         "mem/spill counters cover Sort executor nodes + HashJoin only (aggregate-internal sorts and HashAgg are not counted).\n"
          "Top %d per ordering." % top_n)
 
     shown_sql = {}   # uid -> statement row (collected for the SQL Text section)
@@ -33145,6 +33147,31 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             parts.append('<tr>' + ''.join(cells) + '</tr>')
         parts.append('</table>')
 
+    def sql_mem_block(label, order_col, dim_header, pct_base):
+        # memory/spill dims: slim table -- per-exec consumption is the point;
+        # the generic cpu/io/reads/plan-time tail columns are noise here
+        sub(label)
+        keys = sorted(ST.keys(), key=lambda k: ST[k].get(order_col, 0.0), reverse=True)[:top_n]
+        parts.append('<table class="t"><tr><th>#</th><th>SQL Id</th><th>User</th>'
+                     '<th class="n">Executions</th>'
+                     '<th class="n">%s</th><th class="n">%s/exec</th>'
+                     '<th class="n">%% Total</th></tr>' % (dim_header, dim_header))
+        if not keys:
+            parts.append('<tr><td colspan="7" class="note">no data</td></tr>')
+        for i, k in enumerate(keys, 1):
+            d = ST[k]; row = d.get("__row") or {}
+            if k not in shown_sql:
+                shown_sql[k] = row
+            v = d.get(order_col, 0.0)
+            calls = d.get("n_calls", 0.0) or 1.0
+            parts.append('<tr><td>%d</td><td><a href="#sql-%s">%s</a></td><td>%s</td>'
+                         '<td class="n">%s</td><td class="n">%s</td><td class="n">%s</td>'
+                         '<td class="n">%.2f%%</td></tr>' % (
+                             i, esc(k), esc(k), esc(row.get("user_name") or ""),
+                             fmt_int(d.get("n_calls", 0.0)), fmt_int(v), fmt_int(v / calls),
+                             pct(v, pct_base)))
+        parts.append('</table>')
+
     for _k in ST:
         ST[_k]["physical_reads"] = ST[_k].get("n_blocks_fetched", 0.0) - ST[_k].get("n_blocks_hit", 0.0)
         _stm = STM.get(_k, {})
@@ -33171,8 +33198,8 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         parts.append('<div class="note">sort/hash memory &amp; spill stats skipped: '
                      'capture missing on one side of the window (older snapshot)</div>')
     elif _stmb:   # both sides captured; both absent (legacy snaps / PG) -> silent
-        sql_block("SQL ordered by Memory Used", "work_mem_used", "Work Mem (KB)", fmt_int, "total_only", sum_mem_sql)
-        sql_block("SQL ordered by Temp Spill", "temp_spill_size", "Temp Spill (KB)", fmt_int, "total_only", sum_spill_sql)
+        sql_mem_block("SQL ordered by Memory Used", "work_mem_used", "Work Mem (KB)", sum_mem_sql)
+        sql_mem_block("SQL ordered by Temp Spill", "temp_spill_size", "Temp Spill (KB)", sum_spill_sql)
     sql_block("SQL ordered by Executions", "n_calls", "Executions", fmt_int, "none", sum_calls)
 
     # ================= Object Statistics (all databases; gauges=begin+end, counters=end-begin) =================
@@ -34258,6 +34285,45 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                              fmt_int(e1), fmt_int(e2), dim_fmt(v1), dim_fmt(v2),
                              pct(v1, _sum1), pct(v2, _sum2), _pdiff, badge))
         parts.append('</table>')
+
+    def sql_mem_block_diff(label, order_col, dim_header):
+        # memory/spill dims: per-exec columns replace the %T columns --
+        # per-exec change is the signal (exec-count growth vs per-run cost)
+        sub(label)
+        keys = sorted(set(ST1) | set(ST2),
+                      key=lambda k: max(ST1.get(k, {}).get(order_col, 0.0), ST2.get(k, {}).get(order_col, 0.0)),
+                      reverse=True)[:top_n]
+        parts.append('<table class="t"><tr><th>#</th><th>SQL Id</th><th>User</th>'
+                     '<th class="n">P1 Exec</th><th class="n">P2 Exec</th>'
+                     '<th class="n">P1 %s</th><th class="n">P2 %s</th>'
+                     '<th class="n">P1 %s/exec</th><th class="n">P2 %s/exec</th>'
+                     '<th class="n">%%Diff</th><th>note</th></tr>'
+                     % (dim_header, dim_header, dim_header, dim_header))
+        if not keys:
+            parts.append('<tr><td colspan="11" class="note">no data</td></tr>')
+        for i, k in enumerate(keys, 1):
+            d1 = ST1.get(k); d2 = ST2.get(k)
+            row = ((d2 or d1) or {}).get("__row") or {}
+            if k not in shown_sql:
+                shown_sql[k] = row
+            e1 = (d1 or {}).get("n_calls", 0.0); e2 = (d2 or {}).get("n_calls", 0.0)
+            v1 = (d1 or {}).get(order_col, 0.0); v2 = (d2 or {}).get(order_col, 0.0)
+            badge = ""
+            if not d1 and d2:
+                badge = "<span class='bad'>[NEW]</span>"
+            elif d1 and not d2:
+                badge = "<span class='note'>[GONE]</span>"
+            _pdiff = "new" if (v1 == 0 and v2 > 0) else ("%+.1f%%" % pctdiff(v1, v2))
+            parts.append('<tr><td>%d</td><td><a href="#sql-%s">%s</a></td><td>%s</td>'
+                         '<td class="n">%s</td><td class="n">%s</td>'
+                         '<td class="n">%s</td><td class="n">%s</td>'
+                         '<td class="n">%s</td><td class="n">%s</td>'
+                         '<td class="n">%s</td><td>%s</td></tr>' % (
+                             i, esc(k), esc(k), esc(row.get("user_name") or ""),
+                             fmt_int(e1), fmt_int(e2), fmt_int(v1), fmt_int(v2),
+                             fmt_int(v1 / (e1 or 1.0)), fmt_int(v2 / (e2 or 1.0)),
+                             _pdiff, badge))
+        parts.append('</table>')
     sql_block_diff("SQL ordered by DB Time", "db_time", "DB Time (s)", s_of)
     sql_block_diff("SQL ordered by CPU Time", "cpu_time", "CPU Time (s)", s_of)
     sql_block_diff("SQL ordered by IO Time", "data_io_time", "IO Time (s)", s_of)
@@ -34271,8 +34337,8 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         parts.append('<div class="note">sort/hash memory &amp; spill stats skipped: '
                      'capture missing on one side of a window (older snapshot)</div>')
     elif _sm1b or _sm2b:
-        sql_block_diff("SQL ordered by Memory Used", "work_mem_used", "Work Mem (KB)", fmt_int)
-        sql_block_diff("SQL ordered by Temp Spill", "temp_spill_size", "Temp Spill (KB)", fmt_int)
+        sql_mem_block_diff("SQL ordered by Memory Used", "work_mem_used", "Work Mem (KB)")
+        sql_mem_block_diff("SQL ordered by Temp Spill", "temp_spill_size", "Temp Spill (KB)")
     sql_block_diff("SQL ordered by Executions", "n_calls", "Executions", fmt_int)
 
     # ================= Wait Events (full) =================
