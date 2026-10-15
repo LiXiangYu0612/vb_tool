@@ -28501,6 +28501,18 @@ PSQL4
       for _odb in $_odbs; do
           PGCONNECT_TIMEOUT=$_ct PGOPTIONS="$_st" psql -d "$_odb" -tAF',' -c "select '$_odb',n.nspname,c.relname,age(c.relfrozenxid64),c.relpages,c.reltuples,coalesce(pg_stat_get_tuples_changed(c.oid),0),coalesce(pg_stat_get_live_tuples(c.oid),0),coalesce(pg_stat_get_dead_tuples(c.oid),0) from pg_class c left join pg_namespace n on n.oid=c.relnamespace where c.relkind in ('r','t','m')" 2>/dev/null
       done; } > "$dbd/object_dead.csv"
+    # ---- object buffer I/O across all databases (2026-10-15; source =
+    # dbe_perf.statio_all_tables, system catalogs included, user 2026-10-15).
+    # Cumulative buffer counters; renderer computes end-begin. Components roll
+    # up to the table row: heap + index (all its indexes) + toast + toast
+    # index. Partitioned parents aggregate heap/index kernel-side; toast/tidx
+    # are NULL at parent level (kernel view limitation) -> coalesce to 0 here.
+    # pg_toast rows are EXCLUDED: the owning table row's toast columns already
+    # carry that same I/O, keeping them would double count. ----
+    { echo "dbname,schema,object,heap_blks_read,heap_blks_hit,idx_blks_read,idx_blks_hit,toast_blks_read,toast_blks_hit,tidx_blks_read,tidx_blks_hit"
+      for _odb in $_odbs; do
+          PGCONNECT_TIMEOUT=$_ct PGOPTIONS="$_st" psql -d "$_odb" -tAF',' -c "select '$_odb',schemaname,relname,coalesce(heap_blks_read,0),coalesce(heap_blks_hit,0),coalesce(idx_blks_read,0),coalesce(idx_blks_hit,0),coalesce(toast_blks_read,0),coalesce(toast_blks_hit,0),coalesce(tidx_blks_read,0),coalesce(tidx_blks_hit,0) from dbe_perf.statio_all_tables where schemaname <> 'pg_toast'" 2>/dev/null
+      done; } > "$dbd/object_iostat.csv"
     # ---- instance-wide physical I/O totals (2026-09-16; replaces the per-file
     # gs_file_stat capture AND the Top-10 file-IO report tables). Source =
     # pg_catalog.get_local_rel_iostat(): the kernel fileIOStat DIRECT counters
@@ -28797,6 +28809,27 @@ def normalize_sql(q):
             out.append(line)
     return "\n".join(out)
 
+def object_iostat_rows(rows):
+    """Derived per-phase rows from object_iostat.csv (dbe_perf.statio_all_tables,
+    system catalogs included; pg_toast rows excluded at capture).
+    logical = fetched (read+hit) over heap+index+toast(+toast index); physical =
+    read only. All buffer traffic rolls up to the table row; toast includes the
+    toast index. Missing/NULL counters (partitioned parents' toast/tidx columns
+    are NULL in the kernel view) read as 0."""
+    out = []
+    for r in rows:
+        hr = to_num(r.get("heap_blks_read", 0) or 0); hh = to_num(r.get("heap_blks_hit", 0) or 0)
+        ir = to_num(r.get("idx_blks_read", 0) or 0); ih = to_num(r.get("idx_blks_hit", 0) or 0)
+        tr = to_num(r.get("toast_blks_read", 0) or 0); th = to_num(r.get("toast_blks_hit", 0) or 0)
+        xr = to_num(r.get("tidx_blks_read", 0) or 0); xh = to_num(r.get("tidx_blks_hit", 0) or 0)
+        out.append({"dbname": r.get("dbname", ""), "schema": r.get("schema", ""),
+                    "object": r.get("object", ""),
+                    "logical": hr + hh + ir + ih + tr + th + xr + xh,
+                    "heap": hr + hh, "index": ir + ih, "toast": tr + th + xr + xh,
+                    "physical": hr + ir + tr + xr,
+                    "pheap": hr, "pindex": ir, "ptoast": tr + xr})
+    return out
+
 def load_window(d):
     w = {"meta": {}, "os": {}, "db": {}}
     mp = os.path.join(d, "meta.json")
@@ -28811,7 +28844,7 @@ def load_window(d):
             w["os"][(phase, f)] = _read_os_text(p) if os.path.isfile(p) else ""
         for t in ("statement", "wait_events", "instance_time", "database", "pagewriter",
                   "memory_node_detail", "shared_memory", "session_memory", "session_by_sess",
-                  "object_tables", "object_dead"):
+                  "object_tables", "object_dead", "object_iostat"):
             w["db"][(phase, t)] = read_csv_rows(os.path.join(d, "db", phase, t + ".csv"))
     return w
 
@@ -28843,7 +28876,7 @@ def load_snap(d, tables=None):
     _DB_TABLES = ("statement", "wait_events", "instance_time", "database", "pagewriter",
                  "memory_node_detail", "shared_memory", "session_memory", "session_by_sess",
                  "pg_settings",
-                 "object_tables", "object_dead", "walreceiver",
+                 "object_tables", "object_dead", "object_iostat", "walreceiver",
                  "replication", "replication_slots",
                  "rel_iostat", "file_redo_iostat")
     if tables is None:
@@ -28946,7 +28979,7 @@ def build_window_from_snaps(begin_dir, end_dir, sqltext_root=None, load_sqltext=
     for t in ("statement", "wait_events", "instance_time", "database", "pagewriter",
               "memory_node_detail", "shared_memory", "session_memory", "session_by_sess",
               "pg_settings",
-              "object_tables", "object_dead", "walreceiver",
+              "object_tables", "object_dead", "object_iostat", "walreceiver",
               "replication", "replication_slots",
               "rel_iostat", "file_redo_iostat"):
         win["db"][("begin", t)] = b["db"].get(t, [])
@@ -33164,6 +33197,63 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
          ("n_tup_ins", "d"), ("n_tup_upd", "d"), ("n_tup_del", "d"), ("n_tup_hot_upd", "d"),
          ("n_live_tup", "e"), ("n_dead_tup", "be")],
         lambda v: (v["seq_tup_read"][1] - v["seq_tup_read"][0]) + (v["idx_tup_fetch"][1] - v["idx_tup_fetch"][0]))
+    def object_iostat_table(label, begin_rows, end_rows, mode, top=30):
+        # object_iostat.csv <- dbe_perf.statio_all_tables (cumulative buffer
+        # counters per table, system catalogs included; renderer computes end-begin). All buffer
+        # traffic rolls up to the table row: heap + index (all its indexes) +
+        # toast + toast index. Partitioned parents aggregate heap/index
+        # kernel-side; their toast/tidx columns are NULL -> 0 (2026-10-15).
+        # mode "logical" ranks by fetched (read+hit), "physical" by read only.
+        sub(label)
+        def _key(r):
+            return (r.get("dbname", ""), r.get("schema", ""), r.get("object", ""))
+        def _phase_agg(rows):
+            # (heap_l, index_l, toast_l, heap_p, index_p, toast_p) per key
+            return {(r["dbname"], r["schema"], r["object"]):
+                    (r["heap"], r["index"], r["toast"], r["pheap"], r["pindex"], r["ptoast"])
+                    for r in object_iostat_rows(rows)}
+        # a one-sided empty capture (older snapshot on one side) cannot be
+        # delta'd -- rendering it would silently present full-cumulative
+        # counters as a window delta
+        if bool(begin_rows) != bool(end_rows):
+            parts.append('<div class="note">no data (object I/O capture missing on one side of the window)</div>')
+            return
+        b, e = _phase_agg(begin_rows), _phase_agg(end_rows)
+        _zero = (0,) * 6
+        _d = {}
+        for k in set(b) | set(e):
+            _d[k] = tuple(y - x for x, y in zip(b.get(k, _zero), e.get(k, _zero)))
+        _idx3 = (0, 1, 2) if mode == "logical" else (3, 4, 5)
+        def _main(d):
+            return d[0] + d[1] + d[2] if mode == "logical" else d[3] + d[4] + d[5]
+        _tot_main = sum(_main(v) for v in _d.values())
+        _rows = sorted(_d.items(), key=lambda kv: _main(kv[1]), reverse=True)[:top]
+        if not _rows:
+            parts.append('<div class="note">no data</div>')
+            return
+        def _pct(x, y):
+            return "%.1f" % (x * 100.0 / y) if y > 0 else "0.0"
+        _metric = "Logical Reads" if mode == "logical" else "Physical Reads"
+        parts.append('<table class="t"><tr>'
+            + ''.join('<th>%s</th>' % esc(c) for c in ("dbname", "schema", "object"))
+            + '<th class="n">' + _metric + '</th><th class="n">%Total</th>'
+              '<th class="n">Heap</th><th class="n">Index</th><th class="n">Toast</th>'
+              '<th class="n">heap%</th><th class="n">index%</th><th class="n">toast%</th></tr>')
+        for k, d in _rows:
+            m = _main(d)
+            parts.append('<tr>' + ''.join('<td>%s</td>' % esc(x) for x in k)
+                + '<td class="n">%s</td>' % fmt_int(m)
+                + '<td class="n">%s</td>' % _pct(m, _tot_main)
+                + ''.join('<td class="n">%s</td>' % fmt_int(d[i]) for i in _idx3)
+                + ''.join('<td class="n">%s</td>' % _pct(d[i], m) for i in _idx3)
+                + '</tr>')
+        parts.append('</table>')
+    object_iostat_table("Top Tables by Logical Reads",
+        win["db"].get(("begin", "object_iostat"), []),
+        win["db"].get(("end", "object_iostat"), []), "logical")
+    object_iostat_table("Top Tables by Physical Reads",
+        win["db"].get(("begin", "object_iostat"), []),
+        win["db"].get(("end", "object_iostat"), []), "physical")
     # ================= Active Session History =================
     # gs_asp/local_active_session = persisted 1-second kernel ASP samples;
     # every create flushes [prev snap, now]; the window unions every flush
@@ -34026,6 +34116,25 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
              win2["db"].get(("begin", "object_dead"), []), win2["db"].get(("end", "object_dead"), []),
              ("dbname", "schema", "object"),
              ("n_dead_tup", "n_live_tup"), "n_dead_tup")
+    # derived per-phase rows via object_iostat_rows(); obj_diff then computes
+    # the window delta of each derived column (delta-of-sums == sum-of-deltas)
+    _io1b = object_iostat_rows(win1["db"].get(("begin", "object_iostat"), []))
+    _io1e = object_iostat_rows(win1["db"].get(("end", "object_iostat"), []))
+    _io2b = object_iostat_rows(win2["db"].get(("begin", "object_iostat"), []))
+    _io2e = object_iostat_rows(win2["db"].get(("end", "object_iostat"), []))
+    if (bool(_io1b) != bool(_io1e)) or (bool(_io2b) != bool(_io2e)):
+        # one-sided empty capture in either window (older snapshot) cannot be
+        # delta'd without presenting full-cumulative counters as a window
+        parts.append('<div class="note">object I/O: capture missing on one side of a window (older snapshot); tables skipped</div>')
+    else:
+        obj_diff("Top Tables by Logical Reads (window Δ)",
+                 _io1b, _io1e, _io2b, _io2e,
+                 ("dbname", "schema", "object"),
+                 ("logical", "heap", "index", "toast"), "logical")
+        obj_diff("Top Tables by Physical Reads (window Δ)",
+                 _io1b, _io1e, _io2b, _io2e,
+                 ("dbname", "schema", "object"),
+                 ("physical", "pheap", "pindex", "ptoast"), "physical")
 
     # ================= Top 10 Wait Events =================
     sec("Top 10 Wait Events by Total Wait Time")
