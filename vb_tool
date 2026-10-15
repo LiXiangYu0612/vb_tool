@@ -33105,7 +33105,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     # ================= SQL Statistics =================
     sec("SQL Statistics")
     note("SQL Id = unique_sql_id (click for full text in SQL Text section).\n"
-         "Sort metric = total + per-exec (the column each table is ordered by).\n"
+         "Sort metric = total + per-exec (the column each table is ordered by); %%Total sits right after the dim total.\n"
          "CPU Time / IO Time = per-execution (ms); a table ordered BY cpu/io time keeps that dim as window total (s).\n"
          "IO Time = data_io_time.\n"
          "logical reads/exec = n_blocks_fetched / n_calls.\n"
@@ -33118,16 +33118,20 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
 
     shown_sql = {}   # uid -> statement row (collected for the SQL Text section)
 
-    def sql_block(label, order_col, dim_header, dim_fmt, dim_mode, pct_base, no_time_ms=False):
+    def sql_block(label, order_col, dim_header, dim_fmt, dim_mode, pct_base,
+                  ms_cols=("plan", "sort", "hash")):
         # dim_mode: total_pe = dim total + per-exec; total_only = dim total; none = Executions is dim
-        # no_time_ms: drop the plan/sort/hash per-execution (ms) tail -- memory/spill
-        # dims (user 2026-10-15: those ms columns are noise there; every other
-        # context column -- cpu/io time, reads/exec, rows/exec -- stays)
+        # ms_cols: which per-execution (ms) tail columns to render; memory/spill
+        # dims pass ("sort","hash") -- sort/hash time IS that dimension's own
+        # cost, plan_time is the noise there (user 2026-10-15)
         sub(label)
         keys = sorted(ST.keys(), key=lambda k: ST[k].get(order_col, 0.0), reverse=True)[:top_n]
         hdr = ['<th>#</th>', '<th>SQL Id</th>', '<th>User</th>', '<th class="n">Executions</th>']
         if dim_mode in ("total_pe", "total_only"):
             hdr.append('<th class="n">%s</th>' % dim_header)
+        # %Total right after the dim total, same spot in EVERY table (user
+        # 2026-10-15: floating between middle and last looked broken)
+        hdr.append('<th class="n">% Total</th>')
         if dim_mode == "total_pe":
             hdr.append('<th class="n">%s/exec</th>' % dim_header)
         # the table's own dim column already shows cpu/io time when it IS the dim --
@@ -33138,12 +33142,8 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             hdr.append('<th class="n">IO Time/exec (ms)</th>')
         hdr += ['<th class="n">logical reads/exec</th>',
                 '<th class="n">physical reads/exec</th>',
-                '<th class="n">rows/exec</th>',
-                '<th class="n">% Total</th>']
-        if not no_time_ms:
-            hdr += ['<th class="n">plan_time/exec (ms)</th>',
-                    '<th class="n">sort_time/exec (ms)</th>',
-                    '<th class="n">hash_time/exec (ms)</th>']
+                '<th class="n">rows/exec</th>']
+        hdr += ['<th class="n">%s_time/exec (ms)</th>' % c for c in ms_cols]
         parts.append('<table class="t"><tr>' + ''.join(hdr) + '</tr>')
         if not keys:
             parts.append('<tr><td colspan="%d" class="note">no data</td></tr>' % len(hdr))
@@ -33161,6 +33161,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                      '<td class="n">%s</td>' % fmt_int(d.get("n_calls", 0.0))]
             if dim_mode in ("total_pe", "total_only"):
                 cells.append('<td class="n">%s</td>' % dim_fmt(v))
+            cells.append('<td class="n">%.2f%%</td>' % pct(v, pct_base))
             if dim_mode == "total_pe":
                 cells.append('<td class="n">%s</td>' % dim_fmt(v / calls))
             if dim_header != "CPU Time (s)":
@@ -33169,12 +33170,9 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                 cells.append('<td class="n">%s</td>' % ms_of(d.get("data_io_time", 0.0) / calls))
             cells += ['<td class="n">%s</td>' % fmt_int(log_r / calls),
                       '<td class="n">%s</td>' % fmt_int(phys_r / calls),
-                      '<td class="n">%s</td>' % fmt_int(d.get("n_returned_rows", 0.0) / calls),
-                      '<td class="n">%.2f%%</td>' % pct(v, pct_base)]
-            if not no_time_ms:
-                cells += ['<td class="n">%s</td>' % ms_of(d.get("plan_time", 0.0) / calls),
-                          '<td class="n">%s</td>' % ms_of(d.get("sort_time", 0.0) / calls),
-                          '<td class="n">%s</td>' % ms_of(d.get("hash_time", 0.0) / calls)]
+                      '<td class="n">%s</td>' % fmt_int(d.get("n_returned_rows", 0.0) / calls)]
+            cells += ['<td class="n">%s</td>' % ms_of(d.get(c + "_time", 0.0) / calls)
+                      for c in ms_cols]
             parts.append('<tr>' + ''.join(cells) + '</tr>')
         parts.append('</table>')
 
@@ -33204,9 +33202,9 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         parts.append('<div class="note">sort/hash memory &amp; spill stats skipped: '
                      'capture missing on one side of the window (older snapshot)</div>')
     elif _stmb:   # both sides captured; both absent (legacy snaps / PG) -> silent
-        # total + per-exec dim columns, no plan/sort/hash ms tail (user 2026-10-15)
-        sql_block("SQL ordered by Memory Used", "work_mem_used", "Work Mem (KB)", fmt_int, "total_pe", sum_mem_sql, no_time_ms=True)
-        sql_block("SQL ordered by Temp Spill", "temp_spill_size", "Temp Spill (KB)", fmt_int, "total_pe", sum_spill_sql, no_time_ms=True)
+        # sort/hash time ms tail stays (the dimension's own cost); plan_time dropped
+        sql_block("SQL ordered by Memory Used", "work_mem_used", "Work Mem (KB)", fmt_int, "total_pe", sum_mem_sql, ms_cols=("sort", "hash"))
+        sql_block("SQL ordered by Temp Spill", "temp_spill_size", "Temp Spill (KB)", fmt_int, "total_pe", sum_spill_sql, ms_cols=("sort", "hash"))
     sql_block("SQL ordered by Executions", "n_calls", "Executions", fmt_int, "none", sum_calls)
 
     # ================= Object Statistics (all databases; gauges=begin+end, counters=end-begin) =================
