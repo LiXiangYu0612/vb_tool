@@ -33104,7 +33104,8 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     sec("SQL Statistics")
     note("SQL Id = unique_sql_id (click for full text in SQL Text section).\n"
          "Sort metric = total + per-exec (the column each table is ordered by).\n"
-         "CPU Time / IO Time = window total (s); IO Time = data_io_time.\n"
+         "CPU Time / IO Time = per-execution (ms); a table ordered BY cpu/io time keeps that dim as window total (s).\n"
+         "IO Time = data_io_time.\n"
          "logical reads/exec = n_blocks_fetched / n_calls.\n"
          "physical reads/exec = (n_blocks_fetched - n_blocks_hit) / n_calls.\n"
          "rows/exec = n_returned_rows / n_calls.\n"
@@ -33130,9 +33131,9 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         # the table's own dim column already shows cpu/io time when it IS the dim --
         # skip the static copy then, otherwise the column appears twice
         if dim_header != "CPU Time (s)":
-            hdr.append('<th class="n">CPU Time (s)</th>')
+            hdr.append('<th class="n">CPU Time/exec (ms)</th>')
         if dim_header != "IO Time (s)":
-            hdr.append('<th class="n">IO Time (s)</th>')
+            hdr.append('<th class="n">IO Time/exec (ms)</th>')
         hdr += ['<th class="n">logical reads/exec</th>',
                 '<th class="n">physical reads/exec</th>',
                 '<th class="n">rows/exec</th>',
@@ -33161,9 +33162,9 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             if dim_mode == "total_pe":
                 cells.append('<td class="n">%s</td>' % dim_fmt(v / calls))
             if dim_header != "CPU Time (s)":
-                cells.append('<td class="n">%s</td>' % s_of(d.get("cpu_time", 0.0)))
+                cells.append('<td class="n">%s</td>' % ms_of(d.get("cpu_time", 0.0) / calls))
             if dim_header != "IO Time (s)":
-                cells.append('<td class="n">%s</td>' % s_of(d.get("data_io_time", 0.0)))
+                cells.append('<td class="n">%s</td>' % ms_of(d.get("data_io_time", 0.0) / calls))
             cells += ['<td class="n">%s</td>' % fmt_int(log_r / calls),
                       '<td class="n">%s</td>' % fmt_int(phys_r / calls),
                       '<td class="n">%s</td>' % fmt_int(d.get("n_returned_rows", 0.0) / calls),
