@@ -29673,7 +29673,12 @@ def _chain_html(chain, width=200):
     lines.append(cur)
     return '<div class="sqlfull">%s</div>' % "\n".join(esc(x) for x in lines)
 
-def longtxn_section_html(lt):
+def sql_anchor(v):
+    """SQL id cell -> anchor link to its text row in the SQL Text section
+    (every unique_sql_id / unique_query_id cell is clickable, user 2026-10-15)."""
+    return '<a href="#sql-%s">%s</a>' % (esc(v), esc(v))
+
+def longtxn_section_html(lt, sql_ids=None):
     """Long Transaction Monitor body (caller emits the sec() title). A compact
     window summary line stays visible; the per-sample table folds. Error
     minutes render as muted gap rows."""
@@ -29729,7 +29734,12 @@ def longtxn_section_html(lt):
             wait = "%s / %s" % (ws, we)
         else:
             wait = we or ws or "-"
-        usi_cell = ('<span class="muted">-</span>' if usi in ("", "0") else esc(usi))
+        if usi in ("", "0"):
+            usi_cell = '<span class="muted">-</span>'
+        else:
+            usi_cell = sql_anchor(usi)
+            if sql_ids is not None:
+                sql_ids.append((usi, ""))
         h.append('<tr><td>%s</td>%s<td class="n">%s</td><td>%s</td>%s<td>%s</td><td>%s</td>'
                  '<td class="n">%s</td><td class="n">%s</td><td class="n">%s</td></tr>'
                  % (esc(ts), cnt_cell, esc(pid or "-"), esc(xstart or "-"), dur_cell,
@@ -29738,7 +29748,7 @@ def longtxn_section_html(lt):
     h.append('</table>')
     return "".join(h)
 
-def callstack_section_html(st):
+def callstack_section_html(st, sql_ids=None):
     """Callstack Sampling bodies: returns (backend_html, autovac_html,
     frontend_html) for the caller's sub("Background Threads") /
     sub("AutoVacuum Workers") / sub("Foreground Threads (LWLock waits)") --
@@ -29782,7 +29792,12 @@ def callstack_section_html(st):
          '<th class="n">unique_sql_id</th><th class="n">event_cnt</th><th>Stack</th></tr>']
     if st["fe"]:
         for ts, wev, pid, usi, ecnt, chain in sorted(st["fe"], key=lambda r: (r[0], r[1], r[2])):
-            usi_cell = ('<span class="muted">-</span>' if usi in ("", "0") else esc(usi))
+            if usi in ("", "0"):
+                usi_cell = '<span class="muted">-</span>'
+            else:
+                usi_cell = sql_anchor(usi)
+                if sql_ids is not None:
+                    sql_ids.append((usi, ""))
             ecnt_cell = ('<span class="muted">-</span>' if ecnt in ("", "0") else esc(ecnt))
             h.append('<tr><td>%s</td><td>%s</td><td class="n">%s</td><td class="n">%s</td>'
                      '<td class="n">%s</td><td>%s</td></tr>'
@@ -29811,7 +29826,7 @@ def _ctxs_pretty(ctxs):
             out.append(chunk)
     return ", ".join(out)
 
-def sessmem_section_html(sm):
+def sessmem_section_html(sm, sql_ids=None):
     """Max Session Memory Sample body (caller emits the sub() title; placed
     right after Session Memory Summary). Window peak line + one row per 5-min
     sample; unknown/error samples render as muted gap rows (visible > silent).
@@ -29852,7 +29867,12 @@ def sessmem_section_html(sm):
             ci_cell = esc("|".join(s if s not in ("", "-1") else "-" for s in cinfo.split("|")))
         else:
             ci_cell = "-"
-        usi_cell = '<span class="muted">-</span>' if usi in ("", "0") else esc(usi)
+        if usi in ("", "0"):
+            usi_cell = '<span class="muted">-</span>'
+        else:
+            usi_cell = sql_anchor(usi)
+            if sql_ids is not None:
+                sql_ids.append((usi, uname))
         try:
             tot_cell = fmt_bytes(int(tot))
         except ValueError:
@@ -33038,10 +33058,14 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         parts.append('<tr><td>%s</td><td class="n">%s</td><td class="n">%s</td><td class="n">%s</td></tr>'
                      % (esc(_lbl), _fmt(_b), _fmt(_e), _fmt(_e - _b)))
     parts.append('</table>')
+    # SQL ids referenced by the sampler sub-tables (sessmem/lt/callstack/ASH)
+    # collect here so the SQL Text section can anchor every linked id
+    _sql_ids = []
     if repl_dir is not None:
         sub("Max Session Memory Sample")
         parts.append(sessmem_section_html(
-            load_sessmem_samples(repl_dir, m.get("begin_ts", ""), m.get("end_ts", ""))))
+            load_sessmem_samples(repl_dir, m.get("begin_ts", ""), m.get("end_ts", "")),
+            sql_ids=_sql_ids))
 
     # ================= Replication (awrrpt: per-minute sampler logs) =================
     # role-aware: a standby snap shows the walreceiver side (the walsender views
@@ -33087,14 +33111,15 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     if repl_dir is not None:
         sec("Long Transaction Monitor")
         parts.append(longtxn_section_html(
-            load_lt_samples(repl_dir, m.get("begin_ts", ""), m.get("end_ts", ""))))
+            load_lt_samples(repl_dir, m.get("begin_ts", ""), m.get("end_ts", "")),
+            sql_ids=_sql_ids))
 
         sec("Callstack Sampling")
         _st = load_stack_samples(repl_dir, m.get("begin_ts", ""), m.get("end_ts", ""))
         if not _st["files"]:
             note("no callstack samples in this period (sampler runs while awr is enabled, one sample every 5 min)")
         else:
-            _be_html, _av_html, _fe_html = callstack_section_html(_st)
+            _be_html, _av_html, _fe_html = callstack_section_html(_st, sql_ids=_sql_ids)
             sub("Background Threads")
             parts.append(_be_html)
             sub("AutoVacuum Workers")
@@ -33380,6 +33405,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     # "no samples in this window" (idle standby / enable_asp off / PG).
     _ash = (load_ash_flushes(repl_dir, m.get("begin_ts", ""), m.get("end_ts", ""))
             if repl_dir is not None else {"cnt": {}, "event": {}, "sql": {}, "waitchain": {}})
+    _ash_qtext = {}   # unique_query_id -> unique_query text (ASH Top SQL links)
     sec("Active Session History")
     if _ash["cnt"] or _ash["event"] or _ash["sql"] or _ash["waitchain"]:
         def _ash_dt(src, bk):
@@ -33431,9 +33457,10 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         if _ash["sql"]:
             for (src, bk, qid), v in sorted(_ash["sql"].items(),
                                             key=lambda kv: (kv[0][1], -kv[1][1])):
+                _ash_qtext[qid] = v[0]
                 _h.append('<tr><td>%s</td><td class="n">%s</td><td>%s</td>'
                           '<td class="n">%s</td><td class="n">%s</td></tr>'
-                          % (_ash_dt(src, bk), esc(qid), esc(v[0]),
+                          % (_ash_dt(src, bk), sql_anchor(qid), esc(v[0]),
                              fmt_int(v[1]), fmt_int(v[2])))
         else:
             _h.append('<tr><td colspan="5" class="note">no data</td></tr>')
@@ -33475,8 +33502,13 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     parts.append('</table>')
 
     # ================= SQL Text (full normalized queries, AWR-style) =================
+    # ids linked from the sampler sub-tables (lt/callstack/sessmem/ASH) get
+    # anchor rows too, so every link lands on its text (user 2026-10-15)
+    for _uid, _u in _sql_ids:
+        if _uid and _uid not in shown_sql:
+            shown_sql[_uid] = {"user_name": _u}
     sec("SQL Text", fold=True)
-    if not shown_sql:
+    if not shown_sql and not _ash_qtext:
         parts.append('<div class="note">no data</div>')
     else:
         parts.append('<table class="t"><tr><th>SQL Id</th><th>SQL Text</th></tr>')
@@ -33485,11 +33517,22 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             row = shown_sql[uid] or {}
             _q = sql_text_of(win, row, uid)
             if _q is None:
+                # sampler-collected ids carry no statement row: try the shared
+                # text store by uid alone (user unknown there)
+                _q = next((t for (_u, _i), t in (win.get("_sqltext") or {}).items()
+                           if _i == str(uid)), None)
+            if _q is None:
                 _any_missing = True
             parts.append('<tr id="sql-%(u)s"><td class="sqlid">%(u)s</td>'
                          '<td><pre class="sqlfull">%(q)s</pre></td></tr>'
                          % {"u": esc(uid), "q": esc(normalize_sql(
                              _q or "(text not collected: absent from sql_text store)"))})
+        for _qid, _q in sorted(_ash_qtext.items()):
+            if _qid in shown_sql:
+                continue
+            parts.append('<tr id="sql-%(u)s"><td class="sqlid">%(u)s</td>'
+                         '<td><pre class="sqlfull">%(q)s</pre></td></tr>'
+                         % {"u": esc(_qid), "q": esc(normalize_sql(_q or "-"))})
         if _any_missing and win.get("_sqltext_missing"):
             parts.append('</table><div class="note">WARNING: shared sql_text store '
                          '(sql_text.csv.gz) not found next to the snapshots -- texts above are '
