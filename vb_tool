@@ -29673,6 +29673,25 @@ def _chain_html(chain, width=200):
     lines.append(cur)
     return '<div class="sqlfull">%s</div>' % "\n".join(esc(x) for x in lines)
 
+def ctx_family(name):
+    """normalize per-node dynamic memory contexts to their family name
+    (user 2026-10-15: one context per query/plan object, unaggregated they
+    fragment the Top-10 session context ranking). Suffix sites in the kernel:
+    - EVERY plan node: execProcnode.cpp ExecInitNode builds "<NodeTag>_<sid>"
+      where sid = MyProcPid = the session thread id (pg_stat_activity.sessionid;
+      204 live-verified Hash_47286009923328 == sessionid 47286009923328), or
+      "<NodeTag>_<queryId>_<planNodeId>" on stream top consumers -- family =
+      any nodeTagToString() name (Hash/HashJoin/Sort/Agg/Limit/NestLoop/.../
+      Stream/Vec*/BatchSort...; static HashTableContext/HashBatchContext aside)
+    - PL/pgSQL: "PL/pgSQL function context_<debug_query_id>" (pl_comp.cpp),
+      "PL/pgSQL package context_<debug_query_id>" (pl_package.cpp)
+    - planner: QueryRewrite/PlanGenerate/PathGenerateContext_<query_level>
+      (planner.cpp)
+    - ShareInputScan: "SIRW_<sessid>_<shareid>_<smpid>" (nodeShareInputScan.cpp)
+    All end in _<digits> and none of the base names legitimately do, so one
+    generic strip rule covers the whole inventory, present and future."""
+    return re.sub(r"_[0-9]+$", "", name or "")
+
 def sql_anchor(v):
     """SQL id cell -> anchor link to its text row in the SQL Text section
     (every unique_sql_id / unique_query_id cell is clickable, user 2026-10-15)."""
@@ -32982,20 +33001,21 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         for _r in _rows:
             parts.append('<tr>' + ''.join('<td>%s</td>' % esc(_r.get(c, "")) for c in _cols) + '</tr>')
         parts.append('</table>')
-    def be_table(label, begin_rows, end_rows, key_col, val_col, fmt_fn, top=None, key_header=None, cnt_col=None):
+    def be_table(label, begin_rows, end_rows, key_col, val_col, fmt_fn, top=None,
+                 key_header=None, cnt_col=None, key_norm=None):
         sub(label)
         _b = {}; _e = {}; _bc = {}; _ec = {}
         for _r in begin_rows:
             try:
-                _k = _r.get(key_col, "")
-                _b[_k] = to_num(_r.get(val_col, 0) or 0)
-                if cnt_col: _bc[_k] = to_num(_r.get(cnt_col, 0) or 0)
+                _k = key_norm(_r.get(key_col, "")) if key_norm else _r.get(key_col, "")
+                _b[_k] = _b.get(_k, 0) + to_num(_r.get(val_col, 0) or 0)
+                if cnt_col: _bc[_k] = _bc.get(_k, 0) + to_num(_r.get(cnt_col, 0) or 0)
             except Exception: pass
         for _r in end_rows:
             try:
-                _k = _r.get(key_col, "")
-                _e[_k] = to_num(_r.get(val_col, 0) or 0)
-                if cnt_col: _ec[_k] = to_num(_r.get(cnt_col, 0) or 0)
+                _k = key_norm(_r.get(key_col, "")) if key_norm else _r.get(key_col, "")
+                _e[_k] = _e.get(_k, 0) + to_num(_r.get(val_col, 0) or 0)
+                if cnt_col: _ec[_k] = _ec.get(_k, 0) + to_num(_r.get(cnt_col, 0) or 0)
             except Exception: pass
         if top:
             # full outer join: end top-N + begin top-N (end-first, dedup).
@@ -33041,7 +33061,10 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     be_table("Top 10 Session Memory Context",
              win["db"].get(("begin", "session_memory"), []),
              win["db"].get(("end", "session_memory"), []),
-             "contextname", "total", fmt_bytes, top=10, cnt_col="cnt")
+             "contextname", "total", fmt_bytes, top=10, cnt_col="cnt",
+             key_norm=ctx_family)
+    parts.append('<div class="note">per-node contexts (Hash_/HashJoin_/Sort_/Agg_/... with a '
+                 'numeric suffix, one per query/plan object) are aggregated under the family name</div>')
     def _sess_sum(rows):
         _vals = [to_num(r.get("total", 0) or 0) for r in rows]
         _n = len(_vals); _s = sum(_vals)
@@ -34223,17 +34246,20 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         for r in _rows:
             parts.append('<tr><td>%s</td><td>%s</td></tr>' % (esc(r.get("name", "")), esc(r.get("setting", ""))))
         parts.append('</table>')
-    def _grp(rows, key, val):
+    def _grp(rows, key, val, key_norm=None):
         out = {}
         for r in rows:
             try:
-                out[r.get(key, "")] = out.get(r.get(key, ""), 0) + to_num(r.get(val, 0) or 0)
+                k = r.get(key, "")
+                if key_norm:
+                    k = key_norm(k)
+                out[k] = out.get(k, 0) + to_num(r.get(val, 0) or 0)
             except Exception:
                 pass
         return out
-    def be_diff(label, end_r1, end_r2, key_col, val_col, fmt_fn, top=10):
+    def be_diff(label, end_r1, end_r2, key_col, val_col, fmt_fn, top=10, key_norm=None):
         sub(label)
-        d1 = _grp(end_r1, key_col, val_col); d2 = _grp(end_r2, key_col, val_col)
+        d1 = _grp(end_r1, key_col, val_col, key_norm); d2 = _grp(end_r2, key_col, val_col, key_norm)
         _keys = sorted(set(d1) | set(d2), key=lambda k: max(d1.get(k, 0), d2.get(k, 0)), reverse=True)[:top]
         parts.append('<table class="t"><tr><th>%s</th><th class="n">P1</th><th class="n">P2</th>'
                      '<th class="n">&Delta;</th></tr>' % esc(key_col))
@@ -34255,7 +34281,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     be_diff("Top 10 Session Memory Context",
             win1["db"].get(("end", "session_memory"), []),
             win2["db"].get(("end", "session_memory"), []),
-            "contextname", "total", fmt_bytes, top=10)
+            "contextname", "total", fmt_bytes, top=10, key_norm=ctx_family)
 
     # ================= Object Statistics =================
     sec("Object Statistics")
