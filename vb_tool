@@ -1,13 +1,13 @@
 #!/bin/bash
 #--------------------------------------------------------------------------------
 #-- File name:   vb_tool
-#-- Version  ：  v2.5.12
+#-- Version  ：  v2.5.13
 #-- Commit at： 2026-10-11 17:25:00
 #-- Purpose:     Vastbase Script Tool
 #-- Author:      MVS & Second-line Team 
 #--------------------------------------------------------------------------------
 set -o pipefail
-export VB_TOOL_VERSION="v2.5.12"
+export VB_TOOL_VERSION="v2.5.13"
 show_help() {
     echo "Vastbase Script Tool (vb_tool)"
     echo ""
@@ -28252,6 +28252,11 @@ _awr_collect() {
 -- text; numbers-only keeps every row so sum-of-delta stays the exact pct base
 -- (2026-09-09-awr-statement-slim-design.md).
 \copy (SELECT user_name, unique_sql_id, n_calls, n_blocks_fetched, n_blocks_hit, n_soft_parse, n_hard_parse, db_time, cpu_time, execution_time, plan_time, data_io_time, n_returned_rows, sort_time, hash_time FROM dbe_perf.statement) TO '$dbd/statement.csv' WITH CSV HEADER
+-- sort/hash work-mem + temp-spill per unique sql (KB; separate file so kernels
+-- without these columns degrade to a skipped section, never a broken
+-- statement.csv). Kernel instruments Sort executor nodes + HashJoin only;
+-- aggregate-internal sorts and HashAgg are NOT counted (2026-10-15).
+\copy (SELECT user_name, unique_sql_id, sort_mem_used, hash_mem_used, sort_spill_size, hash_spill_size FROM dbe_perf.statement) TO '$dbd/statement_mem.csv' WITH CSV HEADER
 \copy (SELECT * FROM dbe_perf.wait_events)              TO '$dbd/wait_events.csv'   WITH CSV HEADER
 \copy (SELECT * FROM gs_instance_time)                  TO '$dbd/instance_time.csv' WITH CSV HEADER
 \copy (SELECT * FROM pg_stat_database)                  TO '$dbd/database.csv'      WITH CSV HEADER
@@ -28842,7 +28847,7 @@ def load_window(d):
         for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi", "softnet_stat", "net_rtt", "df_fs", "file_nr", "db_proc", "limits", "db_fd_types", "db_tcp_states", "sysctl", "dmesg"):
             p = os.path.join(d, "os", phase, f)
             w["os"][(phase, f)] = _read_os_text(p) if os.path.isfile(p) else ""
-        for t in ("statement", "wait_events", "instance_time", "database", "pagewriter",
+        for t in ("statement", "statement_mem", "wait_events", "instance_time", "database", "pagewriter",
                   "memory_node_detail", "shared_memory", "session_memory", "session_by_sess",
                   "object_tables", "object_dead", "object_iostat"):
             w["db"][(phase, t)] = read_csv_rows(os.path.join(d, "db", phase, t + ".csv"))
@@ -28873,7 +28878,7 @@ def load_snap(d, tables=None):
     for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi", "softnet_stat", "net_rtt", "df_fs", "file_nr", "db_proc", "limits", "db_fd_types", "db_tcp_states", "sysctl", "dmesg"):
         p = os.path.join(d, "os", f)
         s["os"][f] = _read_os_text(p) if os.path.isfile(p) else ""
-    _DB_TABLES = ("statement", "wait_events", "instance_time", "database", "pagewriter",
+    _DB_TABLES = ("statement", "statement_mem", "wait_events", "instance_time", "database", "pagewriter",
                  "memory_node_detail", "shared_memory", "session_memory", "session_by_sess",
                  "pg_settings",
                  "object_tables", "object_dead", "object_iostat", "walreceiver",
@@ -28976,7 +28981,7 @@ def build_window_from_snaps(begin_dir, end_dir, sqltext_root=None, load_sqltext=
     for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi", "softnet_stat", "net_rtt", "df_fs", "file_nr", "db_proc", "limits", "db_fd_types", "db_tcp_states", "sysctl", "dmesg"):
         win["os"][("begin", f)] = b["os"].get(f, "")
         win["os"][("end", f)] = e["os"].get(f, "")
-    for t in ("statement", "wait_events", "instance_time", "database", "pagewriter",
+    for t in ("statement", "statement_mem", "wait_events", "instance_time", "database", "pagewriter",
               "memory_node_detail", "shared_memory", "session_memory", "session_by_sess",
               "pg_settings",
               "object_tables", "object_dead", "object_iostat", "walreceiver",
@@ -31961,6 +31966,11 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                     ["n_calls", "db_time", "cpu_time", "data_io_time", "plan_time",
                      "sort_time", "hash_time",
                      "n_blocks_fetched", "n_blocks_hit", "n_returned_rows"])
+    # sort/hash work-mem + temp-spill per unique sql (statement_mem.csv, KB).
+    # Kernel instruments Sort executor nodes and HashJoin only: aggregate-
+    # internal sorts (string_agg ... ORDER BY) and HashAgg are NOT counted.
+    STM = delta_rows(win, "statement_mem", "unique_sql_id",
+                     ["sort_mem_used", "hash_mem_used", "sort_spill_size", "hash_spill_size"])
     sum_calls = sum(d.get("n_calls", 0.0) for d in ST.values())
     sum_gets = sum(d.get("n_blocks_fetched", 0.0) for d in ST.values())
 
@@ -32862,6 +32872,23 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                      '<td class="n">%s</td><td class="n">%s</td></tr>'
                      % (esc(_lbl), fmt_int(_b) if _ok else "-", fmt_int(_e) if _ok else "-",
                         _cf(_d), _pf(_ps)))
+    # ---- SQL calls (dbe_perf.statement n_calls sum; Per Second = QPS) ----
+    _scb = win["db"].get(("begin", "statement"), [])
+    _sce = win["db"].get(("end", "statement"), [])
+    _sc_ok = bool(_scb or _sce)
+    _sc_b = sum(to_num(r.get("n_calls", 0) or 0) for r in _scb)
+    _sc_e = sum(to_num(r.get("n_calls", 0) or 0) for r in _sce)
+    _sc_d = _sc_e - _sc_b
+    parts.append('<tr><td>SQL calls (n_calls)</td><td class="n">%s</td><td class="n">%s</td>'
+                 '<td class="n">%s</td><td class="n">%s</td></tr>'
+                 % (fmt_int(_sc_b) if _sc_ok else "-",
+                    fmt_int(_sc_e) if _sc_ok else "-",
+                    fmt_int(_sc_d) if _sc_ok else "-",
+                    # QPS needs decimals (fmt_num floors sub-1 rates to 0)
+                    ("%.2f" % (_sc_d / duration)) if (_sc_ok and duration) else "-"))
+    if _sc_d < 0:
+        note("WARNING: negative SQL calls delta — possible unique-SQL stats reset "
+             "(instr_unique_sql_count change / reset).")
     parts.append('</table>')
 
     # ================= Cache Hit Ratio =================
@@ -33120,6 +33147,11 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
 
     for _k in ST:
         ST[_k]["physical_reads"] = ST[_k].get("n_blocks_fetched", 0.0) - ST[_k].get("n_blocks_hit", 0.0)
+        _stm = STM.get(_k, {})
+        ST[_k]["work_mem_used"] = _stm.get("sort_mem_used", 0.0) + _stm.get("hash_mem_used", 0.0)
+        ST[_k]["temp_spill_size"] = _stm.get("sort_spill_size", 0.0) + _stm.get("hash_spill_size", 0.0)
+    sum_mem_sql = sum(d.get("work_mem_used", 0.0) for d in ST.values())
+    sum_spill_sql = sum(d.get("temp_spill_size", 0.0) for d in ST.values())
     sum_dbt_sql = sum(d.get("db_time", 0.0) for d in ST.values())
     sum_cpu_sql = sum(d.get("cpu_time", 0.0) for d in ST.values())
     sum_io_sql = sum(d.get("data_io_time", 0.0) for d in ST.values())
@@ -33131,6 +33163,16 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     sql_block("SQL ordered by Plan Time", "plan_time", "Plan Time (s)", s_of, "total_pe", sum_plan_sql)
     sql_block("SQL ordered by Logical Reads", "n_blocks_fetched", "logical reads", fmt_int, "total_only", sum_gets)
     sql_block("SQL ordered by Physical Reads", "physical_reads", "physical reads", fmt_int, "total_only", sum_phys_sql)
+    _stmb = bool(win["db"].get(("begin", "statement_mem"), []))
+    _stme = bool(win["db"].get(("end", "statement_mem"), []))
+    if _stmb != _stme:
+        # one-sided capture (older snapshot on one side) would present
+        # full-cumulative counters as a window delta -- skip with a note
+        parts.append('<div class="note">sort/hash memory &amp; spill stats skipped: '
+                     'capture missing on one side of the window (older snapshot)</div>')
+    elif _stmb:   # both sides captured; both absent (legacy snaps / PG) -> silent
+        sql_block("SQL ordered by Memory Used", "work_mem_used", "Work Mem (KB)", fmt_int, "total_only", sum_mem_sql)
+        sql_block("SQL ordered by Temp Spill", "temp_spill_size", "Temp Spill (KB)", fmt_int, "total_only", sum_spill_sql)
     sql_block("SQL ordered by Executions", "n_calls", "Executions", fmt_int, "none", sum_calls)
 
     # ================= Object Statistics (all databases; gauges=begin+end, counters=end-begin) =================
@@ -33536,6 +33578,14 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                "hash_time", "n_blocks_fetched", "n_blocks_hit", "n_returned_rows"]
     ST1 = delta_rows(win1, "statement", "unique_sql_id", _stcols)
     ST2 = delta_rows(win2, "statement", "unique_sql_id", _stcols)
+    _stmcols = ["sort_mem_used", "hash_mem_used", "sort_spill_size", "hash_spill_size"]
+    STM1 = delta_rows(win1, "statement_mem", "unique_sql_id", _stmcols)
+    STM2 = delta_rows(win2, "statement_mem", "unique_sql_id", _stmcols)
+    for _st, _stm in ((ST1, STM1), (ST2, STM2)):
+        for _k in _st:
+            _m = _stm.get(_k, {})
+            _st[_k]["work_mem_used"] = _m.get("sort_mem_used", 0.0) + _m.get("hash_mem_used", 0.0)
+            _st[_k]["temp_spill_size"] = _m.get("sort_spill_size", 0.0) + _m.get("hash_spill_size", 0.0)
     for _k in ST1:
         ST1[_k]["physical_reads"] = ST1[_k].get("n_blocks_fetched", 0.0) - ST1[_k].get("n_blocks_hit", 0.0)
     for _k in ST2:
@@ -33991,6 +34041,16 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             _lpw_neg = True
     if _lpw_neg:
         note("WARNING: negative delta in WAL/pagewriter counters — possible counter reset (switchover/promote); these rows may be unreliable.")
+    # SQL calls (QPS) P1 vs P2: dbe_perf.statement n_calls window deltas
+    _scd1 = (sum(to_num(r.get("n_calls", 0) or 0) for r in win1["db"].get(("end", "statement"), []))
+             - sum(to_num(r.get("n_calls", 0) or 0) for r in win1["db"].get(("begin", "statement"), [])))
+    _scd2 = (sum(to_num(r.get("n_calls", 0) or 0) for r in win2["db"].get(("end", "statement"), []))
+             - sum(to_num(r.get("n_calls", 0) or 0) for r in win2["db"].get(("begin", "statement"), [])))
+    parts.append('<tr><td>SQL calls (n_calls)</td><td class="n">%s</td><td class="n">%s</td><td class="n">%s</td>'
+                 '<td class="n">%s</td><td class="n">%s</td></tr>'
+                 % (fmt_int(_scd1), fmt_int(_scd2), fmt_int(_scd2 - _scd1),
+                    ("%.2f" % (_scd1 / dur1)) if dur1 else "-",
+                    ("%.2f" % (_scd2 / dur2)) if dur2 else "-"))
     _lio2 = {r[0]: r for r in loadprofile_iostat_rows(win2, dur2)}
     for _lbl, _b1, _e1, _d1, _ps1, _md1, _ok1 in loadprofile_iostat_rows(win1, dur1):
         _lbl, _b2, _e2, _d2, _ps2, _md2, _ok2 = _lio2[_lbl]
@@ -34203,6 +34263,16 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     sql_block_diff("SQL ordered by IO Time", "data_io_time", "IO Time (s)", s_of)
     sql_block_diff("SQL ordered by Logical Reads", "n_blocks_fetched", "logical reads", fmt_int)
     sql_block_diff("SQL ordered by Physical Reads", "physical_reads", "physical reads", fmt_int)
+    _sm1b = bool(win1["db"].get(("begin", "statement_mem"), []))
+    _sm1e = bool(win1["db"].get(("end", "statement_mem"), []))
+    _sm2b = bool(win2["db"].get(("begin", "statement_mem"), []))
+    _sm2e = bool(win2["db"].get(("end", "statement_mem"), []))
+    if (_sm1b != _sm1e) or (_sm2b != _sm2e):
+        parts.append('<div class="note">sort/hash memory &amp; spill stats skipped: '
+                     'capture missing on one side of a window (older snapshot)</div>')
+    elif _sm1b or _sm2b:
+        sql_block_diff("SQL ordered by Memory Used", "work_mem_used", "Work Mem (KB)", fmt_int)
+        sql_block_diff("SQL ordered by Temp Spill", "temp_spill_size", "Temp Spill (KB)", fmt_int)
     sql_block_diff("SQL ordered by Executions", "n_calls", "Executions", fmt_int)
 
     # ================= Wait Events (full) =================
