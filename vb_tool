@@ -33115,8 +33115,11 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
 
     shown_sql = {}   # uid -> statement row (collected for the SQL Text section)
 
-    def sql_block(label, order_col, dim_header, dim_fmt, dim_mode, pct_base):
+    def sql_block(label, order_col, dim_header, dim_fmt, dim_mode, pct_base, no_time_ms=False):
         # dim_mode: total_pe = dim total + per-exec; total_only = dim total; none = Executions is dim
+        # no_time_ms: drop the plan/sort/hash per-execution (ms) tail -- memory/spill
+        # dims (user 2026-10-15: those ms columns are noise there; every other
+        # context column -- cpu/io time, reads/exec, rows/exec -- stays)
         sub(label)
         keys = sorted(ST.keys(), key=lambda k: ST[k].get(order_col, 0.0), reverse=True)[:top_n]
         hdr = ['<th>#</th>', '<th>SQL Id</th>', '<th>User</th>', '<th class="n">Executions</th>']
@@ -33133,10 +33136,11 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         hdr += ['<th class="n">logical reads/exec</th>',
                 '<th class="n">physical reads/exec</th>',
                 '<th class="n">rows/exec</th>',
-                '<th class="n">% Total</th>',
-                '<th class="n">plan_time/exec (ms)</th>',
-                '<th class="n">sort_time/exec (ms)</th>',
-                '<th class="n">hash_time/exec (ms)</th>']
+                '<th class="n">% Total</th>']
+        if not no_time_ms:
+            hdr += ['<th class="n">plan_time/exec (ms)</th>',
+                    '<th class="n">sort_time/exec (ms)</th>',
+                    '<th class="n">hash_time/exec (ms)</th>']
         parts.append('<table class="t"><tr>' + ''.join(hdr) + '</tr>')
         if not keys:
             parts.append('<tr><td colspan="%d" class="note">no data</td></tr>' % len(hdr))
@@ -33163,36 +33167,12 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             cells += ['<td class="n">%s</td>' % fmt_int(log_r / calls),
                       '<td class="n">%s</td>' % fmt_int(phys_r / calls),
                       '<td class="n">%s</td>' % fmt_int(d.get("n_returned_rows", 0.0) / calls),
-                      '<td class="n">%.2f%%</td>' % pct(v, pct_base),
-                      '<td class="n">%s</td>' % ms_of(d.get("plan_time", 0.0) / calls),
-                      '<td class="n">%s</td>' % ms_of(d.get("sort_time", 0.0) / calls),
-                      '<td class="n">%s</td>' % ms_of(d.get("hash_time", 0.0) / calls)]
+                      '<td class="n">%.2f%%</td>' % pct(v, pct_base)]
+            if not no_time_ms:
+                cells += ['<td class="n">%s</td>' % ms_of(d.get("plan_time", 0.0) / calls),
+                          '<td class="n">%s</td>' % ms_of(d.get("sort_time", 0.0) / calls),
+                          '<td class="n">%s</td>' % ms_of(d.get("hash_time", 0.0) / calls)]
             parts.append('<tr>' + ''.join(cells) + '</tr>')
-        parts.append('</table>')
-
-    def sql_mem_block(label, order_col, dim_header, pct_base):
-        # memory/spill dims: slim table -- per-exec consumption is the point;
-        # the generic cpu/io/reads/plan-time tail columns are noise here
-        sub(label)
-        keys = sorted(ST.keys(), key=lambda k: ST[k].get(order_col, 0.0), reverse=True)[:top_n]
-        parts.append('<table class="t"><tr><th>#</th><th>SQL Id</th><th>User</th>'
-                     '<th class="n">Executions</th>'
-                     '<th class="n">%s</th><th class="n">%s/exec</th>'
-                     '<th class="n">%% Total</th></tr>' % (dim_header, dim_header))
-        if not keys:
-            parts.append('<tr><td colspan="7" class="note">no data</td></tr>')
-        for i, k in enumerate(keys, 1):
-            d = ST[k]; row = d.get("__row") or {}
-            if k not in shown_sql:
-                shown_sql[k] = row
-            v = d.get(order_col, 0.0)
-            calls = d.get("n_calls", 0.0) or 1.0
-            parts.append('<tr><td>%d</td><td><a href="#sql-%s">%s</a></td><td>%s</td>'
-                         '<td class="n">%s</td><td class="n">%s</td><td class="n">%s</td>'
-                         '<td class="n">%.2f%%</td></tr>' % (
-                             i, esc(k), esc(k), esc(row.get("user_name") or ""),
-                             fmt_int(d.get("n_calls", 0.0)), fmt_int(v), fmt_int(v / calls),
-                             pct(v, pct_base)))
         parts.append('</table>')
 
     for _k in ST:
@@ -33221,8 +33201,9 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         parts.append('<div class="note">sort/hash memory &amp; spill stats skipped: '
                      'capture missing on one side of the window (older snapshot)</div>')
     elif _stmb:   # both sides captured; both absent (legacy snaps / PG) -> silent
-        sql_mem_block("SQL ordered by Memory Used", "work_mem_used", "Work Mem (KB)", sum_mem_sql)
-        sql_mem_block("SQL ordered by Temp Spill", "temp_spill_size", "Temp Spill (KB)", sum_spill_sql)
+        # total + per-exec dim columns, no plan/sort/hash ms tail (user 2026-10-15)
+        sql_block("SQL ordered by Memory Used", "work_mem_used", "Work Mem (KB)", fmt_int, "total_pe", sum_mem_sql, no_time_ms=True)
+        sql_block("SQL ordered by Temp Spill", "temp_spill_size", "Temp Spill (KB)", fmt_int, "total_pe", sum_spill_sql, no_time_ms=True)
     sql_block("SQL ordered by Executions", "n_calls", "Executions", fmt_int, "none", sum_calls)
 
     # ================= Object Statistics (all databases; gauges=begin+end, counters=end-begin) =================
