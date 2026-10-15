@@ -32821,7 +32821,8 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                      '<td class="n">%s</td><td class="n">%s</td></tr>'
                      % (esc(label), fmt_int(_b), fmt_int(_e),
                         fmt_blocks(_d) if blocks else fmt_int(_d),
-                        fmt_blocks_ps(_d / duration) if blocks else fmt_num(_d / duration)))
+                        fmt_blocks_ps((_d / duration) if duration else 0.0) if blocks
+                        else fmt_num((_d / duration) if duration else 0.0)))
     # logical reads = buffer hits + disk reads (the combined convention);
     # physical reads = blocks read off disk. Bare professional labels, no raw
     # counter suffixes; SQL calls sits directly under rollbacks (user 2026-10-15)
@@ -32832,7 +32833,8 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                      '<td class="n">%s</td><td class="n">%s</td></tr>'
                      % (esc(label), fmt_int(_b), fmt_int(_e),
                         fmt_blocks(_d) if blocks else fmt_int(_d),
-                        fmt_blocks_ps(_d / duration) if blocks else fmt_num(_d / duration)))
+                        fmt_blocks_ps((_d / duration) if duration else 0.0) if blocks
+                        else fmt_num((_d / duration) if duration else 0.0)))
     lp2("logical reads", ("blks_hit", "blks_read"), blocks=True)
     lp2("physical reads", ("blks_read",), blocks=True)
     lp("rows returned", "tup_returned")
@@ -32876,7 +32878,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                      - sum(_lsn_to_int(r.get("receiver_replay_location", "")) for r in _wrb))
             parts.append('<tr><td>WAL replayed</td><td class="n">%s</td><td class="n">%s</td>'
                          '<td class="n">%s</td><td class="n">%s</td></tr>'
-                         % (esc(_wr_bs), esc(_wr_es), fmt_bytes(_wr_d), fmt_bytes(_wr_d / duration)))
+                         % (esc(_wr_bs), esc(_wr_es), fmt_bytes(_wr_d), fmt_bytes((_wr_d / duration) if duration else 0.0)))
         else:
             parts.append('<tr><td>WAL replayed</td><td class="n">-</td><td class="n">-</td>'
                          '<td class="n">-</td><td class="n">-</td></tr>')
@@ -32885,7 +32887,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         _wal_d = _pwlsn("end", "current_xlog_insert_lsn") - _pwlsn("begin", "current_xlog_insert_lsn")
         parts.append('<tr><td>WAL written</td><td class="n">%s</td><td class="n">%s</td>'
                      '<td class="n">%s</td><td class="n">%s</td></tr>'
-                     % (esc(_wal_bs), esc(_wal_es), fmt_bytes(_wal_d), fmt_bytes(_wal_d / duration)))
+                     % (esc(_wal_bs), esc(_wal_es), fmt_bytes(_wal_d), fmt_bytes((_wal_d / duration) if duration else 0.0)))
     # ---- WAL writes + pagewriter flushes (v2.4.5; the old 'pagewriter written
     # (ckpt_redo_point)' line measured an LSN POSITION, not pages -- removed) ----
     _lpw_neg = False
@@ -34052,7 +34054,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     def _lrow(lbl, v1, v2, fb, fn):
         parts.append('<tr><td>%s</td><td class="n">%s</td><td class="n">%s</td><td class="n">%s</td>'
                      '<td class="n">%s</td><td class="n">%s</td></tr>' % (
-                         esc(lbl), fb(v1), fb(v2), fb(v2 - v1), fn(v1 / dur1), fn(v2 / dur2)))
+                         esc(lbl), fb(v1), fb(v2), fb(v2 - v1), fn((v1 / dur1) if dur1 else 0.0), fn((v2 / dur2) if dur2 else 0.0)))
     _lrow("logical reads",
           _dbsum(db1, "blks_hit") + _dbsum(db1, "blks_read"),
           _dbsum(db2, "blks_hit") + _dbsum(db2, "blks_read"), fmt_blocks, fmt_blocks_ps)
@@ -34107,8 +34109,8 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                  '<td class="n">%s</td><td class="n">%s</td></tr>' % (
                      esc(_wl), _fmtw(_w1), _fmtw(_w2),
                      "-" if (_w1 is None or _w2 is None) else fmt_bytes(_w2 - _w1),
-                     "-" if _w1 is None else fmt_bytes(_w1 / dur1),
-                     "-" if _w2 is None else fmt_bytes(_w2 / dur2)))
+                     "-" if _w1 is None else fmt_bytes((_w1 / dur1) if dur1 else 0.0),
+                     "-" if _w2 is None else fmt_bytes((_w2 / dur2) if dur2 else 0.0)))
     # ---- WAL writes + pagewriter flushes (v2.4.5; P1/P2 window deltas, per-second per period) ----
     _lpw1 = dict((r[0], r) for r in loadprofile_wal_pw_rows(win1, dur1))
     _lpw2 = dict((r[0], r) for r in loadprofile_wal_pw_rows(win2, dur2))
