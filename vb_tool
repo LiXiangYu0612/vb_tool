@@ -26258,6 +26258,14 @@ run_vtop() {
     kver=$(uname -r 2>/dev/null); [ -n "$kver" ] || kver="?"   # OS kernel, read once at startup
     local pm_pid=""
     [ -f "$datadir/postmaster.pid" ] && pm_pid=$(head -1 "$datadir/postmaster.pid" 2>/dev/null | tr -d ' ')
+    # ★===CTX family rule (user 2026-10-16, same as mem + awr ctx_family):
+    #   per-node operator contexts merge under the operator name --
+    #   <NodeTag>_<sid> (execProcnode.cpp:518, sid=pthread_self() >= 10
+    #   digits), stream top <NodeTag>_<queryId>_<planNodeId> (:525),
+    #   SIRW_<sid>_<share>_<smp> -> SIRW (nodeShareInputScan.cpp:471);
+    #   planner _<level> and statics stay raw. NOTE: this comment MUST stay
+    #   OUTSIDE the VT_SQL string -- double quotes or backticks inside it
+    #   would break the assignment (quotes close the string, `x` runs x).
     local VT_SQL="\\echo ===HDR
 select coalesce((select node_name from pg_node_env limit 1),'?'),
        coalesce(ltrim(split_part(vb_version(),') compiled',1),'('),'?'),
@@ -26386,11 +26394,6 @@ select round(coalesce(max(case when memorytype='process_used_memory' then memory
        (select current_setting('shared_buffers'))
 from dbe_perf.memory_node_detail;
 \echo ===CTX
--- ★family rule (user 2026-10-16, same as `mem` + awr ctx_family): per-node
---   operator contexts merge under the operator name -- "<NodeTag>_<sid>"
---   (execProcnode.cpp:518, sid=pthread_self() >= 10 digits), stream top
---   "<NodeTag>_<queryId>_<planNodeId>" (:525), SIRW_<sid>_<share>_<smp> -> SIRW
---   (nodeShareInputScan.cpp:471); planner _<level> and statics stay raw.
 select string_agg(contextname||'|'||pg_size_pretty(t.totalsize::numeric)||' ('||t.cnt||')', ';' order by t.totalsize desc)
 from (select case when contextname ~ '^SIRW(_[0-9]+)+$' then 'SIRW'
                  else regexp_replace(regexp_replace(contextname, '_[0-9]{10,}_[0-9]+$', ''),
@@ -34338,6 +34341,8 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             win1["db"].get(("end", "session_memory"), []),
             win2["db"].get(("end", "session_memory"), []),
             "contextname", "total", fmt_bytes, top=10, key_norm=ctx_family)
+    parts.append('<div class="note">per-node contexts (Hash_/HashJoin_/Sort_/Stream/SIRW/... with '
+                 'a session-id or query-id suffix, one per query/plan object) are aggregated under the family name</div>')
 
     # ================= Object Statistics =================
     sec("Object Statistics")
@@ -36027,6 +36032,9 @@ _awr_lt_stack_sample() {
     # ---- session memory: ONE max-total session per 5-min sample (own log,
     # pipe grammar, renderer = load_sessmem_samples). Ranking and context
     # sizes are ALL totalsize (user decision: totalsize only, no usedsize).
+    # v2.5.14: context names go through the SAME family rule as mem/awr/vtop
+    # (operator suffix merge) -- raw per-node names would let one family
+    # occupy all top3 slots.
     # LEFT JOIN activity: the top-memory session may already be gone from
     # pg_stat_activity (memory rows outlive the activity row). Empty output
     # writes 'unknown' (user decision), psql failure writes 'error'. v2.4.7:
@@ -36040,7 +36048,7 @@ _awr_lt_stack_sample() {
     # derive the two ids from dbe_perf.statement and update them here. ----
     local mlf="$root/sessmem_$(date +%Y%m%d).log" mout
     mout=$(PGCONNECT_TIMEOUT=15 PGOPTIONS='-c statement_timeout=15000' \
-          psql -d postgres -tAF'|' -c "with p as (select d.sessid, d.contextname, sum(d.totalsize) tot from gs_session_memory_detail d where not exists (select 1 from pg_stat_activity a2 where a2.pid::text = split_part(d.sessid, '.', 2) and a2.unique_sql_id in (1171918037, 4104764068)) group by d.sessid, d.contextname), top1 as (select sessid, sum(tot) session_tot from p group by sessid order by session_tot desc limit 1), top3 as (select contextname, tot from p where sessid in (select sessid from top1) order by tot desc limit 3) select top1.sessid, top1.session_tot, coalesce(a.pid::text,''), coalesce(a.usename,''), coalesce(a.state,''), coalesce(a.unique_sql_id::text,''), (select string_agg(contextname||'('||tot||')', ', ') from top3), coalesce(a.application_name,'')||'|'||coalesce(a.client_addr::text,'')||'|'||coalesce(a.client_port::text,'') from top1 left join pg_stat_activity a on a.pid::text = split_part(top1.sessid, '.', 2)" 2>/dev/null)
+          psql -d postgres -tAF'|' -c "with p as (select d.sessid, case when d.contextname ~ '^SIRW(_[0-9]+)+\$' then 'SIRW' else regexp_replace(regexp_replace(d.contextname, '_[0-9]{10,}_[0-9]+\$', ''), '_[0-9]{10,}\$', '') end contextname, sum(d.totalsize) tot from gs_session_memory_detail d where not exists (select 1 from pg_stat_activity a2 where a2.pid::text = split_part(d.sessid, '.', 2) and a2.unique_sql_id in (1171918037, 4104764068)) group by d.sessid, case when d.contextname ~ '^SIRW(_[0-9]+)+\$' then 'SIRW' else regexp_replace(regexp_replace(d.contextname, '_[0-9]{10,}_[0-9]+\$', ''), '_[0-9]{10,}\$', '') end), top1 as (select sessid, sum(tot) session_tot from p group by sessid order by session_tot desc limit 1), top3 as (select contextname, tot from p where sessid in (select sessid from top1) order by tot desc limit 3) select top1.sessid, top1.session_tot, coalesce(a.pid::text,''), coalesce(a.usename,''), coalesce(a.state,''), coalesce(a.unique_sql_id::text,''), (select string_agg(contextname||'('||tot||')', ', ') from top3), coalesce(a.application_name,'')||'|'||coalesce(a.client_addr::text,'')||'|'||coalesce(a.client_port::text,'') from top1 left join pg_stat_activity a on a.pid::text = split_part(top1.sessid, '.', 2)" 2>/dev/null)
     if [ "$?" -ne 0 ]; then
         printf '%s|error\n' "$ts" >> "$mlf"
     elif [ -z "$mout" ]; then
