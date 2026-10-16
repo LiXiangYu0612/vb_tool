@@ -29053,9 +29053,13 @@ Usage: vb_tool awr <create|enable|disable|awrrpt|awrdiff|baseline|topsql|event|s
                             long-txn/callstack sample every 5 minutes;
                             expired data auto-purged after each capture
   disable                   remove both crontab entries (snapshot + sampler).
-  awrrpt  begin <id> end <id>
+  awrrpt  begin <id> end <id> [awronly]
                             render AWR html = snap<end_id> - snap<begin_id>;
-                            written to ~/.vb_tool/awr_reports/awr_{db}_{begin}_{end}.html
+                            written to ~/.vb_tool/awr_reports/awr_{db}_{begin}_{end}.html;
+                            default ALSO runs analyze_log_v2 -m all over the same
+                            snapshot window (paired analyze_log_{db}_{b}_{e}.html in
+                            the same dir; log failure never affects the AWR report);
+                            'awronly' skips the log analysis
   awrdiff begin <a> end <b> begin <c> end <d>
                             render AWR DIFF html (3-col: Period1 | Period2 | Δ);
                             period1 = snap a->b, period2 = snap c->d;
@@ -38131,19 +38135,20 @@ _awr_baseline() {
 
 # awr awrrpt begin <id> end <id>  -- render diff html between two snaps.
 _awr_awrrpt() {
-    local begin_id="" end_id=""
+    local begin_id="" end_id="" awr_only=""
     while [ $# -gt 0 ]; do
         case "$1" in
             begin)     [ $# -lt 2 ] && { echo "Error: 'begin' requires a snap_id" >&2; return 2; }
                        begin_id="$2"; shift 2;;
             end)       [ $# -lt 2 ] && { echo "Error: 'end' requires a snap_id" >&2; return 2; }
                        end_id="$2"; shift 2;;
+            awronly)   awr_only=1; shift;;
             -h|--help) awr_help; return 0;;
-            *)         echo "Error: unknown token '$1' (usage: awrrpt begin <id> end <id>)" >&2; return 2;;
+            *)         echo "Error: unknown token '$1' (usage: awrrpt begin <id> end <id> [awronly])" >&2; return 2;;
         esac
     done
     if [ -z "$begin_id" ] || [ -z "$end_id" ]; then
-        echo "Error: usage 'awr awrrpt begin <snap_id> end <snap_id>'" >&2; return 2
+        echo "Error: usage 'awr awrrpt begin <snap_id> end <snap_id> [awronly]'" >&2; return 2
     fi
     local root; root=$(_awr_snap_root "$begin_id" "$end_id") || return 1
     local bdir edir
@@ -38156,7 +38161,36 @@ _awr_awrrpt() {
     # restart guard (shared helper)
     _awr_check_uptime "$bdir" "$edir" || return 1
     echo "==> rendering awrrpt: snap $begin_id -> snap $end_id"
-    _awr_render --begin "$bdir" --end "$edir" --repl-dir "$root" --sqltext-root "$(_awr_root)" -m dbtime -n 30
+    local rc=0 out rpt=""
+    out=$(_awr_render --begin "$bdir" --end "$edir" --repl-dir "$root" --sqltext-root "$(_awr_root)" -m dbtime -n 30 2>&1) || rc=$?
+    printf '%s\n' "$out"
+    [ $rc -ne 0 ] && return $rc
+    [ -n "$awr_only" ] && return 0
+
+    # 同窗口日志分析（默认开，awronly 跳过）：时间取快照 meta 的 begin_ts/end_ts
+    # （snap_id 兜底，其为 YYYYMMDDHHMMSS）；输出与 AWR 报告同目录配对命名
+    # （awr_{db}_{b}_{e}.html -> analyze_log_{db}_{b}_{e}.html）。
+    # 分析失败只警告，绝不影响 awrrpt 自身退出码。
+    local bt et log_out
+    # 单点快照模型：窗口 = 起快照采集时刻 ts -> 止快照采集时刻 ts；
+    # begin_ts/end_ts（窗口模型 meta）优先，二者兼容。
+    bt=$(python3 -c "import json;m=json.load(open('$bdir/meta.json'));print(m.get('begin_ts') or m.get('ts',''))" 2>/dev/null)
+    et=$(python3 -c "import json;m=json.load(open('$edir/meta.json'));print(m.get('end_ts') or m.get('ts',''))" 2>/dev/null)
+    [ -z "$bt" ] && [[ "$begin_id" =~ ^20[0-9]{12}$ ]] && bt="${begin_id:0:4}-${begin_id:4:2}-${begin_id:6:2} ${begin_id:8:2}:${begin_id:10:2}:${begin_id:12:2}"
+    [ -z "$et" ] && [[ "$end_id" =~ ^20[0-9]{12}$ ]] && et="${end_id:0:4}-${end_id:4:2}-${end_id:6:2} ${end_id:8:2}:${end_id:10:2}:${end_id:12:2}"
+    if [ -z "$bt" ] || [ -z "$et" ]; then
+        echo "Warning: cannot resolve snapshot window (meta.json/snap_id), log analysis skipped" >&2
+        return 0
+    fi
+    rpt=$(printf '%s\n' "$out" | sed -n 's/^report written: //p' | tail -1)
+    echo "==> analyze_log_v2: $bt -> $et (-m all)"
+    if [ -n "$rpt" ]; then
+        log_out="$(dirname "$rpt")/analyze_log_$(basename "$rpt" | sed 's/^awr_//; s/\.html$//').html"
+        run_analyze_log_v2 -b "$bt" -e "$et" -m all -o "$log_out" ||             echo "Warning: analyze_log_v2 failed, AWR report unaffected" >&2
+    else
+        run_analyze_log_v2 -b "$bt" -e "$et" -m all ||             echo "Warning: analyze_log_v2 failed, AWR report unaffected" >&2
+    fi
+    return 0
 }
 
 # awr awrdiff begin <a> end <b> begin <c> end <d>
