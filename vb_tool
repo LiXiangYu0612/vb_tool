@@ -4172,8 +4172,17 @@ limit 10;
 \echo =============================
 \echo top 10 session memory context
 \echo =============================
+\echo (per-node operator contexts Hash_/Sort_/..._<session id> aggregated under the family name)
 select
-    contextname,
+    -- strip ONE trailing _<session id>: ExecInitNode names every per-node
+    -- context "<NodeTag>_%lu" with MyProcPid = gs_thread_self() = pthread_self()
+    -- (execProcnode.cpp:518, gs_thread.cpp:409) -- a userspace thread address,
+    -- ALWAYS >= 10 digits (204 live: Hash_47286009923328, 14 digits). Small-int
+    -- suffixes (stream top _<queryId>_<planNodeId>, SIRW_..._<smpid>, planner
+    -- _<query_level>) never reach 10 digits and are NOT merged. No static
+    -- context name ends in 10+ digits, so nothing static can be merged by
+    -- accident. Same rule as the awr report's ctx_family.
+    regexp_replace(contextname, '_[0-9]{10,}$', '') contextname,
     count(*) context_cnt,
     pg_size_pretty(sum(totalsize)::numeric(100,0)) total_size,
     pg_size_pretty(sum(freesize)::numeric(100,0)) free_size,
@@ -4184,7 +4193,7 @@ select
 from
     _vb_smd
 group by
-    contextname
+    regexp_replace(contextname, '_[0-9]{10,}$', '')
 order by
     sum(totalsize) desc
 limit 10;
@@ -29676,21 +29685,28 @@ def _chain_html(chain, width=200):
 def ctx_family(name):
     """normalize per-node dynamic memory contexts to their family name
     (user 2026-10-15: one context per query/plan object, unaggregated they
-    fragment the Top-10 session context ranking). Suffix sites in the kernel:
+    fragment the Top-10 session context ranking; 2026-10-16 tightened to the
+    session-id suffix ONLY, user's call). Suffix sites in the kernel:
     - EVERY plan node: execProcnode.cpp ExecInitNode builds "<NodeTag>_<sid>"
-      where sid = MyProcPid = the session thread id (pg_stat_activity.sessionid;
-      204 live-verified Hash_47286009923328 == sessionid 47286009923328), or
-      "<NodeTag>_<queryId>_<planNodeId>" on stream top consumers -- family =
-      any nodeTagToString() name (Hash/HashJoin/Sort/Agg/Limit/NestLoop/.../
-      Stream/Vec*/BatchSort...; static HashTableContext/HashBatchContext aside)
+      where sid = MyProcPid = gs_thread_self() = pthread_self() (gs_thread.cpp
+      :409) -- a userspace thread address, ALWAYS >= 10 digits (204 live:
+      Hash_47286009923328, 14 digits); family = any nodeTagToString() name
+      (Hash/HashJoin/Sort/Agg/Limit/NestLoop/.../Stream/Vec*/BatchSort...;
+      static HashTableContext/HashBatchContext aside)
+    - stream top consumers: "<NodeTag>_<queryId>_<planNodeId>" -- ends in a
+      SMALL int, does NOT match {10,}, stays unmerged (user 2026-10-16: merge
+      only operator memory followed by a session id)
     - PL/pgSQL: "PL/pgSQL function context_<debug_query_id>" (pl_comp.cpp),
-      "PL/pgSQL package context_<debug_query_id>" (pl_package.cpp)
+      "PL/pgSQL package context_<debug_query_id>" (pl_package.cpp) --
+      queryId is uint64, rides along with the >= 10 digit rule
     - planner: QueryRewrite/PlanGenerate/PathGenerateContext_<query_level>
-      (planner.cpp)
+      (planner.cpp) -- small int, NOT merged
     - ShareInputScan: "SIRW_<sessid>_<shareid>_<smpid>" (nodeShareInputScan.cpp)
-    All end in _<digits> and none of the base names legitimately do, so one
-    generic strip rule covers the whole inventory, present and future."""
-    return re.sub(r"_[0-9]+$", "", name or "")
+      -- ends in small ints, NOT merged
+    No static context name ends in 10+ digits, so nothing static can be merged
+    by accident. mem subcommand's "top 10 session memory context" uses the
+    identical rule in SQL."""
+    return re.sub(r"_[0-9]{10,}$", "", name or "")
 
 def sql_anchor(v):
     """SQL id cell -> anchor link to its text row in the SQL Text section
@@ -33064,7 +33080,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
              "contextname", "total", fmt_bytes, top=10, cnt_col="cnt",
              key_norm=ctx_family)
     parts.append('<div class="note">per-node contexts (Hash_/HashJoin_/Sort_/Agg_/... with a '
-                 'numeric suffix, one per query/plan object) are aggregated under the family name</div>')
+                 'session-id suffix, one per query/plan object) are aggregated under the family name</div>')
     def _sess_sum(rows):
         _vals = [to_num(r.get("total", 0) or 0) for r in rows]
         _n = len(_vals); _s = sum(_vals)
