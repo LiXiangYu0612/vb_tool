@@ -38183,7 +38183,7 @@ _awr_awrrpt() {
         return 0
     fi
     rpt=$(printf '%s\n' "$out" | sed -n 's/^report written: //p' | tail -1)
-    echo "==> analyze_log_v2: $bt -> $et (-m all)"
+    echo "==> rendering logrpt: $bt -> $et"
     # 静默执行：过程输出吞进变量（analyze_log_v2 本体不改），成功只报产物
     # 一行；失败才回放尾部 5 行定位。失败不影响 awrrpt 退出码。
     local rc2=0 lg_out="" lg_path=""
@@ -38196,7 +38196,7 @@ _awr_awrrpt() {
     if [ $rc2 -eq 0 ]; then
         lg_path=$(printf '%s\n' "$lg_out" | sed -n 's/^已生成HTML报告: //p' | tail -1)
         [ -z "$lg_path" ] && lg_path="$log_out"
-        echo "log analysis written: ${lg_path:-<analyze_log_v2 output>}"
+        echo "logrpt written: ${lg_path:-<analyze_log_v2 output>}"
     else
         echo "Warning: analyze_log_v2 failed (rc=$rc2), AWR report unaffected" >&2
         printf '%s\n' "$lg_out" | tail -5 >&2
