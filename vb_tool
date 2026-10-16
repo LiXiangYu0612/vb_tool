@@ -4172,17 +4172,24 @@ limit 10;
 \echo =============================
 \echo top 10 session memory context
 \echo =============================
-\echo (per-node operator contexts Hash_/Sort_/..._<session id> aggregated under the family name)
+\echo (per-node operator contexts Hash_/Sort_/Stream/SIRW/... aggregated under the family name)
 select
-    -- strip ONE trailing _<session id>: ExecInitNode names every per-node
-    -- context "<NodeTag>_%lu" with MyProcPid = gs_thread_self() = pthread_self()
-    -- (execProcnode.cpp:518, gs_thread.cpp:409) -- a userspace thread address,
-    -- ALWAYS >= 10 digits (204 live: Hash_47286009923328, 14 digits). Small-int
-    -- suffixes (stream top _<queryId>_<planNodeId>, SIRW_..._<smpid>, planner
-    -- _<query_level>) never reach 10 digits and are NOT merged. No static
-    -- context name ends in 10+ digits, so nothing static can be merged by
-    -- accident. Same rule as the awr report's ctx_family.
-    regexp_replace(contextname, '_[0-9]{10,}$', '') contextname,
+    -- family = strip the dynamic object coordinates, keep the operator name.
+    -- Kernel suffix inventory (same rule as the awr report's ctx_family):
+    --   "<NodeTag>_<sid>"            execProcnode.cpp:518, sid = MyProcPid =
+    --                                gs_thread_self() = pthread_self() (gs_thread
+    --                                .cpp:409) -- a userspace thread address,
+    --                                ALWAYS >= 10 digits (204 live: 14 digits)
+    --   "<NodeTag>_<qid>_<planid>"   stream top consumers, execProcnode.cpp:525
+    --                                -- queryId uint64 >= 10 digits + small int
+    --   "SIRW_<sid>_<share>_<smp>"   nodeShareInputScan.cpp:471 -> literal SIRW
+    --   "PL/pgSQL ... context_<qid>" rides along (uint64 query id)
+    -- planner XxxContext_<query_level> (small int, optimizer memory) stays
+    -- raw; no static context name ends in 10+ digits, nothing static merges.
+    case when contextname ~ '^SIRW(_[0-9]+)+$' then 'SIRW'
+         else regexp_replace(regexp_replace(contextname, '_[0-9]{10,}_[0-9]+$', ''),
+                             '_[0-9]{10,}$', '')
+    end contextname,
     count(*) context_cnt,
     pg_size_pretty(sum(totalsize)::numeric(100,0)) total_size,
     pg_size_pretty(sum(freesize)::numeric(100,0)) free_size,
@@ -4193,7 +4200,10 @@ select
 from
     _vb_smd
 group by
-    regexp_replace(contextname, '_[0-9]{10,}$', '')
+    case when contextname ~ '^SIRW(_[0-9]+)+$' then 'SIRW'
+         else regexp_replace(regexp_replace(contextname, '_[0-9]{10,}_[0-9]+$', ''),
+                             '_[0-9]{10,}$', '')
+    end
 order by
     sum(totalsize) desc
 limit 10;
@@ -25464,16 +25474,26 @@ order by sum(totalsize) desc limit 10")
     [ "$mx_n" -eq 0 ] && printf '%-34.34s %-11.11s %-11.11s %-11.11s %-11.11s %-11.11s %-11.11s %.10s\n' \
         "-" "-" "-" "-" "-" "-" "-" "-"
     # ---- session memory contexts ----
+    # ★family rule (user 2026-10-16, same as `mem` + awr ctx_family): per-node
+    #   operator contexts merge under the operator name -- "<NodeTag>_<sid>"
+    #   (execProcnode.cpp:518, sid=pthread_self() >= 10 digits), stream top
+    #   "<NodeTag>_<queryId>_<planNodeId>" (:525), SIRW_<sid>_<share>_<smp>
+    #   -> SIRW (nodeShareInputScan.cpp:471); planner _<level> and statics raw.
     _vtop_sec "top 10 session memory context"
     _vtop_th "$(printf '%-34s %-11s %-11s %-11s %-11s %-11s %-11s %s' contextname context_cnt total_size free_size used_size max_size min_size avg_size)"
-    mx_out=$(_vtop_q "select contextname, count(*),
+    mx_out=$(_vtop_q "select case when contextname ~ '^SIRW(_[0-9]+)+\$' then 'SIRW'
+       else regexp_replace(regexp_replace(contextname, '_[0-9]{10,}_[0-9]+\$', ''),
+                           '_[0-9]{10,}\$', '') end, count(*),
        pg_size_pretty(sum(totalsize)::numeric(100,0)),
        pg_size_pretty(sum(freesize)::numeric(100,0)),
        pg_size_pretty(sum(usedsize)::numeric(100,0)),
        pg_size_pretty(max(totalsize)::numeric(100,0)),
        pg_size_pretty(min(totalsize)::numeric(100,0)),
        pg_size_pretty(avg(totalsize)::numeric(100,0))
-from gs_session_memory_detail group by contextname
+from gs_session_memory_detail
+group by case when contextname ~ '^SIRW(_[0-9]+)+\$' then 'SIRW'
+       else regexp_replace(regexp_replace(contextname, '_[0-9]{10,}_[0-9]+\$', ''),
+                           '_[0-9]{10,}\$', '') end
 order by sum(totalsize) desc limit 10")
     _vtop_q_warn
     mx_n=0
@@ -26366,8 +26386,21 @@ select round(coalesce(max(case when memorytype='process_used_memory' then memory
        (select current_setting('shared_buffers'))
 from dbe_perf.memory_node_detail;
 \echo ===CTX
+-- ★family rule (user 2026-10-16, same as `mem` + awr ctx_family): per-node
+--   operator contexts merge under the operator name -- "<NodeTag>_<sid>"
+--   (execProcnode.cpp:518, sid=pthread_self() >= 10 digits), stream top
+--   "<NodeTag>_<queryId>_<planNodeId>" (:525), SIRW_<sid>_<share>_<smp> -> SIRW
+--   (nodeShareInputScan.cpp:471); planner _<level> and statics stay raw.
 select string_agg(contextname||'|'||pg_size_pretty(t.totalsize::numeric)||' ('||t.cnt||')', ';' order by t.totalsize desc)
-from (select contextname, count(*) cnt, sum(totalsize) totalsize from dbe_perf.session_memory_detail group by contextname order by totalsize desc limit 3) t;
+from (select case when contextname ~ '^SIRW(_[0-9]+)+$' then 'SIRW'
+                 else regexp_replace(regexp_replace(contextname, '_[0-9]{10,}_[0-9]+$', ''),
+                                     '_[0-9]{10,}$', '') end contextname,
+             count(*) cnt, sum(totalsize) totalsize
+      from dbe_perf.session_memory_detail
+      group by case when contextname ~ '^SIRW(_[0-9]+)+$' then 'SIRW'
+                 else regexp_replace(regexp_replace(contextname, '_[0-9]{10,}_[0-9]+$', ''),
+                                     '_[0-9]{10,}$', '') end
+      order by totalsize desc limit 3) t;
 \echo ===LKA
 -- ★[LOCK] 总览聚合 (user's call 2026-09-26: 显示 lock_chains 数量 / 总被阻塞会话数 /
 -- 按锁类型分别统计): chains = final blocker 数,与阻塞链 1:1,精确值不受下面 ===BLK
@@ -29685,28 +29718,35 @@ def _chain_html(chain, width=200):
 def ctx_family(name):
     """normalize per-node dynamic memory contexts to their family name
     (user 2026-10-15: one context per query/plan object, unaggregated they
-    fragment the Top-10 session context ranking; 2026-10-16 tightened to the
-    session-id suffix ONLY, user's call). Suffix sites in the kernel:
-    - EVERY plan node: execProcnode.cpp ExecInitNode builds "<NodeTag>_<sid>"
-      where sid = MyProcPid = gs_thread_self() = pthread_self() (gs_thread.cpp
-      :409) -- a userspace thread address, ALWAYS >= 10 digits (204 live:
+    fragment the Top-10 session context ranking; 2026-10-16 tightened to
+    operator-memory suffixes only, user's call). Suffix sites in the kernel:
+    - EVERY plan node: execProcnode.cpp:518 builds "<NodeTag>_<sid>" where
+      sid = MyProcPid = gs_thread_self() = pthread_self() (gs_thread.cpp:409)
+      -- a userspace thread address, ALWAYS >= 10 digits (204 live:
       Hash_47286009923328, 14 digits); family = any nodeTagToString() name
       (Hash/HashJoin/Sort/Agg/Limit/NestLoop/.../Stream/Vec*/BatchSort...;
       static HashTableContext/HashBatchContext aside)
-    - stream top consumers: "<NodeTag>_<queryId>_<planNodeId>" -- ends in a
-      SMALL int, does NOT match {10,}, stays unmerged (user 2026-10-16: merge
-      only operator memory followed by a session id)
+    - stream top consumers (SMP/stream plans, execProcnode.cpp:525):
+      "<NodeTag>_<queryId>_<planNodeId>" -- same operator families, queryId is
+      uint64 (>= 10 digits) -> stripped together with the planNodeId so the
+      stream-top node joins its family row (user 2026-10-16 拍板)
+    - ShareInputScan (nodeShareInputScan.cpp:471): "SIRW_<sessid>_<shareid>_
+      <smpid>" -> literal SIRW family (user 2026-10-16 拍板)
     - PL/pgSQL: "PL/pgSQL function context_<debug_query_id>" (pl_comp.cpp),
       "PL/pgSQL package context_<debug_query_id>" (pl_package.cpp) --
       queryId is uint64, rides along with the >= 10 digit rule
-    - planner: QueryRewrite/PlanGenerate/PathGenerateContext_<query_level>
-      (planner.cpp) -- small int, NOT merged
-    - ShareInputScan: "SIRW_<sessid>_<shareid>_<smpid>" (nodeShareInputScan.cpp)
-      -- ends in small ints, NOT merged
-    No static context name ends in 10+ digits, so nothing static can be merged
-    by accident. mem subcommand's "top 10 session memory context" uses the
-    identical rule in SQL."""
-    return re.sub(r"_[0-9]{10,}$", "", name or "")
+    - planner (planner.cpp:1385/2911/3038): QueryRewrite/PlanGenerate/
+      PathGenerateContext_<query_level> -- small int, NOT merged: optimizer
+      memory (not executor operator memory), transient, and only a handful
+      of level values so they never fragment the ranking
+    No static context name ends in 10+ digits (or in _<big>_<small>), so
+    nothing static can be merged by accident. mem subcommand's "top 10
+    session memory context" and vtop use the identical rule in SQL."""
+    n = name or ""
+    if re.match(r"^SIRW(_[0-9]+)+$", n):
+        return "SIRW"
+    n = re.sub(r"_[0-9]{10,}_[0-9]+$", "", n)
+    return re.sub(r"_[0-9]{10,}$", "", n)
 
 def sql_anchor(v):
     """SQL id cell -> anchor link to its text row in the SQL Text section
@@ -33079,8 +33119,8 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
              win["db"].get(("end", "session_memory"), []),
              "contextname", "total", fmt_bytes, top=10, cnt_col="cnt",
              key_norm=ctx_family)
-    parts.append('<div class="note">per-node contexts (Hash_/HashJoin_/Sort_/Agg_/... with a '
-                 'session-id suffix, one per query/plan object) are aggregated under the family name</div>')
+    parts.append('<div class="note">per-node contexts (Hash_/HashJoin_/Sort_/Stream/SIRW/... with '
+                 'a session-id or query-id suffix, one per query/plan object) are aggregated under the family name</div>')
     def _sess_sum(rows):
         _vals = [to_num(r.get("total", 0) or 0) for r in rows]
         _n = len(_vals); _s = sum(_vals)
