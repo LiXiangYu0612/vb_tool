@@ -16769,7 +16769,7 @@ class ReportGenerator:
         html_parts.append(f"""
         <h3 id="deadlock-ranking">死锁分析</h3>
         <div class="top10-container deadlock-container">
-            <div class="top10-section deadlock-section" data-sql-type="deadlock">
+            <div class="top10-section deadlock-section top10-always" data-sql-type="deadlock">
                 <h4>死锁会话汇总（死锁：{total_count} 次，显示最近10条）</h4>
                 <table class="top10-table deadlock-table">
                     <tr>
@@ -23226,12 +23226,15 @@ def parse_all_events(start_n, blocks, total_list, deadlock_list, lock_event_list
                                 unique_id_b = uid
 
                 # 收集前3行日志上下文（死锁的后续上下文已在 full_context 中）
+                # 注意：block 是按时间戳切的，单个 block 可能包含多行 SQL 续行
+                # （如其他会话正在执行的大段 statement），直接 append 会把整段 SQL
+                # 塞进详情卡导致渲染错乱，因此只取每个 block 的首行日志。
                 dl_context_before = []
                 for j in range(max(start_n, i - 6), i, 2):
                     if j + 1 < len(blocks):
                         ctx_block = blocks[j + 1].strip()
                         if ctx_block:
-                            dl_context_before.append(ctx_block)
+                            dl_context_before.append(ctx_block.split('\n', 1)[0])
 
                 deadlock_list.append({
                     'timestamp': timestamp_str,
