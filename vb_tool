@@ -38198,7 +38198,7 @@ _awr_awrrpt() {
         [ -z "$lg_path" ] && lg_path="$log_out"
         echo "logrpt written: ${lg_path:-<analyze_log_v2 output>}"
     else
-        echo "Warning: logrpt failed (rc=$rc2)" >&2
+        echo "Warning: logrpt failed" >&2
     fi
     return 0
 }
