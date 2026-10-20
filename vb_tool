@@ -29144,184 +29144,41 @@ awr_help() {
     cat <<'EOF'
 Usage: vb_tool awr <create|enable|disable|awrrpt|awrdiff|baseline|topsql|event|summary|tabstat|cpu|io|page|replstat|replslot|replay|ltx|sqlhist|list|show|delete|config> [options]
 
-  create  [--root <dir>]    capture ONE single-point snapshot now (foreground,
-                            ~5-10s), assigns the next snap_id. No html.
-                            --root overrides the storage root (default:
-                            $VB_TOOL_HOME/awrs/<port>)
-  enable                    install crontab entries: snapshot every <interval>
-                            MINUTES (see 'config interval', default 60) +
-                            replication/OS sampler every 1 minute +
-                            long-txn/callstack sample every 5 minutes;
-                            expired data auto-purged after each capture
-  disable                   remove both crontab entries (snapshot + sampler).
+  create  [--root <dir>]   one snapshot now, no html
+  enable | disable         start/stop the crontab sampler (snapshot every
+                           'config interval' min + per-minute OS/repl sampling)
   awrrpt  begin <id> end <id> [awronly]
-                            render AWR html = snap<end_id> - snap<begin_id>;
-                            written to ~/.vb_tool/awr_reports/awr_{db}_{begin}_{end}.html;
-                            default ALSO runs analyze_log_v2 -m all over the same
-                            snapshot window (paired analyze_log_{db}_{b}_{e}.html in
-                            the same dir; log failure never affects the AWR report);
-                            'awronly' skips the log analysis
+                           AWR html; paired log analysis by default, awronly skips
   awrdiff begin <a> end <b> begin <c> end <d>
-                            render AWR DIFF html (3-col: Period1 | Period2 | Δ);
-                            period1 = snap a->b, period2 = snap c->d;
-                            both periods must span the same number of snapshot
-                            intervals (equal snap_id gap; differing gaps need
-                            durations within 10 min) -- Δ columns are raw
-                            window deltas;
-                            written to awrdiff_{db}_{p1_begin}_{p2_begin}.html
+                           3-col diff html (both windows equal-length)
   awrdiff begin <x> end <y> baseline <id>
-                            diff the CURRENT window (x->y) against a registered
-                            baseline: Period1 = baseline (reference), Period2 =
-                            x->y, Delta = P2-P1 = current - baseline
-  baseline begin <id> end <id>
-                            register a BASELINE: self-contained copy (both
-                            endpoint snaps + the window's per-minute logs)
-                            under awrs/<port>/baselines/<id>/ -- immune to auto
-                            purge and 'awr delete until' (the main library
-                            keeps purging normally). Requires begin < end and
-                            the same DB uptime at both endpoints
-  baseline info            list registered baselines (id, endpoints, window)
-  baseline report <id>     render the baseline window's html report (same
-                            chain as awrrpt; default baseline_{db}_{b}_{e}.html)
-  baseline delete <id>     drop the baseline copy dir (main library untouched)
-  topsql  begin <id> end <id> [-n N] [-m dbtime|cpu|io|calls|lreads|preads|rows]
-                            print the window's Top SQL to the SCREEN (no html);
-                            ranking dimension via -m (default dbtime); the pct%
-                            and total columns follow it (e.g. -m cpu prints
-                            total_cputime); -n top N (default 10).
-                            Windows spanning >2 snaps print the whole window
-                            first, then one report per consecutive snapshot pair
+                           current window vs baseline diff
+  baseline begin <id> end <id> | info | report <id> | delete <id>
+                           register / list / render / drop baselines
+  topsql  begin <id> end <id> [-n N] [-m <dim>]
+                           Top SQL on screen; dim = dbtime|cpu|io|calls|lreads|preads|rows
   event   begin <id> end <id> [-E <event>]
-                            print top wait events to the screen (CPU time +
-                            events by total wait time, 5 rows, wdr_event style);
-                            -E prints only that event (case-insensitive match).
-                            Multi-interval windows: whole window + one report
-                            per consecutive snapshot pair
+                           top wait events; -E one event only
   summary begin <id> end <id>
-                            print a one-line workload summary to the screen
-                            (dbtime/aas/tps/iops/mbps/... wdr_summary style);
-                            iops/mbps/wal need snaps captured by this vb_tool
-                            or newer (older snaps show '-'). Multi-interval
-                            windows: whole window + one line per snapshot pair
+                           one-line workload summary
   tabstat begin <id> end <id> -d <db> -s <schema> -t <table>
-                            print one table's window scan/DML deltas plus
-                            live/dead tuple counts (wdr_tabstat style); works
-                            for tables of ANY database (all-db capture).
-                            Multi-interval windows: whole window + one report
-                            per consecutive snapshot pair
-  cpu     begin <id> end <id>
-                            print the window's PER-MINUTE CPU utilization to
-                            the screen (busy/user/nice/system/iowait/irq/
-                            softirq/steal/idle + run/block procs -- awrrpt CPU
-                            per-minute detail fields; needs 'awr enable')
-  io      begin <id> end <id>
-                            print the window's PER-MINUTE per-device IO to the
-                            screen (r/s w/s rB/s wB/s + separate r/w await ms
-                            per minute -- awrrpt 'Disk I/O' per-minute detail
-                            fields; idle device-minutes hidden; needs 'awr
-                            enable')
-  page    begin <id> end <id>
-                            print the window's PER-MINUTE paging series to the
-                            screen (pgpgin/pgpgout/pswpin/pswpout/pgfault/
-                            pgmajfault per sec + MemUsed/MemAvail + zone
-                            watermarks -- awrrpt 'Memory / Paging' per-minute
-                            detail fields; needs 'awr enable' sampler logs)
-  replstat begin <id> end <id>
-                            print the window's PER-MINUTE pg_stat_replication
-                            samples (standby/addr/state/sync + sent/write/
-                            flush/replay LSNs + net/fsync/apply/total byte
-                            lags; all-zero-lag healthy minutes hidden -- awrrpt
-                            'Replication Stat' fields; needs 'awr enable')
-  replslot begin <id> end <id>
-                            print the window's PER-MINUTE pg_replication_slots
-                            samples (slot/type/plugin/db/active/restart_lsn/
-                            xmin/catalog_xmin/dummy_stby/confirmed_flush --
-                            awrrpt 'Replication Slots' fields; needs 'awr
-                            enable')
-  replay  begin <id> end <id>
-                            print the window's PER-MINUTE walreceiver samples
-                            to the screen (STANDBY side: state/peer + sent/
-                            received/flush/replay LSNs + net/fsync/apply/total
-                            byte lags + sync%/channel -- awrrpt 'Wal Receiver'
-                            fields; every minute shown, no hiding; on the
-                            primary there is no walreceiver; needs 'awr
-                            enable')
+                           one table's window deltas (any database)
+  cpu | io | page          begin <id> end <id> -- per-minute CPU / disk IO / paging
+  replstat | replslot | replay
+                           begin <id> end <id> -- per-minute replication / slots /
+                           walreceiver samples
   ltx     begin <id> end <id>
-                            print the window's PER-5MIN long-transaction monitor
-                            to the screen (Sample Time + ltx60_cnt|itx|act
-                            + pid|state|xact_start + duration(auto unit) +
-                            sql_id + oldestxmin, 6 compact columns; HTML awrrpt
-                            keeps 12 columns + duration cell auto unit; needs
-                            'awr enable' sampler)
+                           per-5min long-transaction monitor
   sqlhist <sql_id> begin <id> end <id>
-                            print ONE SQL's per-interval execution history
-                            to the screen (calls/dbtime/avg_dbtime/cpu/io/
-                            cr/pr/plan/rows per consecutive snapshot pair)
-  list|ls [YYYY-MM-DD]     list stored snapshots (ls = list alias; snap_id / ts / host / db /
-                            per-snap DB_TIME delta + AAS), newest first;
-                            default latest 30, a date lists that whole day
-  show                      awr overview: run status (crontab entries),
-                            data dir (absolute path), sampling interval,
-                            retention, oldest/newest snapshot, snapshot
-                            count; while ENABLED also last-snap age
-                            (ok / STALE liveness hint)
-  delete  until <time>      delete snapshots (by ts), html reports (by mtime) and
-                            old repl_/slot_/walrcv_/os_/lt_/stack_/sessmem_*.log
-                            (by whole day) older than <time>; e.g. '2026-08-11' or
-                            '2026-08-11 12:00:00'
-  config                    show current retention / interval values
-  config  retention <days>  set retention in days (default 8; 0 = never purge).
-                            Immediately purges already-expired snaps,
-                            repl/slot/walrcv/os/lt/stack logs and html reports.
-  config  interval <min>    set sampling interval in minutes (default 60,
-                            1-1440). The per-minute cron wakes every minute and
-                            fires only at multiples of this value; a change
-                            takes effect at the next boundary (legacy crontab
-                            forms are migrated on change).
-
-Storage (per snapshot; <root> = $VB_TOOL_HOME/awrs/<port>, per instance):
-  snapshot:   <root>/snap_<id>/{meta.json, os/<proc files>, db/<views>.csv}
-  sequence:   <root>/sequence            (next snap_id to allocate)
-  retention:  <root>/retention           (days to keep; default 8, 0 = forever)
-  interval:   <root>/interval            (snapshot interval min; default 60)
-  html:       ~/.vb_tool/awr_reports/awr_{db}_{begin}_{end}.html  (by compare_render.py)
-  repl logs:  <root>/repl_<YYYYMMDD>.log  per-minute pg_stat_replication samples
-              (ts,app,addr,state,sync,sent,write,flush,replay LSN; no standby -> ts,null)
-  slot logs:  <root>/slot_<YYYYMMDD>.log  per-minute pg_replication_slots samples
-              (ts,slot,plugin,type,db,active,xmin,cat_xmin,restart_lsn,dummy,conf_flush;
-               no slot -> ts,null)
-  os logs:    <root>/os_<YYYYMMDD>.log  per-minute OS counters for awrrpt detail
-              (cpu/pg/mem numeric rows + dsk/net raw /proc lines; same cron as
-               repl/slot sampling -- 'awr enable' starts the whole sampler)
-  lt logs:    <root>/lt_<YYYYMMDD>.log  5-min long-txn monitor samples
-              (long cnt + oldest txn pid/start/state/wait/unique_sql_id +
-               gs_txid_oldestxmin + txid_current)
-  stack logs: <root>/stack_<YYYYMMDD>.log  5-min gs_stack callstack samples
-              (backend threads: Wal Writer/CheckPointer/top-CPU AutoVacWorker/
-               all walsender+walreceiver+standby startup/parallel redo workers;
-               frontend: one longest-running session per LWLock wait event;
-               pipe-separated rows)
-  sessmem logs:<root>/sessmem_<YYYYMMDD>.log  5-min max-session-memory samples
-              (top session by sum(totalsize) + its top-3 contexts + pid/user/
-              state/unique_sql_id; same 5-min gate as lt_/stack_)
-  iostat:     <root>/snap_<id>/db/rel_iostat.csv  ONE cumulative row from
-              pg_catalog.get_local_rel_iostat() (phyrds/phywrts/phyblkrd/
-              phyblkwrt) -- the kernel's fileIOStat DIRECT counters, uncapped
-              (the old per-file gs_file_stat capture read a shared array of
-              only the 2000 most-recently-active files, LRU-evicted with the
-              counters zeroed -- whole databases vanished from it on big
-              systems; capture + the Top-10 tables built on it removed
-              2026-09-16)
-
-
-Env: VB_TOOL_HOME  base dir (default ~/.vb_tool); snaps under $VB_TOOL_HOME/awrs/<port>/snap_<id>/
-Port:   -P <port> anywhere on the command line selects the instance (default: current $PGPORT)
-Multi-instance: storage, config and crontab entries are all PER PORT -- each
-        instance gets its own snap_id sequence / retention / interval / repl
-        logs and its own crontab pair (port pinned via PGPORT= in the entry),
-        so several instances can be enabled side by side; enable/disable/show/
-        list/config always operate on the current port only.
+                           one SQL's per-interval history
+  list [YYYY-MM-DD]        list snapshots (newest first)
+  show                     run status / interval / retention / snapshot overview
+  delete until <time>      purge old snapshots + logs + reports
+  config                   show retention / interval
+  config retention <days> | interval <min>
+                           set them
 EOF
+
 }
 
 # _awr_root  -- per-PORT storage root: <VB_TOOL_HOME>/awrs/<port>/. Every awr
