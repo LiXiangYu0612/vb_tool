@@ -37267,11 +37267,30 @@ def main():
                 return 2
             i += 1
 
+    def _fallback_dbname():
+        # snapshots captured before the current_database() fallback existed
+        # (e.g. G100 2.2.10: pg_node_env empty + pgxc_node_name blank) carry
+        # db_name "?" which sanitizes to nothing -> "unknown" in the filename.
+        # Rendering normally happens on the DB host, so one cheap live query
+        # beats shipping "unknown" (user 2026-10-20). Same live-query pattern
+        # as fetch_pg_settings below.
+        try:
+            out = subprocess.check_output(
+                ["psql", "-d", "postgres", "-Atc", "select current_database()"],
+                stderr=subprocess.DEVNULL, timeout=10)
+            return out.decode("utf-8", "replace").strip()
+        except Exception:
+            return ""
+
     def _default_html(meta):
         # default name: {prefix}_{DB_NAME}_{BEGINTIME}_{ENDTIME}.html under awr_reports/
         # (prefix "awr" for awrrpt windows, "baseline" for baseline reports)
-        _dn = meta.get("db_name") or meta.get("name") or "unknown"
-        _dn = "".join(c for c in str(_dn) if c.isalnum() or c in "_-") or "unknown"
+        _dn = meta.get("db_name") or meta.get("name") or ""
+        _dn = "".join(c for c in str(_dn) if c.isalnum() or c in "_-")
+        if not _dn:
+            _dn = _fallback_dbname()
+            _dn = "".join(c for c in str(_dn) if c.isalnum() or c in "_-")
+        _dn = _dn or "unknown"
         _b = str(meta.get("begin_ts", "")).replace("-", "").replace(":", "").replace(" ", "")
         _e = str(meta.get("end_ts", "")).replace("-", "").replace(":", "").replace(" ", "")
         _reports_dir = os.path.join(os.path.expanduser(os.environ.get("VB_TOOL_HOME", "~/.vb_tool")),
@@ -37280,8 +37299,12 @@ def main():
 
     def _default_awrdiff_html(meta1, meta2):
         # awrdiff_{DB}_{P1_begin}_{P2_begin}.html (each period identified by begin ts)
-        _dn = meta2.get("db_name") or meta1.get("db_name") or "unknown"
-        _dn = "".join(c for c in str(_dn) if c.isalnum() or c in "_-") or "unknown"
+        _dn = meta2.get("db_name") or meta1.get("db_name") or ""
+        _dn = "".join(c for c in str(_dn) if c.isalnum() or c in "_-")
+        if not _dn:
+            _dn = _fallback_dbname()
+            _dn = "".join(c for c in str(_dn) if c.isalnum() or c in "_-")
+        _dn = _dn or "unknown"
         _p1 = str(meta1.get("begin_ts", "")).replace("-", "").replace(":", "").replace(" ", "")
         _p2 = str(meta2.get("begin_ts", "")).replace("-", "").replace(":", "").replace(" ", "")
         _reports_dir = os.path.join(os.path.expanduser(os.environ.get("VB_TOOL_HOME", "~/.vb_tool")),
