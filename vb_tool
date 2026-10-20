@@ -16719,22 +16719,23 @@ class ReportGenerator:
                 more_note=False,
             ))
 
-        # ---- 2b. WARNING 聚合表(仅前 20 类,无明细) ----
-        if warning_groups:
-            parts.append(_render_group_table(
-                warning_groups,
-                title='WARNING 消息聚合(仅显示次数最多的前 20 类,无明细)',
-                limit=20,
-                more_note=True,
-            ))
-
-        # ---- 2b. ERROR/FATAL/PANIC 聚合表(全部展示) ----
+        # ---- 2b. ERROR/FATAL/PANIC 聚合表(全部展示,排 WARNING 前——严重度
+        #      优先, user 2026-10-20) ----
         if critical_groups:
             parts.append(_render_group_table(
                 critical_groups,
                 title='ERROR / FATAL / PANIC 消息聚合(全部展示)',
                 limit=None,
                 more_note=False,
+            ))
+
+        # ---- 2c. WARNING 聚合表(仅前 20 类,无明细) ----
+        if warning_groups:
+            parts.append(_render_group_table(
+                warning_groups,
+                title='WARNING 消息聚合(仅显示次数最多的前 20 类,无明细)',
+                limit=20,
+                more_note=True,
             ))
 
         # ---- 3. ERROR/FATAL/PANIC/TRUNCATE 明细表(按聚合组只保留首尾 2 条,标注执行编号) ----
@@ -38240,6 +38241,24 @@ _awr_awrrpt() {
         echo "logrpt written: ${lg_path:-<analyze_log_v2 output>}"
     else
         echo "Warning: logrpt failed" >&2
+    fi
+    # ---- 双产物打包 (user 2026-10-20): AWR + 配对日志分析两份 html 打成
+    # awr_<begin><end>.tar,awr_reports 目录只留 tar;awronly / logrpt 失败
+    # 不打包(各自只留单份 html)。tar 成功且非空才删原 html,失败原样保留。
+    if [ $rc2 -eq 0 ] && [ -n "$rpt" ] && [ -n "${lg_path:-}" ] \
+       && [ "$(dirname "$rpt")" = "$(dirname "$lg_path")" ] \
+       && [ -s "$rpt" ] && [ -s "$lg_path" ]; then
+        local tb te tarf
+        tb=$(printf '%s' "$bt" | tr -d -- '-: ')
+        te=$(printf '%s' "$et" | tr -d -- '-: ')
+        tarf="$(dirname "$rpt")/awr_${tb}_${te}.tar"
+        if tar -cf "$tarf" -C "$(dirname "$rpt")" "$(basename "$rpt")" "$(basename "$lg_path")" 2>/dev/null && [ -s "$tarf" ]; then
+            rm -f "$rpt" "$lg_path"
+            echo "report packed: $tarf"
+        else
+            rm -f "$tarf"
+            echo "Warning: pack failed, both html kept" >&2
+        fi
     fi
     return 0
 }
