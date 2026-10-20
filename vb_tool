@@ -30077,13 +30077,17 @@ for n in names:
             rows = [r for r in csv.reader(f) if r]
     except OSError:
         continue
+    LABEL_W = 26          # name + 1 space + dot leaders fill to this width
+    def _line(name, val):
+        dots = "." * max(2, LABEL_W - len(name) - 1)
+        print("  %s %s %s" % (name, dots, val))
     if n in ("replication", "replication_slots", "walreceiver") and len(rows) == 2:
         tail = ",".join(rows[1])
         if tail == "null":
-            print("  %s: 0 rows" % n); continue
+            _line(n, "0 rows"); continue
         if tail == "error":
-            print("  %s: error" % n); continue
-    print("  %s: %d rows" % (n, max(len(rows) - 1, 0)))
+            _line(n, "error"); continue
+    _line(n, "%d rows" % max(len(rows) - 1, 0))
 PYROWS
     # compress all db csv in place; renderer reads .csv.gz with plain-text fallback
     gzip -f "$dbd"/*.csv 2>/dev/null
@@ -33254,7 +33258,7 @@ def render(awr_dir, current_dir, metric, top_n, out_html):
         os.makedirs(os.path.dirname(os.path.abspath(out_html)), exist_ok=True)
         with open(out_html, "w") as f:
             f.write(htmls)
-        print("report written: %s" % out_html)
+        print("  report : %s" % out_html)
     else:
         sys.stdout.write(htmls)
 
@@ -33477,7 +33481,7 @@ def render_single(window_dir, metric, top_n, out_html):
         os.makedirs(os.path.dirname(os.path.abspath(out_html)), exist_ok=True)
         with open(out_html, "w") as f:
             f.write(htmls)
-        print("report written: %s" % out_html)
+        print("  report : %s" % out_html)
     else:
         sys.stdout.write(htmls)
 
@@ -35190,7 +35194,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         os.makedirs(os.path.dirname(os.path.abspath(out_html)), exist_ok=True)
         with open(out_html, "w") as f:
             f.write(htmls)
-        print("report written: %s" % out_html)
+        print("  report : %s" % out_html)
     else:
         sys.stdout.write(htmls)
 
@@ -36145,7 +36149,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         os.makedirs(os.path.dirname(os.path.abspath(out_html)), exist_ok=True)
         with open(out_html, "w") as f:
             f.write(htmls)
-        print("report written: %s" % out_html)
+        print("  report : %s" % out_html)
     else:
         sys.stdout.write(htmls)
 
@@ -37897,7 +37901,7 @@ _awr_snap() {
     rm -rf "$dir" 2>/dev/null
     mkdir -p "$dir" 2>/dev/null || { echo "Error: cannot create $dir" >&2; return 1; }
     ts=$(date '+%F %T'); ts_ep=$(date +%s)
-    echo "==> capturing snap $sid  ->  $dir"
+    echo "capturing snap $sid -> $dir"
     # collection failed midway (e.g. DB died during collection): discard the
     # in-flight dir -- a snap without db/ data would poison awr list/reports.
     if ! _awr_collect "$dir"; then
@@ -37910,7 +37914,7 @@ _awr_snap() {
         echo "  [WARN] snap $sid skipped, nothing kept (meta write failed)" >&2
         return 1
     fi
-    echo "==> snap $sid captured at $ts"
+    echo "snap $sid captured at $ts"
     _awr_purge_expired
     return 0
 }
@@ -38088,7 +38092,7 @@ PYBJ
     then
         rm -rf "$broot"; echo "Error: writing baseline.json failed" >&2; return 1
     fi
-    echo "==> baseline $newid created: snap $begin_id -> $end_id  ($broot)"
+    echo "baseline $newid created: snap $begin_id -> $end_id ($broot)"
 }
 
 # awr baseline info  -- list registered baselines (dynamic column widths).
@@ -38132,7 +38136,7 @@ _awr_baseline_delete() {
     local broot="$root/baselines/$1"
     [ -d "$broot" ] || { echo "Error: baseline $1 not found ($broot)" >&2; return 1; }
     rm -rf "$broot"
-    echo "==> baseline $1 deleted ($broot)"
+    echo "baseline $1 deleted ($broot)"
 }
 
 # awr baseline report <id>  -- html report for a registered baseline. Same
@@ -38151,7 +38155,7 @@ _awr_baseline_report() {
     local bdir="$broot/snap_$b" edir="$broot/snap_$e"
     [ -d "$bdir" ] && [ -d "$edir" ] || { echo "Error: baseline $1 endpoint snaps missing (copy incomplete?)" >&2; return 1; }
     _awr_check_uptime "$bdir" "$edir" || return 1
-    echo "==> rendering baseline $1 report: snap $b -> snap $e"
+    echo "baseline : report snap $b -> snap $e"
     # report name: baseline_{db}_{begin}_{end}.html (same default-naming rule as
     # awrrpt, only the prefix differs -- user 2026-09-11)
     _awr_render --begin "$bdir" --end "$edir" --repl-dir "$broot" --sqltext-root "$root" --name-prefix baseline -m dbtime -n 30
@@ -38202,7 +38206,7 @@ _awr_awrrpt() {
     fi
     # restart guard (shared helper)
     _awr_check_uptime "$bdir" "$edir" || return 1
-    echo "==> rendering awrrpt: snap $begin_id -> snap $end_id"
+    echo "awrrpt : snap $begin_id -> snap $end_id"
     local rc=0 out rpt=""
     out=$(_awr_render --begin "$bdir" --end "$edir" --repl-dir "$root" --sqltext-root "$(_awr_root)" -m dbtime -n 30 2>&1) || rc=$?
     printf '%s\n' "$out"
@@ -38224,8 +38228,8 @@ _awr_awrrpt() {
         echo "Warning: cannot resolve snapshot window (meta.json/snap_id), log analysis skipped" >&2
         return 0
     fi
-    rpt=$(printf '%s\n' "$out" | sed -n 's/^report written: //p' | tail -1)
-    echo "==> rendering logrpt: $bt -> $et"
+    rpt=$(printf '%s\n' "$out" | sed -n 's/^  report : //p' | tail -1)
+    echo "logrpt : $bt -> $et"
     # 静默执行：过程输出吞进变量（analyze_log_v2 本体不改），成功只报产物
     # 一行；失败一行告警。失败不影响 awrrpt 退出码。
     local rc2=0 lg_out="" lg_path=""
@@ -38238,9 +38242,9 @@ _awr_awrrpt() {
     if [ $rc2 -eq 0 ]; then
         lg_path=$(printf '%s\n' "$lg_out" | sed -n 's/^已生成HTML报告: //p' | tail -1)
         [ -z "$lg_path" ] && lg_path="$log_out"
-        echo "logrpt written: ${lg_path:-<analyze_log_v2 output>}"
+        echo "  report : ${lg_path:-<analyze_log_v2 output>}"
     else
-        echo "Warning: logrpt failed" >&2
+        echo "  error : logrpt failed" >&2
     fi
     # ---- 双产物打包 (user 2026-10-20): AWR + 配对日志分析两份 html 打成
     # awr_<begin><end>.tar,awr_reports 目录只留 tar;awronly / logrpt 失败
@@ -38254,7 +38258,7 @@ _awr_awrrpt() {
         tarf="$(dirname "$rpt")/awr_${tb}_${te}.tar"
         if tar -cf "$tarf" -C "$(dirname "$rpt")" "$(basename "$rpt")" "$(basename "$lg_path")" 2>/dev/null && [ -s "$tarf" ]; then
             rm -f "$rpt" "$lg_path"
-            echo "report packed: $tarf"
+            echo "packed : $tarf"
         else
             rm -f "$tarf"
             echo "Warning: pack failed, both html kept" >&2
@@ -38359,7 +38363,7 @@ if abs(d1 - d2) > 600:
     sys.stderr.write("       period1 = %ds (gap %s), period2 = %ds (gap %s), difference %ds -- pick equal-length windows.\n" % (d1, g1, d2, g2, abs(d1 - d2)))
     sys.exit(1)
 PYDUR
-    echo "==> rendering awrdiff: period1 snap $p1b->$p1e${base_ref:+ (baseline $base_ref)}  vs  period2 snap $p2b->$p2e"
+    echo "awrdiff : period1 snap $p1b->$p1e${base_ref:+ (baseline $base_ref)} vs period2 snap $p2b->$p2e"
     # no --repl-dir by design: one repl table can't cover two disjoint periods
     _awr_render --awrdiff "$d1b" "$d1e" "$d2b" "$d2e" --sqltext-root "$(_awr_root)"
 }
@@ -38644,7 +38648,7 @@ PY
             ageline="last snap age : (no snapshots yet; first cron capture lands within ${mins} min of enable)"
         fi
     fi
-    echo "==> awr show"
+    echo "awr show"
     if [ -z "$snapent" ] && [ -z "$replent" ]; then
         echo "status        : DISABLED (no periodic snapshot / sampler crontab entries for port $port)"
     else
