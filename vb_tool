@@ -38648,7 +38648,6 @@ PY
             ageline="last snap age : (no snapshots yet; first cron capture lands within ${mins} min of enable)"
         fi
     fi
-    echo "awr show"
     if [ -z "$snapent" ] && [ -z "$replent" ]; then
         echo "status        : DISABLED (no periodic snapshot / sampler crontab entries for port $port)"
     else
