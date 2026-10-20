@@ -30244,9 +30244,9 @@ _awr_write_meta() {
     m_dbname=$(PGCONNECT_TIMEOUT=$_ct PGOPTIONS="$_st" psql -d postgres -tAq -c "select node_name from pg_node_env limit 1;" 2>/dev/null | head -1 | tr -d '"\r\n')
     [ -z "$m_dbname" ] && m_dbname=$(PGCONNECT_TIMEOUT=$_ct PGOPTIONS="$_st" psql -d postgres -tAq -c "show pgxc_node_name;" 2>/dev/null | head -1 | tr -d '"\r\n')
     # G100 2.2.10 (user 2026-10-20): pg_node_env 存在但 0 行、pgxc_node_name 为
-    # 空值 -> db_name 落 "?" 被报告名净化成 "unknown"。第三级 fallback 取
-    # 当前库名——单机 GUC 无节点名概念时至少有名可报。
-    [ -z "$m_dbname" ] && m_dbname=$(PGCONNECT_TIMEOUT=$_ct PGOPTIONS="$_st" psql -d postgres -tAq -c "select current_database();" 2>/dev/null | head -1 | tr -d '"\r\n')
+    # 空值。第三级 fallback 取 hostname（user 拍板：不取库名——postgres 谁
+    # 都一样没有辨识度，hostname 才标识节点；m_host 上面已采）。
+    [ -z "$m_dbname" ] && m_dbname="$m_host"
     # postmaster start time: stable per DB uptime, changes on restart. Used by
     # awrrpt to refuse a diff that spans a restart (cumulative counters reset).
     m_start=$(PGCONNECT_TIMEOUT=$_ct PGOPTIONS="$_st" psql -d postgres -tAq -c "select pg_postmaster_start_time();" 2>/dev/null | tr -d '"\r\n')
@@ -37267,20 +37267,14 @@ def main():
                 return 2
             i += 1
 
-    def _fallback_dbname():
-        # snapshots captured before the current_database() fallback existed
-        # (e.g. G100 2.2.10: pg_node_env empty + pgxc_node_name blank) carry
-        # db_name "?" which sanitizes to nothing -> "unknown" in the filename.
-        # Rendering normally happens on the DB host, so one cheap live query
-        # beats shipping "unknown" (user 2026-10-20). Same live-query pattern
-        # as fetch_pg_settings below.
-        try:
-            out = subprocess.check_output(
-                ["psql", "-d", "postgres", "-Atc", "select current_database()"],
-                stderr=subprocess.DEVNULL, timeout=10)
-            return out.decode("utf-8", "replace").strip()
-        except Exception:
-            return ""
+    def _fallback_dbname(meta):
+        # snapshots whose node-name probes all failed (e.g. G100 2.2.10:
+        # pg_node_env empty + pgxc_node_name blank) carry db_name "?" which
+        # sanitizes to nothing -> "unknown" in the filename. Fall back to the
+        # snapshot's OWN hostname (user 2026-10-20: NOT the database name --
+        # "postgres" identifies nothing; hostname identifies the node). Pure
+        # offline read from meta -- works for pre-fix snapshots too.
+        return str(meta.get("hostname") or "")
 
     def _default_html(meta):
         # default name: {prefix}_{DB_NAME}_{BEGINTIME}_{ENDTIME}.html under awr_reports/
@@ -37288,7 +37282,7 @@ def main():
         _dn = meta.get("db_name") or meta.get("name") or ""
         _dn = "".join(c for c in str(_dn) if c.isalnum() or c in "_-")
         if not _dn:
-            _dn = _fallback_dbname()
+            _dn = _fallback_dbname(meta)
             _dn = "".join(c for c in str(_dn) if c.isalnum() or c in "_-")
         _dn = _dn or "unknown"
         _b = str(meta.get("begin_ts", "")).replace("-", "").replace(":", "").replace(" ", "")
@@ -37302,7 +37296,7 @@ def main():
         _dn = meta2.get("db_name") or meta1.get("db_name") or ""
         _dn = "".join(c for c in str(_dn) if c.isalnum() or c in "_-")
         if not _dn:
-            _dn = _fallback_dbname()
+            _dn = _fallback_dbname(meta2) or _fallback_dbname(meta1)
             _dn = "".join(c for c in str(_dn) if c.isalnum() or c in "_-")
         _dn = _dn or "unknown"
         _p1 = str(meta1.get("begin_ts", "")).replace("-", "").replace(":", "").replace(" ", "")
