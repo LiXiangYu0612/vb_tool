@@ -12093,6 +12093,53 @@ def get_db_log_directory():
         return None
 
 
+## @function 获取数据库日志文件名格式
+## @description 通过vsql命令获取log_filename参数。不同内核/部署的文件名不一样
+##   （G100 2.2.10 为 postgresql-%Y-%m-%d.log 按天单文件，新式内核为
+##   postgresql-%Y-%m-%d_%H%MSS.log 时刻滚动，user 2026-10-20）——文件匹配
+##   按该参数推导，不再硬编码某一种。
+## @return {string} log_filename 格式串，获取失败返回None
+def get_log_filename():
+    try:
+        process = subprocess.Popen(
+            ['vsql', '-q', '-A', '-t', '-c', 'show log_filename'],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True
+        )
+        stdout, stderr = process.communicate()
+        if process.returncode != 0:
+            return None
+        return stdout.strip() or None
+    except Exception:
+        return None
+
+# log_filename 格式串 → 编译好的文件名正则 + 是否按天单文件（无时刻段）。
+# %Y/%m/%d/%H/%M/%S 映射为捕获组，其余字符按字面量转义；None = 未获取到，
+# 匹配退回旧式 _HHMMSS 硬编码模式兜底。
+_LOG_FNAME_RE = None
+_LOG_FNAME_DAILY = False
+
+def set_log_filename_pattern(fmt):
+    global _LOG_FNAME_RE, _LOG_FNAME_DAILY
+    import re as _re
+    if not fmt or '%' not in fmt:
+        return
+    r = _re.escape(fmt)
+    has_time = False
+    for pat, grp in (('%Y', '(?P<Y>[0-9]{4})'), ('%m', '(?P<m>[0-9]{2})'), ('%d', '(?P<d>[0-9]{2})'),
+                     ('%H', '(?P<H>[0-9]{2})'), ('%M', '(?P<M>[0-9]{2})'), ('%S', '(?P<S>[0-9]{2})')):
+        if pat in ('%H', '%M', '%S') and _re.escape(pat) in r:
+            has_time = True
+        r = r.replace(_re.escape(pat), grp)
+    try:
+        _LOG_FNAME_RE = _re.compile('^(?:' + r + r')(?:\.gz)?$')
+        _LOG_FNAME_DAILY = not has_time
+    except _re.error:
+        _LOG_FNAME_RE = None
+        _LOG_FNAME_DAILY = False
+
+
 def get_default_log_directory():
     """
     尝试从环境变量 PGDATA 获取默认日志目录，返回 $PGDATA/pg_log 绝对路径。
@@ -15033,6 +15080,33 @@ def extract_time_from_filename(filename):
     return None
 
 
+def filename_coverage(filename):
+    """
+    文件名 → (覆盖区间起点, 是否按天单文件)。
+
+    优先用 log_filename GUC 推导的模式（user 2026-10-20：不同内核文件名不同，
+    G100 2.2.10 = postgresql-%Y-%m-%d.log 按天单文件，新式 = _%H%MSS 时刻滚动）：
+      - 按天单文件：起点=当天 00:00，覆盖 [00:00, 次日 00:00) 整天；
+      - 时刻滚动文件：起点=文件名时刻，覆盖 [起点, 之后滚动到下一文件为止)。
+    GUC 模式没匹配上（老文件/改过 GUC）时退回 extract_time_from_filename 的
+    旧式 _HHMMSS 硬编码解析；都解析不出返回 (None, False)。
+    """
+    base = os.path.basename(filename)
+    m = _LOG_FNAME_RE.match(base) if _LOG_FNAME_RE else None
+    if m:
+        try:
+            day = datetime(int(m.group('Y')), int(m.group('m')), int(m.group('d')))
+        except (TypeError, ValueError):
+            m = None
+        else:
+            if _LOG_FNAME_DAILY or m.groupdict().get('H') is None:
+                return day, True
+            hh = int(m.group('H') or 0); mi = int(m.group('M') or 0); ss = int(m.group('S') or 0)
+            return day.replace(hour=hh, minute=mi, second=ss), False
+    ts = extract_time_from_filename(filename)
+    return (ts, False) if ts else (None, False)
+
+
 def read_log_file_stream(file_name, auto_detect_csv=True):
     """
     统一的文件读取函数，自动处理普通文件和.gz压缩文件
@@ -15151,6 +15225,19 @@ def find_recent_log_files(log_directory, days=2, begin_time=None, end_time=None)
         # 使用文件名时间戳、创建时间和修改时间进行综合判断
         filtered_files = []
         for file_path, create_time, mod_time, filename_time in all_files:
+            # 覆盖区间判断（user 2026-10-20，G100 2.2.10 按天单文件）：
+            #  - 按天单文件（log_filename 无时刻段）：文件覆盖 [当天00:00, 次日00:00)，
+            #    只要文件日期与窗口日期有交集就纳入——mtime 在安静日志日早于窗口开头
+            #    不代表文件不含窗口内容；
+            #  - 时刻滚动文件：起点=文件名时刻，进入下方原有"点+仍在写"语义。
+            cov_start, cov_daily = filename_coverage(file_path)
+            if cov_start is not None and cov_daily:
+                if (not begin_time or begin_time.date() <= cov_start.date()) and \
+                   (not end_time or end_time.date() >= cov_start.date()):
+                    filtered_files.append(file_path)
+                continue
+            if cov_start is not None:
+                filename_time = cov_start
             # 使用文件名中的时间戳进行判断（如果存在）
             if filename_time:
                 # 如果文件名中有明确的时间戳，使用它作为参考点
@@ -15173,20 +15260,28 @@ def find_recent_log_files(log_directory, days=2, begin_time=None, end_time=None)
                 if time_in_range or (begin_time and mod_time >= begin_time):
                     filtered_files.append(file_path)
             else:
-                # 如果没有从文件名解析出时间，则使用创建时间和修改时间
-                includes_begin = not begin_time or mod_time >= begin_time  # 文件在开始时间后仍有活动
-                includes_end = not end_time or create_time <= end_time    # 文件在结束时间前已被创建
-                
-                if includes_begin and includes_end:
+                # 没有从文件名解析出时间：仅按 mtime 粗筛（窗口开始后仍有写入即
+                # 可能包含窗口内容）。★不用 getctime 当"创建时间"——Linux 上
+                # ctime=inode 变更时间，活跃文件恒等于最后写入时刻，2026-10-20
+                # G100 2.2.10 实测把仍在写的当天文件全部误杀；宁可多纳，精确
+                # 过滤交给逐行解析阶段。
+                if not begin_time or mod_time >= begin_time:
                     filtered_files.append(file_path)
-        
+
         # 如果在时间范围内的文件为空，检查最早的文件和最新的文件
         if not filtered_files and all_files:
             earliest_file, earliest_create, earliest_mod, earliest_filename_time = all_files[0]
             latest_file, latest_create, latest_mod, latest_filename_time = all_files[-1]
             
             # 使用同样的判断逻辑检查最早和最新的文件
-            def should_include_file(create_time, mod_time, filename_time):
+            def should_include_file(create_time, mod_time, filename_time, file_path=None):
+                if file_path:
+                    cov_start, cov_daily = filename_coverage(file_path)
+                    if cov_start is not None and cov_daily:
+                        return (not begin_time or begin_time.date() <= cov_start.date()) and \
+                               (not end_time or end_time.date() >= cov_start.date())
+                    if cov_start is not None:
+                        filename_time = cov_start
                 if filename_time:
                     if begin_time and end_time:
                         # 如果同时指定了开始和结束时间
@@ -15201,14 +15296,13 @@ def find_recent_log_files(log_directory, days=2, begin_time=None, end_time=None)
                         time_in_range = True
                     return time_in_range or (begin_time and mod_time >= begin_time)
                 else:
-                    includes_begin = not begin_time or mod_time >= begin_time
-                    includes_end = not end_time or create_time <= end_time
-                    return includes_begin and includes_end
-            
-            if should_include_file(earliest_create, earliest_mod, earliest_filename_time):
+                    # 同上：mtime 粗筛，不信 getctime（Linux=inode 变更时间）
+                    return not begin_time or mod_time >= begin_time
+
+            if should_include_file(earliest_create, earliest_mod, earliest_filename_time, earliest_file):
                 if earliest_file not in filtered_files:
                     filtered_files.append(earliest_file)
-            if should_include_file(latest_create, latest_mod, latest_filename_time):
+            if should_include_file(latest_create, latest_mod, latest_filename_time, latest_file):
                 if latest_file not in filtered_files:
                     filtered_files.append(latest_file)
         
@@ -15395,6 +15489,13 @@ if not args.file:
             print("无法获取数据库日志目录，请手动指定日志文件")
             sys.exit(1)
     print(f"获取到日志目录: {log_directory}")
+    # 文件名匹配模式按 log_filename GUC 推导（user 2026-10-20：G100 2.2.10
+    # postgresql-%Y-%m-%d.log 按天单文件 vs 新式 _%H%MSS 时刻滚动）；获取失败
+    # 退回旧式硬编码模式。
+    _log_fname_fmt = get_log_filename()
+    if _log_fname_fmt:
+        print(f"log filename format: {_log_fname_fmt}")
+    set_log_filename_pattern(_log_fname_fmt)
     # 时间参数已在解析时归一化（-d 折算为 begin，缺省 end=now；
     # -d 0 或未开启时间过滤时 begin/end 为 None），此处直接使用
     begin_time = parse_datetime(args.begin) if args.begin else None
@@ -30142,6 +30243,10 @@ _awr_write_meta() {
     [ -z "$m_dbver" ] && m_dbver=$(PGCONNECT_TIMEOUT=$_ct PGOPTIONS="$_st" psql -d postgres -tAq -c "select version();" 2>/dev/null | head -1 | tr -d '"\r\n')
     m_dbname=$(PGCONNECT_TIMEOUT=$_ct PGOPTIONS="$_st" psql -d postgres -tAq -c "select node_name from pg_node_env limit 1;" 2>/dev/null | head -1 | tr -d '"\r\n')
     [ -z "$m_dbname" ] && m_dbname=$(PGCONNECT_TIMEOUT=$_ct PGOPTIONS="$_st" psql -d postgres -tAq -c "show pgxc_node_name;" 2>/dev/null | head -1 | tr -d '"\r\n')
+    # G100 2.2.10 (user 2026-10-20): pg_node_env 存在但 0 行、pgxc_node_name 为
+    # 空值 -> db_name 落 "?" 被报告名净化成 "unknown"。第三级 fallback 取
+    # 当前库名——单机 GUC 无节点名概念时至少有名可报。
+    [ -z "$m_dbname" ] && m_dbname=$(PGCONNECT_TIMEOUT=$_ct PGOPTIONS="$_st" psql -d postgres -tAq -c "select current_database();" 2>/dev/null | head -1 | tr -d '"\r\n')
     # postmaster start time: stable per DB uptime, changes on restart. Used by
     # awrrpt to refuse a diff that spans a restart (cumulative counters reset).
     m_start=$(PGCONNECT_TIMEOUT=$_ct PGOPTIONS="$_st" psql -d postgres -tAq -c "select pg_postmaster_start_time();" 2>/dev/null | tr -d '"\r\n')
