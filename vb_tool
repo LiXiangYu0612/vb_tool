@@ -38512,12 +38512,15 @@ _awr_enable() {
         echo "Error: awr periodic capture is already ENABLED for port $port -- run 'awr disable' first" >&2
         echo "Current entries:" >&2
         crontab -l 2>/dev/null | grep -F '# vb_tool_awr' >&2
-        return 2
+        # state conflict, NOT a usage error (user 2026-10-20: rc=2 makes the
+        # dispatcher dump the full awr help -- the 3 lines above already say
+        # everything); rc=1 keeps it to the error block only
+        return 1
     fi
     if crontab -l 2>/dev/null | grep -Eq '# vb_tool_awr(_repl)? *$'; then
         echo "Error: legacy awr crontab entries (older vb_tool, no port pinning) found --" >&2
         echo "       run 'awr disable' once to remove them, then re-enable" >&2
-        return 2
+        return 1
     fi
     local mins; mins=$(_awr_interval_read)
     local self; self=$(readlink -f "$0" 2>/dev/null || echo "$0")
