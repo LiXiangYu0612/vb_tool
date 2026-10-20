@@ -18,7 +18,7 @@ show_help() {
     echo ""
     echo "Global Option:"
     echo "  -P <port>              database port for multi-instance; accepted by any"
-    echo "                         command, effective for the DB clients (psql/vsql);"
+    echo "                         command, effective for the DB clients (psql/psql);"
     echo "                         without -P the current \$PGPORT environment applies"
     echo ""
     echo "Available Commands:"
@@ -389,12 +389,12 @@ analyze_log_v2_help() {
     echo "         error: analyze error logs only (ERROR/WARNING/FATAL/PANIC), no SQL"
     echo "         all:   analyze everything (SQL + error logs)"
     echo "    -o: output HTML report file path (optional, default: hostname + timestamp + mode)"
-    echo "    --detail: query wait events (statement_history) for slow SQL via vsql"
+    echo "    --detail: query wait events (statement_history) for slow SQL via psql"
     echo "         top    - top 20 SQL IDs deduplicated across 4 dimensions (default)"
     echo "         top:N  - custom top N"
     echo "         all    - all slow SQL"
     echo "         if omitted, no wait event query is performed"
-    echo "    --detail-timeout: per-batch vsql timeout in seconds for --detail (default: 120)"
+    echo "    --detail-timeout: per-batch psql timeout in seconds for --detail (default: 120)"
     echo "    --format: output file format (html|gz, default: html;"
     echo "         gz keeps only the gzip archive; -o name ending in .gz also triggers compression)"
     echo "    --include: keep only events matching filters (whitelist), multiple values allowed"
@@ -12016,13 +12016,13 @@ def check_memory_usage(threshold_mb=2048, raise_exception=True):
  
 
 ## @function 获取数据库日志行前缀格式
-## @description 通过vsql命令获取log_line_prefix参数
+## @description 通过psql命令获取log_line_prefix参数
 ## @return {string} 日志行前缀格式，如果获取失败则返回None
 def get_log_line_prefix():
     try:
         # 使用PIPE来捕获输出，兼容旧版本Python
         process = subprocess.Popen(
-            ['vsql', '-q', '-A', '-t', '-c', 'show log_line_prefix'],
+            ['psql', '-q', '-A', '-t', '-d', 'postgres', '-c', 'show log_line_prefix'],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             universal_newlines=True
@@ -12030,28 +12030,28 @@ def get_log_line_prefix():
         stdout, stderr = process.communicate()
         
         if process.returncode != 0:
-            print(f"ERROR: vsql命令执行失败: {stderr.strip()}")
+            print(f"ERROR: psql命令执行失败: {stderr.strip()}")
             return None
             
         log_prefix = stdout.strip()
         
         return log_prefix
     except FileNotFoundError:
-        print("ERROR: 未找到vsql命令，请确保已正确安装并配置数据库客户端")
+        print("ERROR: 未找到psql命令，请确保已正确安装并配置数据库客户端")
         return None
     except Exception as e:
         print(f"ERROR: 获取日志行前缀格式时发生错误: {str(e)}")
         return None
 
 ## @function 获取数据库日志目录
-## @description 通过vsql命令获取数据库日志目录
+## @description 通过psql命令获取数据库日志目录
 ## @return {string} 数据库日志目录的绝对路径，如果获取失败则返回None
 def get_db_log_directory():
     try:
-        #print("DEBUG: 正在执行vsql命令获取log_directory参数")
+        #print("DEBUG: 正在执行psql命令获取log_directory参数")
         # 使用PIPE来捕获输出，兼容旧版本Python
         process = subprocess.Popen(
-            ['vsql', '-q', '-A', '-t', '-c', 'show log_directory'],
+            ['psql', '-q', '-A', '-t', '-d', 'postgres', '-c', 'show log_directory'],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             universal_newlines=True
@@ -12059,7 +12059,7 @@ def get_db_log_directory():
         stdout, stderr = process.communicate()
         
         if process.returncode != 0:
-            print(f"ERROR: vsql命令执行失败: {stderr.strip()}")
+            print(f"ERROR: psql命令执行失败: {stderr.strip()}")
             return None
             
         log_directory = stdout.strip()
@@ -12069,7 +12069,7 @@ def get_db_log_directory():
         if not os.path.isabs(log_directory):
             # 获取数据库数据目录
             process_data = subprocess.Popen(
-                ['vsql', '-q', '-A', '-t', '-c', 'show data_directory'],
+                ['psql', '-q', '-A', '-t', '-d', 'postgres', '-c', 'show data_directory'],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 universal_newlines=True
@@ -12086,7 +12086,7 @@ def get_db_log_directory():
             
         return log_directory
     except FileNotFoundError:
-        print("ERROR: 未找到vsql命令，请确保已正确安装并配置数据库客户端")
+        print("ERROR: 未找到psql命令，请确保已正确安装并配置数据库客户端")
         return None
     except Exception as e:
         print(f"ERROR: 获取日志目录时发生错误: {str(e)}")
@@ -12094,7 +12094,7 @@ def get_db_log_directory():
 
 
 ## @function 获取数据库日志文件名格式
-## @description 通过vsql命令获取log_filename参数。不同内核/部署的文件名不一样
+## @description 通过psql命令获取log_filename参数。不同内核/部署的文件名不一样
 ##   （G100 2.2.10 为 postgresql-%Y-%m-%d.log 按天单文件，新式内核为
 ##   postgresql-%Y-%m-%d_%H%MSS.log 时刻滚动，user 2026-10-20）——文件匹配
 ##   按该参数推导，不再硬编码某一种。
@@ -12102,7 +12102,7 @@ def get_db_log_directory():
 def get_log_filename():
     try:
         process = subprocess.Popen(
-            ['vsql', '-q', '-A', '-t', '-c', 'show log_filename'],
+            ['psql', '-q', '-A', '-t', '-d', 'postgres', '-c', 'show log_filename'],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             universal_newlines=True
@@ -12212,7 +12212,7 @@ def _build_wait_events_query(ids_csv, start_str=None, end_str=None):
 
 
 def query_wait_events_for_sql_ids(sql_ids, start_time, end_time, batch_size=500, timeout=120, debug=False):
-    """通过 vsql -d postgres 查询慢SQL的等待事件信息（最大/最小执行时间点各一条）。
+    """通过 psql -d postgres 查询慢SQL的等待事件信息（最大/最小执行时间点各一条）。
 
     每条记录包含: 指定的 statement_history 业务列(见 _SH_COLS) + query_plan +
     event_text(statement_detail_decode 解码的等待事件) + pick(max/min 标签)。
@@ -12224,7 +12224,7 @@ def query_wait_events_for_sql_ids(sql_ids, start_time, end_time, batch_size=500,
         start_time: 分析开始时间 (datetime)
         end_time: 分析结束时间 (datetime)
         batch_size: 每批查询的 ID 数量，避免 IN (...) 过长
-        timeout: 单次 vsql 调用超时时间（秒）
+        timeout: 单次 psql 调用超时时间（秒）
         debug: 是否打印实际执行的 SQL 命令
 
     Returns:
@@ -12247,16 +12247,16 @@ def query_wait_events_for_sql_ids(sql_ids, start_time, end_time, batch_size=500,
             print("[DEBUG] wait events: 无有效 SQL ID", file=sys.stderr)
         return {}, "没有有效的数值型 SQL ID 可查询等待事件"
 
-    # 检查 vsql 是否可用
+    # 检查 psql 是否可用
     try:
         test_proc = subprocess.Popen(
-            ['vsql', '--version'],
+            ['psql', '--version'],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             universal_newlines=True
         )
         test_proc.communicate()
     except FileNotFoundError:
-        return {}, "无法连接数据库（未找到 vsql 命令），未查询等待事件信息"
+        return {}, "无法连接数据库（未找到 psql 命令），未查询等待事件信息"
 
     start_str = start_time.strftime('%Y-%m-%d %H:%M:%S') if hasattr(start_time, 'strftime') else str(start_time)
     end_str = end_time.strftime('%Y-%m-%d %H:%M:%S') if hasattr(end_time, 'strftime') else str(end_time)
@@ -12280,18 +12280,18 @@ def query_wait_events_for_sql_ids(sql_ids, start_time, end_time, batch_size=500,
                 (None, None, '不限时间(兜底)')], 1):
             query = _build_wait_events_query(ids_csv, q_start, q_end)
             if debug:
-                print(f"[DEBUG] wait events 执行命令({tag}): vsql -d postgres -q -A -t -c <query>", file=sys.stderr)
+                print(f"[DEBUG] wait events 执行命令({tag}): psql -d postgres -q -A -t -c <query>", file=sys.stderr)
                 print(f"[DEBUG] wait events 完整 SQL({tag}):\n{query}", file=sys.stderr)
             try:
                 process = subprocess.Popen(
-                    ['vsql', '-d', 'postgres', '-q', '-A', '-t', '-c', query],
+                    ['psql', '-d', 'postgres', '-q', '-A', '-t', '-c', query],
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                     universal_newlines=True
                 )
                 # A2: 超时保护，避免极端情况下脚本长时间阻塞
                 stdout, stderr = process.communicate(timeout=timeout)
             except FileNotFoundError:
-                return {}, "无法连接数据库（未找到 vsql 命令），未查询等待事件信息"
+                return {}, "无法连接数据库（未找到 psql 命令），未查询等待事件信息"
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.communicate()
@@ -12314,8 +12314,8 @@ def query_wait_events_for_sql_ids(sql_ids, start_time, end_time, batch_size=500,
             # A4: returncode=0 但 stderr 非空时打印 WARNING（NOTICE 等信息不阻断）
             stderr_text = (stderr or '').strip()
             if stderr_text:
-                print(f"WARNING: vsql stderr 输出: {stderr_text}", file=sys.stderr)
-                stderr_warnings.append(f"vsql stderr: {stderr_text}")
+                print(f"WARNING: psql stderr 输出: {stderr_text}", file=sys.stderr)
+                stderr_warnings.append(f"psql stderr: {stderr_text}")
 
             for line in stdout.strip().split('\n'):
                 line = line.strip()
@@ -12659,7 +12659,7 @@ def _query_object_kinds(names, db_name, timeout=60, debug=False):
     Args:
         names: 对象名列表（可含重复，会自动去重）
         db_name: 数据库名（SQL 执行的库）
-        timeout: vsql 超时时间（秒）
+        timeout: psql 超时时间（秒）
         debug: 是否打印调试日志
 
     Returns:
@@ -12700,11 +12700,11 @@ def _query_object_kinds(names, db_name, timeout=60, debug=False):
         f"  AND p.proname IN ({names_csv});"
     )
     if debug:
-        print(f"[DEBUG] 对象分类解析: vsql -d {db_name} -X -q -A -t -F '|', 对象数={len(names)}", file=sys.stderr)
+        print(f"[DEBUG] 对象分类解析: psql -d {db_name} -X -q -A -t -F '|', 对象数={len(names)}", file=sys.stderr)
         print(f"[DEBUG] 对象分类解析 SQL:\n{query}", file=sys.stderr)
     try:
         process = subprocess.Popen(
-            ['vsql', '-d', db_name, '-X', '-q', '-A', '-t', '-F', '|', '-c', query],
+            ['psql', '-d', db_name, '-X', '-q', '-A', '-t', '-F', '|', '-c', query],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             universal_newlines=True
         )
@@ -12739,7 +12739,7 @@ def _query_object_definitions(views, funcs, db_name, timeout=120, debug=False):
         views: [(schema, name), ...] 视图/物化视图
         funcs: [(schema, name), ...] 函数/存储过程
         db_name: 数据库名（SQL 执行的库）
-        timeout: vsql 超时时间（秒）
+        timeout: psql 超时时间（秒）
         debug: 是否打印调试日志
 
     Returns:
@@ -12771,11 +12771,11 @@ def _query_object_definitions(views, funcs, db_name, timeout=120, debug=False):
         return defs
     query = '\nUNION ALL\n'.join(parts) + ';'
     if debug:
-        print(f"[DEBUG] 对象定义查询: vsql -d {db_name}, 视图={len(views)}, 函数={len(funcs)}", file=sys.stderr)
+        print(f"[DEBUG] 对象定义查询: psql -d {db_name}, 视图={len(views)}, 函数={len(funcs)}", file=sys.stderr)
         print(f"[DEBUG] 对象定义查询 SQL:\n{query}", file=sys.stderr)
     try:
         process = subprocess.Popen(
-            ['vsql', '-d', db_name, '-X', '-q', '-A', '-t', '-F', '|', '-c', query],
+            ['psql', '-d', db_name, '-X', '-q', '-A', '-t', '-F', '|', '-c', query],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             universal_newlines=True
         )
@@ -12872,7 +12872,7 @@ def _expand_objects_recursive(objs0, db_name, timeout=60, debug=False, max_depth
     Args:
         objs0: _extract_tables_from_sql 提取的初始对象 [(owner, name), ...]
         db_name: 数据库名（SQL 执行的库）
-        timeout: vsql 超时时间（秒）
+        timeout: psql 超时时间（秒）
         debug: 是否打印调试日志
         max_depth: 最大递归深度
 
@@ -13006,7 +13006,7 @@ def _build_sqlhc_tabstats_query(tables):
         tables: [(owner, table_name), ...]
 
     Returns:
-        str: 完整查询文本（vsql 脚本，含 \\echo 分段标题）
+        str: 完整查询文本（psql 脚本，含 \\echo 分段标题）
     """
     tables_in_clause = ','.join(f"('{o}','{t}')" for o, t in tables)
 
@@ -13360,11 +13360,11 @@ def query_sqlhc_tabstats(tables, db_name, timeout=120, debug=False):
     Args:
         tables: [(owner, table_name), ...]
         db_name: 数据库名（SQL 执行的库）
-        timeout: vsql 超时时间（秒）
+        timeout: psql 超时时间（秒）
         debug: 是否打印调试日志
 
     Returns:
-        str: 格式化的文本结果（vsql 对齐格式）
+        str: 格式化的文本结果（psql 对齐格式）
     """
     if not tables:
         if debug:
@@ -13377,18 +13377,18 @@ def query_sqlhc_tabstats(tables, db_name, timeout=120, debug=False):
     query = _build_sqlhc_tabstats_query(tables)
 
     if debug:
-        print(f"[DEBUG] sqlhc tabstats 执行命令: vsql -d {db_name} -X -P footer=off", file=sys.stderr)
+        print(f"[DEBUG] sqlhc tabstats 执行命令: psql -d {db_name} -X -P footer=off", file=sys.stderr)
         print(f"[DEBUG] sqlhc tabstats 完整 SQL:\n{query}", file=sys.stderr)
     try:
         # 对齐格式输出（不加 -A -t，footer=off），与 vb_tool psql -d <db> -X -P footer=off 一致
         process = subprocess.Popen(
-            ['vsql', '-d', db_name, '-X', '-P', 'footer=off'],
+            ['psql', '-d', db_name, '-X', '-P', 'footer=off'],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             universal_newlines=True
         )
         stdout, stderr = process.communicate(input=query, timeout=timeout)
     except FileNotFoundError:
-        return "vsql not found, skip tabstat."
+        return "psql not found, skip tabstat."
     except subprocess.TimeoutExpired:
         process.kill()
         process.communicate()
@@ -13397,7 +13397,7 @@ def query_sqlhc_tabstats(tables, db_name, timeout=120, debug=False):
         return f"Query error: {e}"
 
     if debug and stderr.strip():
-        print(f"[DEBUG] sqlhc tabstats vsql stderr:\n{stderr.strip()}", file=sys.stderr)
+        print(f"[DEBUG] sqlhc tabstats psql stderr:\n{stderr.strip()}", file=sys.stderr)
     if process.returncode != 0:
         return f"Query failed: {stderr.strip()}"
 
@@ -13416,7 +13416,7 @@ def _build_sqlhc_statement_stats_query(uid):
         uid: unique_sql_id（int）
 
     Returns:
-        str: 完整查询文本（vsql 脚本，含 \\echo 分段标题）
+        str: 完整查询文本（psql 脚本，含 \\echo 分段标题）
     """
     return f"""
 \\echo '======================'
@@ -13446,11 +13446,11 @@ def query_sqlhc_statement_stats(unique_id, timeout=120, debug=False):
 
     Args:
         unique_id: unique_query_id
-        timeout: vsql 超时时间（秒）
+        timeout: psql 超时时间（秒）
         debug: 是否打印调试日志
 
     Returns:
-        str: 格式化的文本结果（vsql 对齐格式）
+        str: 格式化的文本结果（psql 对齐格式）
     """
     try:
         uid = int(str(unique_id).strip())
@@ -13460,18 +13460,18 @@ def query_sqlhc_statement_stats(unique_id, timeout=120, debug=False):
     query = _build_sqlhc_statement_stats_query(uid)
 
     if debug:
-        print("[DEBUG] sqlhc statement stats 执行命令: vsql -d postgres -X -P footer=off", file=sys.stderr)
+        print("[DEBUG] sqlhc statement stats 执行命令: psql -d postgres -X -P footer=off", file=sys.stderr)
         print(f"[DEBUG] sqlhc statement stats 完整 SQL:\n{query}", file=sys.stderr)
     try:
         # dbe_perf.statement 固定连接 postgres 库查询
         process = subprocess.Popen(
-            ['vsql', '-d', 'postgres', '-X', '-P', 'footer=off'],
+            ['psql', '-d', 'postgres', '-X', '-P', 'footer=off'],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             universal_newlines=True
         )
         stdout, stderr = process.communicate(input=query, timeout=timeout)
     except FileNotFoundError:
-        return "vsql not found, skip statement stats."
+        return "psql not found, skip statement stats."
     except subprocess.TimeoutExpired:
         process.kill()
         process.communicate()
@@ -13480,7 +13480,7 @@ def query_sqlhc_statement_stats(unique_id, timeout=120, debug=False):
         return f"Query error: {e}"
 
     if debug and stderr.strip():
-        print(f"[DEBUG] sqlhc statement stats vsql stderr:\n{stderr.strip()}", file=sys.stderr)
+        print(f"[DEBUG] sqlhc statement stats psql stderr:\n{stderr.strip()}", file=sys.stderr)
     if process.returncode != 0:
         return f"Query failed: {stderr.strip()}"
 
@@ -13497,7 +13497,7 @@ def query_sqlhc_opt_params(timeout=120, debug=False):
     与具体 SQL 无关，整个报告只需查询一次，结果展示在"汇总信息"栏目。
 
     Args:
-        timeout: vsql 超时时间（秒）
+        timeout: psql 超时时间（秒）
         debug: 是否打印调试日志
 
     Returns:
@@ -13507,7 +13507,7 @@ def query_sqlhc_opt_params(timeout=120, debug=False):
             'error': 查询失败时的错误信息（成功时为 None）
         }
     """
-    # 版本查询: vsql 默认对齐输出,直接展示到汇总信息
+    # 版本查询: psql 默认对齐输出,直接展示到汇总信息
     version_query = "select vb_version(),(select distinct datcompatibility from pg_database);"
     # 参数查询: 纯 SELECT 输出，下载为文本
     params_query = """
@@ -13535,17 +13535,17 @@ ORDER BY CASE WHEN short_desc LIKE '%planner%' THEN 'planner' ELSE short_desc EN
 
     def _run(q, tag):
         if debug:
-            print(f"[DEBUG] sqlhc opt params({tag}) 执行命令: vsql -d postgres -X -P footer=off", file=sys.stderr)
+            print(f"[DEBUG] sqlhc opt params({tag}) 执行命令: psql -d postgres -X -P footer=off", file=sys.stderr)
             print(f"[DEBUG] sqlhc opt params({tag}) 完整 SQL:\n{q}", file=sys.stderr)
         try:
             process = subprocess.Popen(
-                ['vsql', '-d', 'postgres', '-X', '-P', 'footer=off'],
+                ['psql', '-d', 'postgres', '-X', '-P', 'footer=off'],
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 universal_newlines=True
             )
             out, err = process.communicate(input=q, timeout=timeout)
         except FileNotFoundError:
-            return None, "vsql not found"
+            return None, "psql not found"
         except subprocess.TimeoutExpired:
             process.kill()
             process.communicate()
@@ -13553,7 +13553,7 @@ ORDER BY CASE WHEN short_desc LIKE '%planner%' THEN 'planner' ELSE short_desc EN
         except Exception as e:
             return None, f"query error: {e}"
         if debug and err.strip():
-            print(f"[DEBUG] sqlhc opt params({tag}) vsql stderr:\n{err.strip()}", file=sys.stderr)
+            print(f"[DEBUG] sqlhc opt params({tag}) psql stderr:\n{err.strip()}", file=sys.stderr)
         if process.returncode != 0:
             return None, f"query failed: {err.strip()}"
         return out.rstrip(), None
@@ -13591,7 +13591,7 @@ def _build_sqlhc_tabsize_query(tables):
         tables: [(owner, table_name), ...]
 
     Returns:
-        str: 完整查询文本（vsql 脚本，含 \\echo 分段标题）
+        str: 完整查询文本（psql 脚本，含 \\echo 分段标题）
     """
     # 构建过滤条件
     conditions = []
@@ -13658,11 +13658,11 @@ def query_sqlhc_tabsize(tables, db_name, timeout=120, debug=False):
     Args:
         tables: [(owner, table_name), ...]
         db_name: 数据库名（SQL 执行的库）
-        timeout: vsql 超时时间（秒）
+        timeout: psql 超时时间（秒）
         debug: 是否打印调试日志
 
     Returns:
-        str: 格式化的文本结果（vsql 对齐格式）
+        str: 格式化的文本结果（psql 对齐格式）
     """
     if not tables:
         if debug:
@@ -13675,18 +13675,18 @@ def query_sqlhc_tabsize(tables, db_name, timeout=120, debug=False):
     query = _build_sqlhc_tabsize_query(tables)
 
     if debug:
-        print(f"[DEBUG] sqlhc tabsize 执行命令: vsql -d {db_name} -X -P footer=off", file=sys.stderr)
+        print(f"[DEBUG] sqlhc tabsize 执行命令: psql -d {db_name} -X -P footer=off", file=sys.stderr)
         print(f"[DEBUG] sqlhc tabsize 完整 SQL:\n{query}", file=sys.stderr)
     try:
         # 对齐格式输出（不加 -A -t，footer=off）
         process = subprocess.Popen(
-            ['vsql', '-d', db_name, '-X', '-P', 'footer=off'],
+            ['psql', '-d', db_name, '-X', '-P', 'footer=off'],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             universal_newlines=True
         )
         stdout, stderr = process.communicate(input=query, timeout=timeout)
     except FileNotFoundError:
-        return "vsql not found, skip tabsize."
+        return "psql not found, skip tabsize."
     except subprocess.TimeoutExpired:
         process.kill()
         process.communicate()
@@ -13695,7 +13695,7 @@ def query_sqlhc_tabsize(tables, db_name, timeout=120, debug=False):
         return f"Query error: {e}"
 
     if debug and stderr.strip():
-        print(f"[DEBUG] sqlhc tabsize vsql stderr:\n{stderr.strip()}", file=sys.stderr)
+        print(f"[DEBUG] sqlhc tabsize psql stderr:\n{stderr.strip()}", file=sys.stderr)
     if process.returncode != 0:
         return f"Query failed: {stderr.strip()}"
 
@@ -13705,8 +13705,8 @@ def query_sqlhc_tabsize(tables, db_name, timeout=120, debug=False):
     return result
 
 
-def _run_vsql_batch(db_name, blocks, timeout=120, debug=False, label='sqlhc batch'):
-    """单次 vsql 会话批量执行多个查询块，按标记拆分输出。
+def _run_psql_batch(db_name, blocks, timeout=120, debug=False, label='sqlhc batch'):
+    """单次 psql 会话批量执行多个查询块，按标记拆分输出。
 
     每个 block 前自动加 \\echo '<marker>' 行，会话输出中该行作为分隔标记，
     据此把输出拆分为各 block 的结果（单条语句出错不影响其他 block）。
@@ -13734,16 +13734,16 @@ def _run_vsql_batch(db_name, blocks, timeout=120, debug=False, label='sqlhc batc
     session_timeout = timeout * max(1, len(blocks))
 
     if debug:
-        print(f"[DEBUG] {label}: vsql -d {db_name} -X -P footer=off, 共 {len(blocks)} 块, 会话超时 {session_timeout}s", file=sys.stderr)
+        print(f"[DEBUG] {label}: psql -d {db_name} -X -P footer=off, 共 {len(blocks)} 块, 会话超时 {session_timeout}s", file=sys.stderr)
     try:
         process = subprocess.Popen(
-            ['vsql', '-d', db_name, '-X', '-P', 'footer=off'],
+            ['psql', '-d', db_name, '-X', '-P', 'footer=off'],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             universal_newlines=True
         )
         stdout, stderr = process.communicate(input=script, timeout=session_timeout)
     except FileNotFoundError:
-        return results, "vsql not found."
+        return results, "psql not found."
     except subprocess.TimeoutExpired:
         process.kill()
         process.communicate()
@@ -13752,9 +13752,9 @@ def _run_vsql_batch(db_name, blocks, timeout=120, debug=False, label='sqlhc batc
         return results, f"batch query error: {e}"
 
     if debug and stderr.strip():
-        print(f"[DEBUG] {label} vsql stderr:\n{stderr.strip()}", file=sys.stderr)
+        print(f"[DEBUG] {label} psql stderr:\n{stderr.strip()}", file=sys.stderr)
     if process.returncode != 0:
-        error = stderr.strip() or f"vsql exit code {process.returncode}"
+        error = stderr.strip() or f"psql exit code {process.returncode}"
 
     # 按标记行拆分输出: parts = [前导, marker1, body1, marker2, body2, ...]
     pattern = re.compile('^(' + '|'.join(re.escape(m) for m, _ in blocks) + r')\s*$', re.M)
@@ -13769,7 +13769,7 @@ def _run_vsql_batch(db_name, blocks, timeout=120, debug=False, label='sqlhc batc
 
 
 def batch_query_sqlhc_statement_stats(unique_ids, timeout=120, debug=False):
-    """批量查询所有 uid 的 sqlstat（postgres 库，一次 vsql 会话）。
+    """批量查询所有 uid 的 sqlstat（postgres 库，一次 psql 会话）。
 
     Args:
         unique_ids: unique_query_id 集合/列表
@@ -13790,7 +13790,7 @@ def batch_query_sqlhc_statement_stats(unique_ids, timeout=120, debug=False):
         blocks.append((marker, _build_sqlhc_statement_stats_query(u)))
         uid_by_marker[marker] = uid_str
 
-    results, error = _run_vsql_batch(
+    results, error = _run_psql_batch(
         'postgres', blocks, timeout=timeout, debug=debug, label='sqlhc statement stats batch')
     if error:
         print(f"WARNING: sqlhc statement stats 批量查询: {error}", file=sys.stderr)
@@ -13811,7 +13811,7 @@ def batch_query_sqlhc_table_info(uid_tables, db_name, timeout=120, debug=False, 
         db_name: 数据库名（SQL 执行的库）
         timeout: 单块超时时间（秒）
         debug: 是否打印调试日志
-        workers: 并行 vsql 会话数
+        workers: 并行 psql 会话数
 
     Returns:
         (dict, dict): uid -> tabstat文本, uid -> tabsize文本；
@@ -13830,7 +13830,7 @@ def batch_query_sqlhc_table_info(uid_tables, db_name, timeout=120, debug=False, 
     if not unique_sets:
         return {}, {}
 
-    # 2. 动态并行: 一个表集合一个任务（单次 vsql 会话含 tabstat+tabsize 两块）
+    # 2. 动态并行: 一个表集合一个任务（单次 psql 会话含 tabstat+tabsize 两块）
     workers = max(1, min(workers, len(unique_sets)))
 
     def _run_set(idx, key):
@@ -13841,7 +13841,7 @@ def batch_query_sqlhc_table_info(uid_tables, db_name, timeout=120, debug=False, 
             (m_size, _build_sqlhc_tabsize_query(list(key))),
         ]
         _t = time.monotonic()
-        results, error = _run_vsql_batch(
+        results, error = _run_psql_batch(
             db_name, blocks, timeout=timeout, debug=debug,
             label=f'sqlhc table info({db_name})#{idx}')
         if debug:
@@ -13880,7 +13880,7 @@ def batch_query_sqlhc_table_info(uid_tables, db_name, timeout=120, debug=False, 
 def _batch_collect_object_definitions(def_by_db, timeout=120, debug=False):
     """按库批量收集 def_by_db 中所有视图/函数的完整定义（对齐格式，用于报告展示）。
 
-    复用 _run_vsql_batch block 模式：每个对象一个 block（marker 区分），
+    复用 _run_psql_batch block 模式：每个对象一个 block（marker 区分），
     同名函数重载全部输出；block 内的 SQL 为无列名的对齐格式查询（无分隔符），
     可完整保留定义中的多行文本。
 
@@ -13919,7 +13919,7 @@ def _batch_collect_object_definitions(def_by_db, timeout=120, debug=False):
                 obj_by_marker[marker] = obj
         if not blocks:
             continue
-        results, error = _run_vsql_batch(
+        results, error = _run_psql_batch(
             db_name, blocks, timeout=timeout, debug=debug,
             label=f'sqlhc object definitions({db_name})')
         if error:
@@ -13938,13 +13938,13 @@ def expand_objects_for_uids(uid_objs, uid_db_map, timeout=60, debug=False, max_d
     """V2 批量递归展开：所有 uid 的初始对象 → 按库分组逐层展开 → 最终表集合 + 定义列表。
 
     设计文档 8.6：递归展开在批量收集之前统一完成；对象分类与定义查询按库
-    合并执行（单库单轮最多 2 次 vsql 会话：分类 + 定义）；visited 全局去重
+    合并执行（单库单轮最多 2 次 psql 会话：分类 + 定义）；visited 全局去重
     防循环依赖，max_depth 兜底。
 
     Args:
         uid_objs: {uid_str: [(owner, name), ...]} 各 uid 的初始对象
         uid_db_map: {uid_str: db_name}
-        timeout: vsql 超时时间（秒）
+        timeout: psql 超时时间（秒）
         debug: 是否打印调试日志
         max_depth: 最大递归深度
 
@@ -14155,7 +14155,7 @@ def generate_sqlhc_content(unique_id, stat, db_name, timeout=120, wait_events_re
         unique_id: SQL 的 unique_query_id
         stat: 该 SQL 的统计信息字典（含 database/user/qry_text/max_duration_query 等）
         db_name: 数据库名（SQL 执行的库，用于表统计/表大小查询）
-        timeout: vsql 超时时间
+        timeout: psql 超时时间
         wait_events_records: 该 SQL 的等待事件记录列表（query_wait_events_for_sql_ids 返回）
         debug: 是否打印调试日志
         statement_stats_text: 批量收集的 sqlstat 文本；None 时本函数内单查（回退）
@@ -14402,7 +14402,7 @@ parser.add_argument('--detail', type=_parse_detail_arg, nargs='?', const=('top',
                     metavar='top[:N]|all',
                     help="查询慢SQL的等待事件信息: top(默认Top20 4个维度去重后的SQL ID), top:N(自定义TopN), all(查询所有慢SQL)。不指定则不查询")
 parser.add_argument('--detail-timeout', type=int, default=120,
-                    help="--detail 查询等待事件的单批次 vsql 超时时间(秒), 默认 120")
+                    help="--detail 查询等待事件的单批次 psql 超时时间(秒), 默认 120")
 parser.add_argument('--format', type=str, default='html', choices=['html', 'gz'],
                     help="输出文件格式: html(默认, 仅保留纯 HTML 文件, 不压缩), gz(gzip 压缩后仅保留 .gz 压缩包)。"
                          "等价方式: -o 文件名以 .gz 结尾时也会触发压缩")
@@ -15481,11 +15481,11 @@ if not args.file:
         # 数据库无法连接时，尝试使用 $PGDATA/pg_log 默认路径
         default_dir = get_default_log_directory()
         if default_dir and os.path.exists(default_dir):
-            print(f"无法通过vsql获取日志目录，使用默认路径: {default_dir}")
+            print(f"无法通过psql获取日志目录，使用默认路径: {default_dir}")
             log_directory = default_dir
         else:
             if default_dir:
-                print(f"无法通过vsql获取日志目录，默认路径 {default_dir} 也不存在")
+                print(f"无法通过psql获取日志目录，默认路径 {default_dir} 也不存在")
             print("无法获取数据库日志目录，请手动指定日志文件")
             sys.exit(1)
     print(f"获取到日志目录: {log_directory}")
@@ -15934,17 +15934,17 @@ def process_single_file(file_name, args, total_elapsed_time=0):
     return total_list, deadlock_list, file_size_mb, lock_event_list, lock_chain_list, error_list
 
 def _filter_non_table_truncates(error_list, timeout=60, debug=False):
-    """通过 vsql 连接对应库，过滤掉 TRUNCATE 记录中非普通表(relkind<>'r')的对象。
+    """通过 psql 连接对应库，过滤掉 TRUNCATE 记录中非普通表(relkind<>'r')的对象。
 
     内部日志 RelationSetNewRelfilenode 会对索引/TOAST 等对象也产生记录,
     这里按 database 分组,逐库批量执行
       SELECT relname FROM pg_class WHERE relname IN (...) AND relkind='r'
-    只保留普通表记录;查询失败/vsql 不可用时不做任何过滤(保守放行)。
+    只保留普通表记录;查询失败/psql 不可用时不做任何过滤(保守放行)。
     注:对象名无 schema 前缀(如 test1),按 relname 直接匹配。
 
     Args:
         error_list: 错误记录列表(就地过滤)
-        timeout: 单库 vsql 调用超时(秒)
+        timeout: 单库 psql 调用超时(秒)
         debug: 是否打印调试日志
 
     Returns:
@@ -15954,16 +15954,16 @@ def _filter_non_table_truncates(error_list, timeout=60, debug=False):
     if not trunc_entries:
         return 0
 
-    # 检查 vsql 是否可用,不可用则放行全部
+    # 检查 psql 是否可用,不可用则放行全部
     try:
         test_proc = subprocess.Popen(
-            ['vsql', '--version'],
+            ['psql', '--version'],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             universal_newlines=True
         )
         test_proc.communicate()
     except FileNotFoundError:
-        print("WARNING: 未找到 vsql 命令,跳过 TRUNCATE 非表对象过滤", file=sys.stderr)
+        print("WARNING: 未找到 psql 命令,跳过 TRUNCATE 非表对象过滤", file=sys.stderr)
         return 0
 
     # 按库分组收集对象名: {db: {rel_name, ...}}
@@ -15990,11 +15990,11 @@ def _filter_non_table_truncates(error_list, timeout=60, debug=False):
             f" WHERE relname IN ({names_csv}) AND relkind = 'r'"
         )
         if debug:
-            print(f"[DEBUG] TRUNCATE 表校验: vsql -d {db}, 对象数={len(obj_map)}", file=sys.stderr)
+            print(f"[DEBUG] TRUNCATE 表校验: psql -d {db}, 对象数={len(obj_map)}", file=sys.stderr)
             print(f"[DEBUG] TRUNCATE 表校验 SQL: {query}", file=sys.stderr)
         try:
             process = subprocess.Popen(
-                ['vsql', '-d', db, '-X', '-q', '-A', '-t', '-c', query],
+                ['psql', '-d', db, '-X', '-q', '-A', '-t', '-c', query],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 universal_newlines=True
             )
@@ -16102,7 +16102,7 @@ def process_multiple_files(file_names, args):
     )
     print(f"\n{'='*60}")
 
-    # TRUNCATE 记录进一步过滤:通过 vsql 校验对象必须是普通表(relkind='r'),
+    # TRUNCATE 记录进一步过滤:通过 psql 校验对象必须是普通表(relkind='r'),
     # 剔除索引/TOAST 等非表对象产生的 RelationSetNewRelfilenode 内部日志
     # 仅 --mode error/all 会提取错误日志(含 TRUNCATE),query 模式无 TRUNCATE 无需过滤
     if all_error_list and args.mode.lower() in ('error', 'all'):
@@ -23574,7 +23574,7 @@ if __name__ == "__main__":
             if args.debug:
                 print(f"[进度] 开始收集 sqlhc 信息 (共 {len(uids_to_query)} 个 SQL ID, 批量模式)...", file=sys.stderr)
             try:
-                # 批量收集：减少 vsql 进程数，N 个 SQL 原本最多 4N 次 vsql →
+                # 批量收集：减少 psql 进程数，N 个 SQL 原本最多 4N 次 psql →
                 # 1 次 postgres(sqlstat) + 每个库 1 次 schema 解析 + 每个库 1 次(tabstat+tabsize)
                 # - sqlstat 连 postgres 库批量查
                 # - schema 解析按库分组批量查
@@ -28976,7 +28976,7 @@ printf '           %-14s %-22s %-8.8s %-9s %.62s\n' "-" "-" "-" "-" "-"
 
 # ---- global -P <port>: multi-instance support (all database commands) ------
 # Resolved ONCE here (before dispatch) and exported as PGPORT for this process
-# only: every child psql/vsql connection inherits it; nothing persists after
+# only: every child psql/psql connection inherits it; nothing persists after
 # the run. Without -P the current $PGPORT environment variable applies
 # (libpq's built-in 5432 is reached only when PGPORT is unset).
 # NOTE: keep this block OUTSIDE the awr region (above its header): the awr
