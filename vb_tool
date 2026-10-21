@@ -7,7 +7,7 @@
 #-- Author:      MVS & Second-line Team 
 #--------------------------------------------------------------------------------
 set -o pipefail
-export VB_TOOL_VERSION="v2.5.15"
+export VB_TOOL_VERSION="v2.5.16"
 show_help() {
     echo "Vastbase Script Tool (vb_tool)"
     echo ""
