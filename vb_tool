@@ -29145,7 +29145,7 @@ _se_kb_dump() {
 
 awr_help() {
     cat <<'EOF'
-Usage: vb_tool awr <create|enable|disable|awrrpt|awrdiff|baseline|topsql|event|summary|tabstat|cpu|io|page|replstat|replslot|replay|ltx|sqlhist|list|show|delete|config> [options]
+Usage: vb_tool awr <create|enable|disable|awrrpt|awrdiff|baseline|topsql|event|summary|tabstat|cpu|io|page|replstat|replslot|replay|ltx|pagew|sqlhist|list|show|delete|config> [options]
 
   create  [--root <dir>]   one snapshot now, no html
   enable | disable         start/stop the crontab sampler (snapshot every
@@ -29172,6 +29172,8 @@ Usage: vb_tool awr <create|enable|disable|awrrpt|awrdiff|baseline|topsql|event|s
                            walreceiver samples
   ltx     begin <id> end <id>
                            per-5min long-transaction monitor
+  pagew   begin <id> end <id>
+                           per-5min pagewriter flush/dirty-page series
   sqlhist <sql_id> begin <id> end <id>
                            one SQL's per-interval history
   list [YYYY-MM-DD]        list snapshots (newest first)
@@ -31200,6 +31202,156 @@ def load_sessmem_samples(repl_dir, begin_ts, end_ts):
                 out["rows"].append((ts, "data", p[:7] + ["|".join(p[7:])])); out["n_data"] += 1
             # anything else: malformed row (too few fields) -- dropped
     return out
+
+def load_pw_samples(repl_dir, begin_ts, end_ts):
+    """Read pw_*.log[.gz] rows with ts in [begin_ts, end_ts] (inclusive). One
+    row per node per 5-min sample (written by _awr_lt_stack_sample's pagewriter
+    block, same lock/gate as lt_/stack_/sessmem_):
+      ts,node,actual_flush_total,last_flush,remain_dirty,queue_head_lsn,
+      queue_rec_lsn,xlog_insert_lsn,ckpt_redo    (data)
+      ts,error                                     (query failed)
+    Column semantics pinned from kernel pagewriter.cpp (g_pagewriter_view_col):
+      actual_flush_total  pgwr_actual_flush_total_num -- CUMULATIVE since
+                          startup (pg_atomic_fetch_add_u64, never reset);
+                          renderer takes per-node deltas between samples
+      last_flush          pgwr_last_flush_num -- pages flushed in the MOST
+                          RECENT batch round (zeroed at each round start)
+      remain_dirty        remain_dirty_page_num -- current dirty-page queue
+                          length (+1 new dirty / -1 flushed)
+      the 4 LSN cols      point-in-time positions"""
+    out = {"rows": [], "n_data": 0, "n_error": 0, "files": []}
+    for ln in _iter_lt_stack_logs(repl_dir, "pw_", begin_ts, end_ts, out["files"]):
+        ln = ln.strip()
+        if not ln: continue
+        ts, rest = (ln.split(",", 1) + [""])[:2]
+        if begin_ts and ts < str(begin_ts): continue
+        if end_ts and ts > str(end_ts): continue
+        if rest == "error":
+            out["rows"].append((ts, "error", [])); out["n_error"] += 1
+        elif ln.count(",") == 8:
+            # strict 9-field data row (ts + node + 7 cols); anything else dropped
+            out["rows"].append((ts, "data", ln.split(",")[1:])); out["n_data"] += 1
+    return out
+
+def _pw_lsn(v):
+    """'X/X' -> int byte offset, else None."""
+    try:
+        a, b = v.split("/")
+        return (int(a, 16) << 32) | int(b, 16)
+    except Exception:
+        return None
+
+def pw_derive_rows(pw):
+    """Pagewriter per-node 5-min series with derived cells. Returns
+    (rows, summary). rows: (ts, node, flush_delta, pages_per_s, last_flush,
+    remain_dirty, queue_head_lsn, behind_mb, restarted, ckpt_redo).
+    - flush_delta = actual_flush_total difference vs the node's PREVIOUS
+      sample (per node, ts order); a NEGATIVE difference (counter reset =
+      instance restart) -> delta None + restarted=True, excluded from sums
+    - pages_per_s = flush_delta / seconds between the two samples
+    - behind_mb = current_xlog_insert_lsn - queue_head_page_rec_lsn in MB:
+      how far the OLDEST dirty page's rec_lsn trails the insert point --
+      dirty backlog pressure (growing behind + growing dirty = flushing is
+      falling behind the write rate)"""
+    by_node = {}
+    order = []
+    for ts, kind, f in sorted(pw["rows"], key=lambda r: r[0]):
+        if kind != "data": continue
+        node, tot, lastf, dirty, qh, qr, xi, redo = (f + [""] * 8)[:8]
+        key = node or "-"
+        if key not in by_node:
+            by_node[key] = []
+            order.append(key)
+        try: tot_i = int(tot)
+        except ValueError: tot_i = None
+        try: dirty_i = int(dirty)
+        except ValueError: dirty_i = None
+        by_node[key].append((ts, tot_i, lastf, dirty_i, qh, xi, redo))
+    rows = []
+    total_flush = 0
+    peak_dirty = -1; peak_dirty_ts = ""
+    dirty_sum = 0; dirty_n = 0
+    peak_rate = None; peak_rate_ts = ""
+    for node in order:
+        prev = None   # (ts, tot)
+        for ts, tot_i, lastf, dirty_i, qh, xi, redo in by_node[node]:
+            delta = None; rate = None; restarted = False
+            if prev is not None and tot_i is not None and prev[1] is not None:
+                d = tot_i - prev[1]
+                if d < 0:
+                    restarted = True   # counter went backwards: instance restart
+                else:
+                    delta = d
+                    total_flush += d
+                    te, pe = _ts_epoch(ts), _ts_epoch(prev[0])
+                    if te is not None and pe is not None and te > pe:
+                        rate = d / float(te - pe)
+                        if peak_rate is None or rate > peak_rate:
+                            peak_rate, peak_rate_ts = rate, ts
+            if dirty_i is not None:
+                dirty_sum += dirty_i; dirty_n += 1
+                if dirty_i > peak_dirty: peak_dirty, peak_dirty_ts = dirty_i, ts
+            xi_b, qh_b = _pw_lsn(xi), _pw_lsn(qh)
+            behind = None
+            # qh == 0/0 means the dirty-page queue is EMPTY (ckpt_get_min_rec_lsn
+            # returns 0 when no dirty page): nothing trails the insert point,
+            # behind is meaningless (live 204: remain_dirty=0 -> 0/0) -- show '-'
+            if xi_b is not None and qh_b is not None and qh_b > 0 and xi_b >= qh_b:
+                behind = (xi_b - qh_b) / 1048576.0
+            rows.append((ts, node, delta, rate, lastf, dirty_i, qh,
+                         behind, restarted, redo))
+            prev = (ts, tot_i)
+    summary = {"total_flush": total_flush,
+               "peak_dirty": peak_dirty if peak_dirty >= 0 else None,
+               "peak_dirty_ts": peak_dirty_ts,
+               "avg_dirty": (dirty_sum / dirty_n) if dirty_n else None,
+               "peak_rate": peak_rate, "peak_rate_ts": peak_rate_ts}
+    return rows, summary
+
+def pagewriter_section_html(pw, meta):
+    """Pagewriter Status body (caller emits the sec() title): window summary
+    line + one row per node per 5-min sample. flush_d is the per-interval
+    DELTA of the cumulative counter; a 'R' cell marks a restart (counter
+    reset) whose interval is excluded from the window sums."""
+    if not pw["files"]:
+        return ('<div class="note">no pagewriter samples in this period '
+                '(sampler runs while awr is enabled, one sample every 5 min)</div>')
+    if pw["n_data"] == 0:
+        return ('<div class="note">no usable pagewriter samples in this period '
+                '(%d sample error(s))</div>' % pw["n_error"])
+    rows, s = pw_derive_rows(pw)
+    if not rows:
+        return '<div class="note">no usable pagewriter samples in this period</div>'
+    te0, te1 = _ts_epoch(meta.get("begin_ts", "")), _ts_epoch(meta.get("end_ts", ""))
+    avg_rate = (s["total_flush"] / float(te1 - te0)) if (te0 is not None and te1 is not None and te1 > te0) else None
+    h = ['<div class="note">%d sample(s); flushed %s pages in window (avg %s pg/s, peak %s pg/s at %s); '
+         'dirty peak %s at %s (avg %s). flush_d = delta of pgwr_actual_flush_total_num (cumulative '
+         'counter); last_batch/dirty are point-in-time; R = restart (interval excluded).</div>'
+         % (pw["n_data"], fmt_int(s["total_flush"]),
+            ("%.1f" % avg_rate) if avg_rate is not None else "-",
+            ("%.1f" % s["peak_rate"]) if s["peak_rate"] is not None else "-",
+            esc(s["peak_rate_ts"] or "-"),
+            fmt_int(s["peak_dirty"]) if s["peak_dirty"] is not None else "-",
+            esc(s["peak_dirty_ts"] or "-"),
+            ("%.0f" % s["avg_dirty"]) if s["avg_dirty"] is not None else "-")]
+    h.append('<table class="t"><tr><th>Sample Time</th><th>Node</th>'
+             '<th class="n">flush_d (pages)</th><th class="n">pg/s</th>'
+             '<th class="n">last_batch</th><th class="n">dirty pages</th>'
+             '<th>queue_head_lsn</th><th class="n">behind xlog (MB)</th>'
+             '<th>ckpt_redo_point</th></tr>')
+    for ts, node, delta, rate, lastf, dirty, qh, behind, restarted, redo in rows:
+        delta_cell = "R" if restarted else (fmt_int(delta) if delta is not None else "-")
+        h.append('<tr><td>%s</td><td>%s</td><td class="n">%s</td><td class="n">%s</td>'
+                 '<td class="n">%s</td><td class="n">%s</td><td>%s</td><td class="n">%s</td><td>%s</td></tr>'
+                 % (esc(ts), esc(node), delta_cell,
+                    ("%.1f" % rate) if rate is not None else "-",
+                    esc(lastf or "-"),
+                    fmt_int(dirty) if dirty is not None else "-",
+                    esc(qh or "-"),
+                    ("%.1f" % behind) if behind is not None else "-",
+                    esc(redo or "-")))
+    h.append('</table>')
+    return "".join(h)
 
 def _chain_html(chain, width=200):
     """One gs_stack chain rendered vb_tool-stack-summary style: leaf-first
@@ -34716,6 +34868,10 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             sub("Foreground Threads (LWLock waits)")
             parts.append(_fe_html)
 
+        sec("Pagewriter Status")
+        parts.append(pagewriter_section_html(
+            load_pw_samples(repl_dir, m.get("begin_ts", ""), m.get("end_ts", "")), m))
+
     # ================= SQL Statistics =================
     sec("SQL Statistics")
     note("SQL Id = unique_sql_id (click for full text in SQL Text section).\n"
@@ -37056,6 +37212,66 @@ def text_ltx(win, repl_dir=None):
     return 0, "\n".join(lines)
 
 
+def text_pagew(win, repl_dir=None):
+    """awr pagewriter status as a screen table: per-5-min flush/dirty series
+    from the pw_*.log sampler -- same source as the html report's Pagewriter
+    Status section. flush_d = delta of the cumulative pgwr_actual_flush_total_num
+    (kernel pagewriter.cpp: fetch_add only, never reset); last_batch =
+    pgwr_last_flush_num (zeroed each batch round); dirty = remain_dirty_page_num
+    (current queue length); behind = current_xlog_insert_lsn -
+    queue_head_page_rec_lsn. R = restart (counter reset, interval excluded).
+    Needs 'awr enable' sampler (one sample every 5 min)."""
+    lines = _text_banner("awr pagew detail", win)
+    m = win["meta"]
+    samples = (load_pw_samples(repl_dir, m.get("begin_ts", ""), m.get("end_ts", ""))
+               if repl_dir else {"files": []})
+    if not samples.get("files"):
+        lines.append("(no pagewriter samples in this period -- the sampler runs")
+        lines.append(" while 'awr enable' is on; manual snapshots alone carry no series)")
+        return 0, "\n".join(lines)
+    rows, s = pw_derive_rows(samples)
+    if not rows:
+        lines.append("(no usable pagewriter samples in this period "
+                     "(%d sample error(s)))" % samples["n_error"])
+        return 0, "\n".join(lines)
+    te0, te1 = _ts_epoch(m.get("begin_ts", "")), _ts_epoch(m.get("end_ts", ""))
+    avg_rate = (s["total_flush"] / float(te1 - te0)) if (te0 is not None and te1 is not None and te1 > te0) else None
+    lines.append("%d sample(s); flushed %s pages in window (avg %s pg/s, peak %s pg/s at %s); "
+                 "dirty peak %s at %s (avg %s)."
+                 % (samples["n_data"], fmt_int(s["total_flush"]),
+                    ("%.1f" % avg_rate) if avg_rate is not None else "-",
+                    ("%.1f" % s["peak_rate"]) if s["peak_rate"] is not None else "-",
+                    s["peak_rate_ts"] or "-",
+                    fmt_int(s["peak_dirty"]) if s["peak_dirty"] is not None else "-",
+                    s["peak_dirty_ts"] or "-",
+                    ("%.0f" % s["avg_dirty"]) if s["avg_dirty"] is not None else "-"))
+    lines.append("")
+    headers = ["time", "node", "flush_d", "pg/s", "last_batch", "dirty",
+               "queue_head_lsn", "behind_xlog_mb"]
+    out_rows = []
+    # error minutes surface as gap rows so cadence breaks stay visible
+    # (walk the sorted union of data + error sample timestamps)
+    data_by_ts = {}
+    for ts, node, delta, rate, lastf, dirty, qh, behind, restarted, redo in rows:
+        data_by_ts.setdefault(ts, []).append(
+            [ts, node,
+             "R" if restarted else (fmt_int(delta) if delta is not None else "-"),
+             ("%.1f" % rate) if rate is not None else "-",
+             lastf or "-",
+             fmt_int(dirty) if dirty is not None else "-",
+             qh or "-",
+             ("%.1f" % behind) if behind is not None else "-"])
+    all_ts = sorted(set(list(data_by_ts.keys()) +
+                        [ts for ts, kind, f in samples["rows"] if kind == "error"]))
+    for t in all_ts:
+        if t in data_by_ts:
+            out_rows.extend(data_by_ts[t])
+        else:
+            out_rows.append([t, "(sample error)"] + [""] * 6)
+    lines.append(_text_table(headers, out_rows, align="l" + "r" * 7))
+    return 0, "\n".join(lines)
+
+
 def main():
     argv = sys.argv[1:]
     awr_dir = current_dir = single_dir = begin_dir = end_dir = out_html = ""
@@ -37193,9 +37409,9 @@ def main():
             sys.stderr.write("Error: --text needs --begin DIR and --end DIR\n"); return 2
         if text_section not in ("topsql", "event", "summary", "tabstat",
                                 "cpu", "io", "page", "replstat", "replslot",
-                                "replay", "ltx", "sqlhist"):
+                                "replay", "ltx", "pagew", "sqlhist"):
             sys.stderr.write("Error: --text expects topsql|event|summary|tabstat"
-                             "|cpu|io|page|replstat|replslot|replay|ltx|sqlhist\n"); return 2
+                             "|cpu|io|page|replstat|replslot|replay|ltx|pagew|sqlhist\n"); return 2
         # ★选项归属校验 (2026-10-11, user: 给错子命令的选项要报错, 不再静默吞):
         #   text 模式下 -m/-n 只属于 topsql, -E 只属于 event, -d/-s/-t 只属于
         #   tabstat, --sql-id 只属于 sqlhist; 其余 8 个 section 不吃任何选项。
@@ -37248,6 +37464,8 @@ def main():
                 return text_replay(w, repl_dir)
             elif text_section == "ltx":
                 return text_ltx(w, repl_dir)
+            elif text_section == "pagew":
+                return text_pagew(w, repl_dir)
             elif text_section == "sqlhist":
                 return text_sqlhist(w, sql_id=text_sql_id, detail_wins=dw,
                                     sqltext_root=sqltext_root)
@@ -37437,6 +37655,24 @@ _awr_lt_stack_sample() {
         printf '%s,error\n' "$ts" >> "$lf"
     else
         printf '%s,%s\n' "$ts" "$out" >> "$lf"
+    fi
+    # ---- pagewriter: dirty-page flush series (dbe_perf.global_pagewriter_status).
+    # Column semantics pinned from kernel pagewriter.cpp (g_pagewriter_view_col):
+    #   pgwr_actual_flush_total_num  CUMULATIVE since startup
+    #                               (pg_atomic_fetch_add_u64, never reset) --
+    #                               the renderer takes per-node deltas
+    #   pgwr_last_flush_num          pages flushed in the MOST RECENT batch
+    #                               round (zeroed at each round start) -- as-is
+    #   remain_dirty_page_num        current dirty-page queue length
+    #                               (+1 new dirty / -1 flushed) -- as-is
+    #   the 4 LSN cols               point-in-time positions
+    local pf="$root/pw_$(date +%Y%m%d).log"
+    out=$(PGCONNECT_TIMEOUT=15 PGOPTIONS='-c statement_timeout=15000' \
+          psql -d postgres -tAF',' -c "select node_name,pgwr_actual_flush_total_num,pgwr_last_flush_num,remain_dirty_page_num,queue_head_page_rec_lsn,queue_rec_lsn,current_xlog_insert_lsn,ckpt_redo_point from dbe_perf.global_pagewriter_status order by node_name" 2>/dev/null)
+    if [ "$?" -ne 0 ] || [ -z "$out" ]; then
+        printf '%s,error\n' "$ts" >> "$pf"
+    else
+        printf '%s\n' "$out" | sed "s|^|$ts,|" >> "$pf"
     fi
     # ---- callstack: backend-thread candidates (name/wait from the thread
     # status view; lwpid is the OS tid used for the AutoVacWorker CPU pick) ----
@@ -38419,7 +38655,7 @@ _awr_enable() {
         echo "Error: failed to install crontab entries (check cron.allow/cron.deny, permissions or disk) -- periodic capture NOT started" >&2
         return 1
     fi
-    echo "awr enable: port $port, capturing a snapshot every ${mins}min (see 'awr config interval') + replication/slot/OS sample every 1min + long-txn/callstack sample every 5min via crontab"
+    echo "awr enable: port $port, capturing a snapshot every ${mins}min (see 'awr config interval') + replication/slot/OS sample every 1min + long-txn/callstack/pagewriter sample every 5min via crontab"
     echo "  $entry"
     echo "  $rentry"
     echo "  (run 'awr disable' to stop both; other ports keep their own entries)"
@@ -38975,6 +39211,7 @@ _awr_replstat() { _awr_text_report replstat "$@"; }
 _awr_replslot() { _awr_text_report replslot "$@"; }
 _awr_replay()   { _awr_text_report replay   "$@"; }
 _awr_ltx()     { _awr_text_report ltx     "$@"; }
+_awr_pagew()   { _awr_text_report pagew   "$@"; }
 _awr_sqlhist() {
     local sid="$1"; shift   # run_awr already consumed 'sqlhist'
     if [ -z "$sid" ] || [ "$sid" = "begin" ] || [ "$sid" = "end" ]; then
@@ -39012,6 +39249,7 @@ run_awr() {
         replslot)       _awr_replslot "$@";;
         replay)         _awr_replay "$@";;
         ltx)            _awr_ltx "$@";;
+        pagew)          _awr_pagew "$@";;
         sqlhist)        _awr_sqlhist "$@";;
         list|ls)        _awr_list "$@";;
         show)           _awr_show "$@";;
