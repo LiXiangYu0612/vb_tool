@@ -29174,6 +29174,7 @@ Usage: vb_tool awr <create|enable|disable|awrrpt|awrdiff|baseline|topsql|event|s
                            per-5min long-transaction monitor
   pagew   begin <id> end <id>
                            per-5min pagewriter flush/dirty-page series
+                           (R = restart: interval excluded from deltas)
   sqlhist <sql_id> begin <id> end <id>
                            one SQL's per-interval history
   list [YYYY-MM-DD]        list snapshots (newest first)
@@ -29773,7 +29774,11 @@ _awr_collect() {
 \copy (SELECT * FROM dbe_perf.wait_events)              TO '$dbd/wait_events.csv'   WITH CSV HEADER
 \copy (SELECT * FROM gs_instance_time)                  TO '$dbd/instance_time.csv' WITH CSV HEADER
 \copy (SELECT * FROM pg_stat_database)                  TO '$dbd/database.csv'      WITH CSV HEADER
-\copy (SELECT * FROM dbe_perf.global_pagewriter_status) TO '$dbd/pagewriter.csv'    WITH CSV HEADER
+-- pagewriter: NOT captured per-snapshot anymore (user 2026-10-21: the series
+-- is tiny -- one row per node; it lives in the shared root-level pw_<day>.log
+-- sampled every 5 min, and the Load Profile endpoints are synthesized from
+-- that log via patch_win_pagewriter_from_pw; pre-change snaps still carry
+-- their pagewriter.csv and keep working through the csv path)
 \copy (SELECT memorytype, sum(memorymbytes) AS mb FROM dbe_perf.memory_node_detail WHERE memorymbytes>0 GROUP BY memorytype) TO '$dbd/memory_node_detail.csv' WITH CSV HEADER
 \copy (SELECT contextname, count(*) AS cnt, sum(totalsize) AS total FROM gs_shared_memory_detail GROUP BY contextname) TO '$dbd/shared_memory.csv' WITH CSV HEADER
 \copy (SELECT contextname, count(*) AS cnt, sum(totalsize) AS total FROM gs_session_memory_detail GROUP BY contextname) TO '$dbd/session_memory.csv' WITH CSV HEADER
@@ -31250,6 +31255,83 @@ def load_pw_samples(repl_dir, begin_ts, end_ts):
         out["pre"][f[0] or "-"] = (ts, f)   # keep only the LAST per node
     return out
 
+def _pw_endpoints(repl_dir, begin_ts, end_ts):
+    """Per-node pagewriter state at the two window boundaries, read from the
+    shared pw_<day>.log series (user 2026-10-21: snapshots no longer capture
+    pagewriter.csv): the LAST sample at-or-before begin_ts, and the LAST one
+    at-or-before end_ts. Returns {"begin": {node:(ts,total,dbstart)},
+    "end": {...}}; nodes present on only one side are dropped (no delta)."""
+    from collections import OrderedDict
+    sides = {"begin": {}, "end": {}}
+    b, e = str(begin_ts or ""), str(end_ts or "")
+    day_back = ""
+    try:
+        import datetime as _dt
+        day_back = (_dt.datetime.strptime(b[:10], "%Y-%m-%d") - _dt.timedelta(days=1)).strftime("%Y-%m-%d")
+    except ValueError:
+        pass
+    files = []
+    for ln in _iter_lt_stack_logs(repl_dir, "pw_", day_back or b, e, files):
+        ln = ln.strip()
+        if not ln: continue
+        ts, rest = (ln.split(",", 1) + [""])[:2]
+        if rest == "error": continue
+        if ln.count(",") == 9:
+            f = ln.split(",")[1:]
+        elif ln.count(",") == 8:
+            f = ln.split(",")[1:] + [""]
+        else:
+            continue
+        try: tot = int(f[1])
+        except ValueError: continue
+        node = f[0] or "-"
+        # begin side: latest sample AT OR BEFORE begin_ts; end side: latest
+        # AT OR BEFORE end_ts (a sample ts == begin_ts belongs to begin side)
+        if b and ts <= b:
+            cur = sides["begin"].get(node)
+            if cur is None or ts >= cur[0]: sides["begin"][node] = (ts, tot, f[8])
+        if e and ts <= e:
+            cur = sides["end"].get(node)
+            if cur is None or ts >= cur[0]: sides["end"][node] = (ts, tot, f[8])
+    return sides
+
+def patch_win_pagewriter_from_pw(win, repl_dir):
+    """Synthesize win["db"][("begin"|"end","pagewriter")] rows from the shared
+    pw_<day>.log when the snaps carry no pagewriter.csv (post-change snaps).
+    Same dict shape/column names as the old csv so loadprofile_wal_pw_rows
+    keeps working untouched. Skipped when EITHER side already has csv rows
+    (pre-change snaps: keep the exact-timepoint csv path) and when the two sides'
+    postmaster start times disagree (restart inside the window: a flush delta
+    would be garbage -- leave both empty so Load Profile prints '-')."""
+    if not repl_dir:
+        return
+    db = win.get("db", {})
+    if db.get(("begin", "pagewriter")) or db.get(("end", "pagewriter")):
+        return
+    m = win.get("meta", {})
+    sides = _pw_endpoints(repl_dir, m.get("begin_ts", ""), m.get("end_ts", ""))
+    b, e = sides["begin"], sides["end"]
+    if not b or not e:
+        return
+    for node in list(b.keys()):
+        if node not in e:
+            continue
+        # restart guard: same start time on both endpoints (empty start on
+        # legacy rows -> guard passes, counter-went-backwards is caught by
+        # the raw delta landing negative in Load Profile)
+        if b[node][2] and e[node][2] and b[node][2] != e[node][2]:
+            return
+        for ph, side in (("begin", b), ("end", e)):
+            db.setdefault((ph, "pagewriter"), []).append({
+                "node_name": node,
+                "pgwr_actual_flush_total_num": side[node][1],
+                "pgwr_last_flush_num": "",
+                "remain_dirty_page_num": "",
+                "queue_head_page_rec_lsn": "",
+                "queue_rec_lsn": "",
+                "current_xlog_insert_lsn": "",
+                "ckpt_redo_point": ""})
+
 def _pw_lsn(v):
     """'X/X' -> int byte offset, else None."""
     try:
@@ -31355,17 +31437,8 @@ def pagewriter_section_html(pw, meta):
     rows, s = pw_derive_rows(pw)
     if not rows:
         return '<div class="note">no usable pagewriter samples in this period</div>'
-    te0, te1 = _ts_epoch(meta.get("begin_ts", "")), _ts_epoch(meta.get("end_ts", ""))
-    avg_rate = (s["total_flush"] / float(te1 - te0)) if (te0 is not None and te1 is not None and te1 > te0) else None
-    h = ['<div class="note">%d sample(s); flushed %s pages in window (avg %s pg/s, peak %s pg/s at %s); '
-         'dirty peak %s at %s (avg %s). R = restart (interval excluded).</div>'
-         % (pw["n_data"], fmt_int(s["total_flush"]),
-            ("%.1f" % avg_rate) if avg_rate is not None else "-",
-            ("%.1f" % s["peak_rate"]) if s["peak_rate"] is not None else "-",
-            esc(s["peak_rate_ts"] or "-"),
-            fmt_int(s["peak_dirty"]) if s["peak_dirty"] is not None else "-",
-            esc(s["peak_dirty_ts"] or "-"),
-            ("%.0f" % s["avg_dirty"]) if s["avg_dirty"] is not None else "-")]
+    # no summary note line (user 2026-10-21): the table alone carries the section
+    h = []
     # full kernel-native column names (user 2026-10-21: no over-abbreviated
     # headers); the Node column is hidden on single-node reports and only
     # appears when the series actually carries more than one node
@@ -33688,6 +33761,9 @@ def render_single_awr(win, metric, top_n, out_html, repl_dir=None):
     shown); top_n bounds each SQL sub-table.
     repl_dir set (awrrpt path) => a Replication section is rendered from
     per-minute repl_*.log samples."""
+    # pagewriter endpoints from the shared pw_<day>.log when the snaps carry
+    # no pagewriter.csv (user 2026-10-21: series moved out of the snapshots)
+    patch_win_pagewriter_from_pw(win, repl_dir)
     CSS_AWR = """
 body { font-family: Arial, Helvetica, Geneva, sans-serif; font-size: 13px; color: #000; background: #fff; margin: 10px; }
 .rhead { margin-bottom: 8px; }
@@ -37275,18 +37351,6 @@ def text_pagew(win, repl_dir=None):
         lines.append("(no usable pagewriter samples in this period "
                      "(%d sample error(s)))" % samples["n_error"])
         return 0, "\n".join(lines)
-    te0, te1 = _ts_epoch(m.get("begin_ts", "")), _ts_epoch(m.get("end_ts", ""))
-    avg_rate = (s["total_flush"] / float(te1 - te0)) if (te0 is not None and te1 is not None and te1 > te0) else None
-    lines.append("%d sample(s); flushed %s pages in window (avg %s pg/s, peak %s pg/s at %s); "
-                 "dirty peak %s at %s (avg %s)."
-                 % (samples["n_data"], fmt_int(s["total_flush"]),
-                    ("%.1f" % avg_rate) if avg_rate is not None else "-",
-                    ("%.1f" % s["peak_rate"]) if s["peak_rate"] is not None else "-",
-                    s["peak_rate_ts"] or "-",
-                    fmt_int(s["peak_dirty"]) if s["peak_dirty"] is not None else "-",
-                    s["peak_dirty_ts"] or "-",
-                    ("%.0f" % s["avg_dirty"]) if s["avg_dirty"] is not None else "-"))
-    lines.append("")
     # node column only when the series carries more than one node
     # (user 2026-10-21); screen table keeps medium-width headers, the html
     # report carries the full kernel-native names
@@ -37481,6 +37545,7 @@ def main():
             repl_dir = os.path.dirname(os.path.abspath(begin_dir))
         win = build_window_from_snaps(begin_dir, end_dir, sqltext_root,
                                      load_sqltext=False, db_tables=text_db_tables)
+        patch_win_pagewriter_from_pw(win, repl_dir)
         if text_section == "topsql" and not n_given:
             top_n = 10        # awr topsql default differs from awrrpt's 30
         if text_section == "tabstat" and not (text_db and text_schema and text_table):
