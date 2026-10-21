@@ -38220,12 +38220,12 @@ _awr_repl_sample() {
     fi
     # ---- gzip past days' os logs (~10x smaller on these repetitive lines;
     # the renderer reads both os_*.log and os_*.log.gz). Today's file stays
-    # plain so the per-minute append keeps working. The lt_/stack_ logs join
-    # the pass (same reader discipline). ----
+    # plain so the per-minute append keeps working. The lt_/stack_/pw_ logs
+    # join the pass (same reader discipline). ----
     today=$(date +%Y%m%d)
-    for og in "$root"/os_*.log "$root"/lt_*.log "$root"/stack_*.log "$root"/sessmem_*.log; do
+    for og in "$root"/os_*.log "$root"/lt_*.log "$root"/stack_*.log "$root"/sessmem_*.log "$root"/pw_*.log; do
         [ -f "$og" ] || continue
-        od8=$(basename "$og" .log); od8="${od8#os_}"; od8="${od8#lt_}"; od8="${od8#stack_}"; od8="${od8#sessmem_}"
+        od8=$(basename "$og" .log); od8="${od8#os_}"; od8="${od8#lt_}"; od8="${od8#stack_}"; od8="${od8#sessmem_}"; od8="${od8#pw_}"
         case "$od8" in
             [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
             *) continue;;
@@ -39105,10 +39105,10 @@ PY
     fi
     # repl_/slot_/os_/lt_/stack_<YYYYMMDD>.log[.gz]: delete only when the WHOLE day is before until
     local rcount=0 rf rd d_ep
-    for rf in "$root"/repl_*.log "$root"/slot_*.log "$root"/walrcv_*.log "$root"/os_*.log "$root"/os_*.log.gz "$root"/lt_*.log "$root"/lt_*.log.gz "$root"/stack_*.log "$root"/stack_*.log.gz "$root"/sessmem_*.log "$root"/sessmem_*.log.gz; do
+    for rf in "$root"/repl_*.log "$root"/slot_*.log "$root"/walrcv_*.log "$root"/os_*.log "$root"/os_*.log.gz "$root"/lt_*.log "$root"/lt_*.log.gz "$root"/stack_*.log "$root"/stack_*.log.gz "$root"/sessmem_*.log "$root"/sessmem_*.log.gz "$root"/pw_*.log "$root"/pw_*.log.gz; do
         [ -f "$rf" ] || continue
         rd=$(basename "$rf"); rd="${rd%.gz}"; rd="${rd%.log}"
-        rd="${rd#repl_}"; rd="${rd#slot_}"; rd="${rd#walrcv_}"; rd="${rd#os_}"; rd="${rd#lt_}"; rd="${rd#stack_}"; rd="${rd#sessmem_}"
+        rd="${rd#repl_}"; rd="${rd#slot_}"; rd="${rd#walrcv_}"; rd="${rd#os_}"; rd="${rd#lt_}"; rd="${rd#stack_}"; rd="${rd#sessmem_}"; rd="${rd#pw_}"
         case "$rd" in
             [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9])
                 d_ep=$(date -d "${rd:0:4}-${rd:4:2}-${rd:6:2}" +%s 2>/dev/null)
