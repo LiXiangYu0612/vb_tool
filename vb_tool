@@ -4932,7 +4932,7 @@ SELECT n.nspname AS "owner"
         ,c.relpages
         ,c.reltuples
         ,c.relallvisible allvisible
-        ,pg_catalog.pg_size_pretty(pg_catalog.pg_table_size(c.oid)) AS "size"
+        ,pg_catalog.pg_size_pretty(pg_catalog.pg_table_size(c.oid)) AS table_size
         ,replace(replace(replace(c.reloptions::text,'orientation','ori'),'compression','comp'),'fillfactor','fill') as options
 FROM pg_catalog.pg_class c
 LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
@@ -5081,7 +5081,7 @@ select n.nspname schema_name,c.relname tab_name,partitionno partno,p.relname par
             WHEN 'v'::"char" THEN 'VALUE'::varchar(9)
             WHEN 's'::"char" THEN 'SYSTEM'::varchar(9)
             WHEN 'n'::"char" THEN 'NONE'::varchar(9)
-         ELSE NULL end parttype,cols partkey,p.relpages,p.reltuples,pg_size_pretty(pg_partition_size(p.parentid,p.oid)) as size,boundaries from pg_partition p,pg_class c,(select lower(schema_name) schema_name,lower(name) as name,lower(string_agg(column_name,',' order by column_position)) cols  from dba_part_key_columns 
+         ELSE NULL end parttype,cols partkey,p.relpages,p.reltuples,pg_size_pretty(pg_partition_size(p.parentid,p.oid)) as part_size,boundaries from pg_partition p,pg_class c,(select lower(schema_name) schema_name,lower(name) as name,lower(string_agg(column_name,',' order by column_position)) cols  from dba_part_key_columns 
  where object_type='TABLE' 
   group by schema_name,name) p1,pg_namespace n
 where p.parttype in ('p') and c.oid=p.parentid and p.subpartitionno is null and p1.name=c.relname and n.oid = c.relnamespace and p1.schema_name=n.nspname 
@@ -5110,7 +5110,7 @@ select c.relname tab_name,p.relname part_name,ps.relname subpart_name,CASE p.par
             WHEN 's'::"char" THEN 'SYSTEM'::varchar(9)
             WHEN 'n'::"char" THEN 'NONE'::varchar(9)
          ELSE NULL end ||'('||p2.cols||')' part_type
-         ,ps.relpages,ps.reltuples,pg_size_pretty(pg_partition_size(ps.parentid,ps.oid)) as size,p.boundaries partbound,ps.boundaries subpartbound
+         ,ps.relpages,ps.reltuples,pg_size_pretty(pg_partition_size(ps.parentid,ps.oid)) as subpart_size,p.boundaries partbound,ps.boundaries subpartbound
  from pg_partition p,pg_partition ps,pg_class c,pg_namespace n,(select lower(schema_name) schema_name,lower(name) as name,lower(string_agg(column_name,',' order by column_position)) cols  from dba_part_key_columns
  where object_type='TABLE' group by schema_name,name) p1,
   (select lower(schema_name) schema_name,lower(name) as name,lower(string_agg(column_name,',' order by column_position)) cols  from dba_subpart_key_columns
@@ -13114,7 +13114,7 @@ SELECT n.nspname AS "owner"
         ,c.relpages
         ,c.reltuples
         ,c.relallvisible allvisible
-        ,pg_catalog.pg_size_pretty(pg_catalog.pg_table_size(c.oid)) AS "size"
+        ,pg_catalog.pg_size_pretty(pg_catalog.pg_table_size(c.oid)) AS table_size
         ,replace(replace(replace(c.reloptions::text,'orientation','ori'),'compression','comp'),'fillfactor','fill') as options
 FROM pg_catalog.pg_class c
 LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
@@ -13263,7 +13263,7 @@ select n.nspname schema_name,c.relname tab_name,partitionno partno,p.relname par
             WHEN 'n'::"char" THEN 'NONE'::varchar(9)
          ELSE NULL end parttype,
        cols partkey,p.relpages,p.reltuples,
-       pg_size_pretty(pg_partition_size(p.parentid,p.oid)) as size,boundaries
+       pg_size_pretty(pg_partition_size(p.parentid,p.oid)) as part_size,boundaries
 from pg_partition p
     ,pg_class c
     ,({part_key_cols_sql}) p1
@@ -13302,7 +13302,7 @@ select c.relname tab_name,p.relname part_name,ps.relname subpart_name,
             WHEN 'n'::"char" THEN 'NONE'::varchar(9)
          ELSE NULL end||'('||p2.cols||')' part_type,
        ps.relpages,ps.reltuples,
-       pg_size_pretty(pg_partition_size(ps.parentid,ps.oid)) as size,
+       pg_size_pretty(pg_partition_size(ps.parentid,ps.oid)) as subpart_size,
        p.boundaries partbound,ps.boundaries subpartbound
 from pg_partition p
     ,pg_partition ps
@@ -24920,7 +24920,7 @@ SELECT n.nspname AS "owner"
         ,c.relpages
         ,c.reltuples
         ,c.relallvisible allvisible
-        ,pg_catalog.pg_size_pretty(pg_catalog.pg_table_size(c.oid)) AS "size"
+        ,pg_catalog.pg_size_pretty(pg_catalog.pg_table_size(c.oid)) AS table_size
         ,replace(replace(replace(c.reloptions::text,'orientation','ori'),'compression','comp'),'fillfactor','fill') as options
 FROM pg_catalog.pg_class c
 LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
@@ -25081,7 +25081,7 @@ select n.nspname schema_name,c.relname tab_name,partitionno partno,p.relname par
             WHEN 'n'::"char" THEN 'NONE'::varchar(9)
          ELSE NULL end parttype,
        cols partkey,p.relpages,p.reltuples,
-       pg_size_pretty(pg_partition_size(p.parentid,p.oid)) as size,boundaries
+       pg_size_pretty(pg_partition_size(p.parentid,p.oid)) as part_size,boundaries
 from pg_partition p
     ,pg_class c
     ,(select lower(schema_name) schema_name,lower(name) as name,
@@ -25124,7 +25124,7 @@ select c.relname tab_name,p.relname part_name,ps.relname subpart_name,
             WHEN 'n'::"char" THEN 'NONE'::varchar(9)
          ELSE NULL end||'('||p2.cols||')' part_type,
        ps.relpages,ps.reltuples,
-       pg_size_pretty(pg_partition_size(ps.parentid,ps.oid)) as size,
+       pg_size_pretty(pg_partition_size(ps.parentid,ps.oid)) as subpart_size,
        p.boundaries partbound,ps.boundaries subpartbound
 from pg_partition p
     ,pg_partition ps
