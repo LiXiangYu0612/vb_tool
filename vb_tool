@@ -4159,7 +4159,9 @@ from pg_settings where name in (
 \echo ====================
 \echo total memory detail
 \echo ====================
-select memorytype,pg_size_pretty(memorymbytes*1024*1024::numeric(100,0)) size from dbe_perf.memory_node_detail where memorymbytes>0;
+-- alias must NOT be `size`: reserved keyword in MSSQL compatibility mode
+-- (syntax error at or near "size"); same for any future bare-keyword alias
+select memorytype,pg_size_pretty(memorymbytes*1024*1024::numeric(100,0)) size_pretty from dbe_perf.memory_node_detail where memorymbytes>0;
 
 \echo ============================
 \echo top 10 shared memory context
