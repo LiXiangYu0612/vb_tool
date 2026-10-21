@@ -31299,10 +31299,11 @@ def patch_win_pagewriter_from_pw(win, repl_dir):
     """Synthesize win["db"][("begin"|"end","pagewriter")] rows from the shared
     pw_<day>.log when the snaps carry no pagewriter.csv (post-change snaps).
     Same dict shape/column names as the old csv so loadprofile_wal_pw_rows
-    keeps working untouched. Skipped when EITHER side already has csv rows
-    (pre-change snaps: keep the exact-timepoint csv path) and when the two sides'
-    postmaster start times disagree (restart inside the window: a flush delta
-    would be garbage -- leave both empty so Load Profile prints '-')."""
+    keeps working untouched. Per node, synthesis is skipped when either
+    endpoint's sample is stale (>6 min from its snap time -- sampler outage)
+    or the two endpoints' postmaster start times are missing/mismatched
+    (restart inside the window: the flush delta would be garbage); Load
+    Profile then prints '-' for that node."""
     if not repl_dir:
         return
     db = win.get("db", {})
@@ -31313,14 +31314,23 @@ def patch_win_pagewriter_from_pw(win, repl_dir):
     b, e = sides["begin"], sides["end"]
     if not b or not e:
         return
+    def _near(sample_ts, ref_ts):
+        """staleness cap (user 2026-10-21: endpoints must be the ADJACENT
+        5-min samples): a sample more than 6 min (one cycle + slack) older
+        than the snap time -- e.g. from a sampler outage -- is rejected."""
+        sa, ra = _ts_epoch(sample_ts), _ts_epoch(ref_ts)
+        return sa is not None and ra is not None and 0 <= ra - sa <= 360
     for node in list(b.keys()):
         if node not in e:
             continue
-        # restart guard: same start time on both endpoints (empty start on
-        # legacy rows -> guard passes, counter-went-backwards is caught by
-        # the raw delta landing negative in Load Profile)
-        if b[node][2] and e[node][2] and b[node][2] != e[node][2]:
-            return
+        # restart guard (user 2026-10-21: 启动时间一样才能算增量): BOTH
+        # endpoints must carry a postmaster start time and they must MATCH;
+        # anything else leaves this node unsynthesized (Load Profile '-')
+        if not b[node][2] or not e[node][2] or b[node][2] != e[node][2]:
+            continue
+        if not _near(b[node][0], m.get("begin_ts", "")) or \
+           not _near(e[node][0], m.get("end_ts", "")):
+            continue
         for ph, side in (("begin", b), ("end", e)):
             db.setdefault((ph, "pagewriter"), []).append({
                 "node_name": node,
@@ -31379,11 +31389,25 @@ def pw_derive_rows(pw):
     peak_rate = None; peak_rate_ts = ""
     for node in order:
         # prev = (ts, tot, db_start); seeded from the last PRE-WINDOW sample
-        # of this node when the shared day logs reach back that far
+        # of this node when the shared day logs reach back that far.
+        # STALENESS CAP (user 2026-10-21: the baseline must be the PREVIOUS
+        # 5-min sample -- a sample from a sampler outage must not stand in):
+        # baseline older than 6 min (one 5-min cycle + 60s slack for cron/
+        # manual timing drift) is discarded; the first row then shows '-'
         prev = None
         _pre = pw.get("pre", {}).get(node)
+        if _pre is not None and by_node[node]:
+            _fe, _pe = _ts_epoch(by_node[node][0][0]), _ts_epoch(_pre[0])
+            if _fe is None or _pe is None or not (0 <= _fe - _pe <= 360):
+                _pre = None
         if _pre is not None:
             _pf = (_pre[1] + [""] * 9)[:9]
+            # baseline must carry a postmaster start time AND it must match
+            # the first in-window sample's (user 2026-10-21: 启动时间一样才
+            # 能算增量); legacy rows without one are not trusted as baselines
+            if not _pf[8] or (_pf[8] != by_node[node][0][7]):
+                _pre = None
+        if _pre is not None:
             try: _pt = int(_pf[1])
             except ValueError: _pt = None
             prev = (_pre[0], _pt, _pf[8])
