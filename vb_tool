@@ -31208,29 +31208,46 @@ def load_pw_samples(repl_dir, begin_ts, end_ts):
     row per node per 5-min sample (written by _awr_lt_stack_sample's pagewriter
     block, same lock/gate as lt_/stack_/sessmem_):
       ts,node,actual_flush_total,last_flush,remain_dirty,queue_head_lsn,
-      queue_rec_lsn,xlog_insert_lsn,ckpt_redo    (data)
-      ts,error                                     (query failed)
-    Column semantics pinned from kernel pagewriter.cpp (g_pagewriter_view_col):
-      actual_flush_total  pgwr_actual_flush_total_num -- CUMULATIVE since
-                          startup (pg_atomic_fetch_add_u64, never reset);
-                          renderer takes per-node deltas between samples
-      last_flush          pgwr_last_flush_num -- pages flushed in the MOST
-                          RECENT batch round (zeroed at each round start)
-      remain_dirty        remain_dirty_page_num -- current dirty-page queue
-                          length (+1 new dirty / -1 flushed)
-      the 4 LSN cols      point-in-time positions"""
-    out = {"rows": [], "n_data": 0, "n_error": 0, "files": []}
-    for ln in _iter_lt_stack_logs(repl_dir, "pw_", begin_ts, end_ts, out["files"]):
+      queue_rec_lsn,xlog_insert_lsn,ckpt_redo,db_start   (data, v2.5.16+)
+      ts,node,...,ckpt_redo                              (data, legacy 9-field)
+      ts,error                                           (query failed)
+    db_start = pg_postmaster_start_time() -- restart guard: deltas are only
+    valid between samples with the SAME start time (user 2026-10-21); legacy
+    rows carry "" and fall back to the counter-went-backwards check alone.
+    Also returns out["pre"]: per node, the LAST data row strictly BEFORE
+    begin_ts (searched one day back -- the shared root-level day logs keep
+    the series running across snapshot windows, so the first in-window
+    sample can still be differenced against it)."""
+    out = {"rows": [], "n_data": 0, "n_error": 0, "files": [], "pre": {}}
+    # widen the day window one day back so the pre-begin baseline is reachable
+    bd = str(begin_ts or "")[:10]
+    try:
+        import datetime as _dt
+        bd_back = (_dt.datetime.strptime(bd, "%Y-%m-%d") - _dt.timedelta(days=1)).strftime("%Y-%m-%d")
+    except ValueError:
+        bd_back = ""
+    pre_rows = []
+    for ln in _iter_lt_stack_logs(repl_dir, "pw_", bd_back or begin_ts, end_ts, out["files"]):
         ln = ln.strip()
         if not ln: continue
         ts, rest = (ln.split(",", 1) + [""])[:2]
-        if begin_ts and ts < str(begin_ts): continue
-        if end_ts and ts > str(end_ts): continue
         if rest == "error":
-            out["rows"].append((ts, "error", [])); out["n_error"] += 1
+            if begin_ts and ts >= str(begin_ts) and (not end_ts or ts <= str(end_ts)):
+                out["rows"].append((ts, "error", [])); out["n_error"] += 1
+            continue
+        if ln.count(",") == 9:
+            f = ln.split(",")[1:]          # v2.5.16+: ts + node + 8 cols
         elif ln.count(",") == 8:
-            # strict 9-field data row (ts + node + 7 cols); anything else dropped
-            out["rows"].append((ts, "data", ln.split(",")[1:])); out["n_data"] += 1
+            f = ln.split(",")[1:] + [""]   # legacy: no db_start col
+        else:
+            continue                       # malformed row -- dropped
+        if begin_ts and ts < str(begin_ts):
+            pre_rows.append((ts, f))       # pre-window baseline candidate
+            continue
+        if end_ts and ts > str(end_ts): continue
+        out["rows"].append((ts, "data", f)); out["n_data"] += 1
+    for ts, f in pre_rows:
+        out["pre"][f[0] or "-"] = (ts, f)   # keep only the LAST per node
     return out
 
 def _pw_lsn(v):
@@ -31246,8 +31263,14 @@ def pw_derive_rows(pw):
     (rows, summary). rows: (ts, node, flush_delta, pages_per_s, last_flush,
     remain_dirty, queue_head_lsn, behind_mb, restarted, ckpt_redo).
     - flush_delta = actual_flush_total difference vs the node's PREVIOUS
-      sample (per node, ts order); a NEGATIVE difference (counter reset =
-      instance restart) -> delta None + restarted=True, excluded from sums
+      sample (per node, ts order); the FIRST in-window sample is differenced
+      against the last pre-window sample (pw["pre"], shared day logs -- user
+      2026-10-21) when one exists
+    - RESTART GUARD (user 2026-10-21): a delta is only valid between samples
+      with the SAME pg_postmaster_start_time; a changed start time (or a
+      counter that went backwards) -> restarted=True, delta None, excluded
+      from sums. Legacy rows without a start time fall back to the
+      counter-went-backwards check alone.
     - pages_per_s = flush_delta / seconds between the two samples
     - behind_mb = current_xlog_insert_lsn - queue_head_page_rec_lsn in MB:
       how far the OLDEST dirty page's rec_lsn trails the insert point --
@@ -31257,7 +31280,7 @@ def pw_derive_rows(pw):
     order = []
     for ts, kind, f in sorted(pw["rows"], key=lambda r: r[0]):
         if kind != "data": continue
-        node, tot, lastf, dirty, qh, qr, xi, redo = (f + [""] * 8)[:8]
+        node, tot, lastf, dirty, qh, qr, xi, redo, dbstart = (f + [""] * 9)[:9]
         key = node or "-"
         if key not in by_node:
             by_node[key] = []
@@ -31266,21 +31289,31 @@ def pw_derive_rows(pw):
         except ValueError: tot_i = None
         try: dirty_i = int(dirty)
         except ValueError: dirty_i = None
-        by_node[key].append((ts, tot_i, lastf, dirty_i, qh, xi, redo))
+        by_node[key].append((ts, tot_i, lastf, dirty_i, qh, xi, redo, dbstart))
     rows = []
     total_flush = 0
     peak_dirty = -1; peak_dirty_ts = ""
     dirty_sum = 0; dirty_n = 0
     peak_rate = None; peak_rate_ts = ""
     for node in order:
-        prev = None   # (ts, tot)
-        for ts, tot_i, lastf, dirty_i, qh, xi, redo in by_node[node]:
+        # prev = (ts, tot, db_start); seeded from the last PRE-WINDOW sample
+        # of this node when the shared day logs reach back that far
+        prev = None
+        _pre = pw.get("pre", {}).get(node)
+        if _pre is not None:
+            _pf = (_pre[1] + [""] * 9)[:9]
+            try: _pt = int(_pf[1])
+            except ValueError: _pt = None
+            prev = (_pre[0], _pt, _pf[8])
+        for ts, tot_i, lastf, dirty_i, qh, xi, redo, dbstart in by_node[node]:
             delta = None; rate = None; restarted = False
             if prev is not None and tot_i is not None and prev[1] is not None:
-                d = tot_i - prev[1]
-                if d < 0:
-                    restarted = True   # counter went backwards: instance restart
+                # restart guard: start time must MATCH across the interval;
+                # counter going backwards catches legacy rows without it
+                if (prev[2] and dbstart and prev[2] != dbstart) or tot_i < prev[1]:
+                    restarted = True
                 else:
+                    d = tot_i - prev[1]
                     delta = d
                     total_flush += d
                     te, pe = _ts_epoch(ts), _ts_epoch(prev[0])
@@ -31300,7 +31333,7 @@ def pw_derive_rows(pw):
                 behind = (xi_b - qh_b) / 1048576.0
             rows.append((ts, node, delta, rate, lastf, dirty_i, qh,
                          behind, restarted, redo))
-            prev = (ts, tot_i)
+            prev = (ts, tot_i, dbstart)
     summary = {"total_flush": total_flush,
                "peak_dirty": peak_dirty if peak_dirty >= 0 else None,
                "peak_dirty_ts": peak_dirty_ts,
@@ -31325,8 +31358,7 @@ def pagewriter_section_html(pw, meta):
     te0, te1 = _ts_epoch(meta.get("begin_ts", "")), _ts_epoch(meta.get("end_ts", ""))
     avg_rate = (s["total_flush"] / float(te1 - te0)) if (te0 is not None and te1 is not None and te1 > te0) else None
     h = ['<div class="note">%d sample(s); flushed %s pages in window (avg %s pg/s, peak %s pg/s at %s); '
-         'dirty peak %s at %s (avg %s). flush_d = delta of pgwr_actual_flush_total_num (cumulative '
-         'counter); last_batch/dirty are point-in-time; R = restart (interval excluded).</div>'
+         'dirty peak %s at %s (avg %s). R = restart (interval excluded).</div>'
          % (pw["n_data"], fmt_int(s["total_flush"]),
             ("%.1f" % avg_rate) if avg_rate is not None else "-",
             ("%.1f" % s["peak_rate"]) if s["peak_rate"] is not None else "-",
@@ -31334,16 +31366,25 @@ def pagewriter_section_html(pw, meta):
             fmt_int(s["peak_dirty"]) if s["peak_dirty"] is not None else "-",
             esc(s["peak_dirty_ts"] or "-"),
             ("%.0f" % s["avg_dirty"]) if s["avg_dirty"] is not None else "-")]
-    h.append('<table class="t"><tr><th>Sample Time</th><th>Node</th>'
-             '<th class="n">flush_d (pages)</th><th class="n">pg/s</th>'
-             '<th class="n">last_batch</th><th class="n">dirty pages</th>'
-             '<th>queue_head_lsn</th><th class="n">behind xlog (MB)</th>'
-             '<th>ckpt_redo_point</th></tr>')
+    # full kernel-native column names (user 2026-10-21: no over-abbreviated
+    # headers); the Node column is hidden on single-node reports and only
+    # appears when the series actually carries more than one node
+    multi_node = len(set(r[1] for r in rows)) > 1
+    h.append('<table class="t"><tr><th>Sample Time</th>%s'
+             '<th class="n">flush delta (pgwr_actual_flush_total_num)</th>'
+             '<th class="n">pages/s</th>'
+             '<th class="n">pgwr_last_flush_num</th>'
+             '<th class="n">remain_dirty_page_num</th>'
+             '<th>queue_head_page_rec_lsn</th>'
+             '<th class="n">behind xlog_insert (MB)</th>'
+             '<th>ckpt_redo_point</th></tr>'
+             % ('<th>Node</th>' if multi_node else ''))
     for ts, node, delta, rate, lastf, dirty, qh, behind, restarted, redo in rows:
         delta_cell = "R" if restarted else (fmt_int(delta) if delta is not None else "-")
-        h.append('<tr><td>%s</td><td>%s</td><td class="n">%s</td><td class="n">%s</td>'
+        node_cell = ('<td>%s</td>' % esc(node)) if multi_node else ''
+        h.append('<tr><td>%s</td>%s<td class="n">%s</td><td class="n">%s</td>'
                  '<td class="n">%s</td><td class="n">%s</td><td>%s</td><td class="n">%s</td><td>%s</td></tr>'
-                 % (esc(ts), esc(node), delta_cell,
+                 % (esc(ts), node_cell, delta_cell,
                     ("%.1f" % rate) if rate is not None else "-",
                     esc(lastf or "-"),
                     fmt_int(dirty) if dirty is not None else "-",
@@ -37221,7 +37262,7 @@ def text_pagew(win, repl_dir=None):
     (current queue length); behind = current_xlog_insert_lsn -
     queue_head_page_rec_lsn. R = restart (counter reset, interval excluded).
     Needs 'awr enable' sampler (one sample every 5 min)."""
-    lines = _text_banner("awr pagew detail", win)
+    lines = _text_banner("awr pagew flush", win)
     m = win["meta"]
     samples = (load_pw_samples(repl_dir, m.get("begin_ts", ""), m.get("end_ts", ""))
                if repl_dir else {"files": []})
@@ -37246,29 +37287,36 @@ def text_pagew(win, repl_dir=None):
                     s["peak_dirty_ts"] or "-",
                     ("%.0f" % s["avg_dirty"]) if s["avg_dirty"] is not None else "-"))
     lines.append("")
-    headers = ["time", "node", "flush_d", "pg/s", "last_batch", "dirty",
-               "queue_head_lsn", "behind_xlog_mb"]
+    # node column only when the series carries more than one node
+    # (user 2026-10-21); screen table keeps medium-width headers, the html
+    # report carries the full kernel-native names
+    multi_node = len(set(r[1] for r in rows)) > 1
+    headers = (["time", "node"] if multi_node else ["time"]) + \
+              ["flush_delta", "pages_per_s", "last_flush_num", "dirty_pages",
+               "queue_head_rec_lsn", "behind_xlog_mb"]
     out_rows = []
     # error minutes surface as gap rows so cadence breaks stay visible
     # (walk the sorted union of data + error sample timestamps)
     data_by_ts = {}
     for ts, node, delta, rate, lastf, dirty, qh, behind, restarted, redo in rows:
-        data_by_ts.setdefault(ts, []).append(
-            [ts, node,
-             "R" if restarted else (fmt_int(delta) if delta is not None else "-"),
-             ("%.1f" % rate) if rate is not None else "-",
-             lastf or "-",
-             fmt_int(dirty) if dirty is not None else "-",
-             qh or "-",
-             ("%.1f" % behind) if behind is not None else "-"])
+        r_ = ["R" if restarted else (fmt_int(delta) if delta is not None else "-"),
+              ("%.1f" % rate) if rate is not None else "-",
+              lastf or "-",
+              fmt_int(dirty) if dirty is not None else "-",
+              qh or "-",
+              ("%.1f" % behind) if behind is not None else "-"]
+        if multi_node:
+            r_ = [node] + r_
+        data_by_ts.setdefault(ts, []).append([ts] + r_)
     all_ts = sorted(set(list(data_by_ts.keys()) +
                         [ts for ts, kind, f in samples["rows"] if kind == "error"]))
     for t in all_ts:
         if t in data_by_ts:
             out_rows.extend(data_by_ts[t])
         else:
-            out_rows.append([t, "(sample error)"] + [""] * 6)
-    lines.append(_text_table(headers, out_rows, align="l" + "r" * 7))
+            out_rows.append([t, "(sample error)"] + [""] * (len(headers) - 1))
+    lines.append(_text_table(headers, out_rows,
+                             align="l" + ("l" if multi_node else "") + "r" * 6))
     return 0, "\n".join(lines)
 
 
@@ -37666,9 +37714,12 @@ _awr_lt_stack_sample() {
     #   remain_dirty_page_num        current dirty-page queue length
     #                               (+1 new dirty / -1 flushed) -- as-is
     #   the 4 LSN cols               point-in-time positions
+    # last col pg_postmaster_start_time: restart guard -- deltas are only
+    # valid between samples with the SAME start time (user 2026-10-21); a
+    # changed start time (or a counter that went backwards) marks R.
     local pf="$root/pw_$(date +%Y%m%d).log"
     out=$(PGCONNECT_TIMEOUT=15 PGOPTIONS='-c statement_timeout=15000' \
-          psql -d postgres -tAF',' -c "select node_name,pgwr_actual_flush_total_num,pgwr_last_flush_num,remain_dirty_page_num,queue_head_page_rec_lsn,queue_rec_lsn,current_xlog_insert_lsn,ckpt_redo_point from dbe_perf.global_pagewriter_status order by node_name" 2>/dev/null)
+          psql -d postgres -tAF',' -c "select node_name,pgwr_actual_flush_total_num,pgwr_last_flush_num,remain_dirty_page_num,queue_head_page_rec_lsn,queue_rec_lsn,current_xlog_insert_lsn,ckpt_redo_point,(select pg_postmaster_start_time()::timestamp(0)::text) from dbe_perf.global_pagewriter_status order by node_name" 2>/dev/null)
     if [ "$?" -ne 0 ] || [ -z "$out" ]; then
         printf '%s,error\n' "$ts" >> "$pf"
     else
