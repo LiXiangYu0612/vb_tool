@@ -34545,9 +34545,9 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                      '<tr><td>Time Squeeze (Softirq Starved)</td><td class="n%s">%s</td><td class="n">%s</td></tr>'
                      '</table>'
                      % (fmt_num(_sn["packets"]), fmt_num(_sn["packets"] / dur_os),
-                        thr_cell_cls(_sn["dropped"], 0, 100), fmt_num(_sn["dropped"]),
+                        thr_cell_cls(_sn["dropped"] / dur_os, 0, 100), fmt_num(_sn["dropped"]),
                         fmt_num(_sn["dropped"] / dur_os) if dur_os else "-",
-                        thr_cell_cls(_sn["squeezed"], 0, 1000), fmt_num(_sn["squeezed"]),
+                        thr_cell_cls(_sn["squeezed"] / dur_os, 0, 1000), fmt_num(_sn["squeezed"]),
                         fmt_num(_sn["squeezed"] / dur_os) if dur_os else "-"))
 
     if osd.get("netstat_ok"):
