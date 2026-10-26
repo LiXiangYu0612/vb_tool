@@ -42,17 +42,17 @@ vb_tool list
 |------|------|
 | `as [pid]` | 显示活跃会话信息 |
 | `asp <type> -b <begin> -e <end>` | 活跃会话概要分析 (cnt/event/waitchain/sql) |
-| `se <event_name>` / `se -l [keyword]` | 等待事件知识库（oerr 风格）：输入事件名（支持缩写/部分/带空格）回显**事件全称** + 含义 + **源码级触发点** + 等待原因 + 解决方案；417 个事件全集（LOCK/IO/STATUS/LWLOCK），触发点按内核源码核实，纯离线 |
+| `se <event_name>` / `se -l [keyword]` | 等待事件知识库（oerr 风格）：输入事件名（支持缩写、部分匹配、带空格）回显事件全称、含义、源码级触发点、等待原因与解决方案；覆盖 417 个事件（LOCK/IO/STATUS/LWLOCK），纯离线 |
 | `awr create` | 手动创建 AWR 单点快照（主库/备库均可，备库自动切换备库侧数据源） |
 | `awr enable` / `awr disable` | 启停 cron 定时采样（间隔由 `awr config interval` 控制，默认 60 分钟） |
 | `awr awrrpt begin <id> end <id>` | 生成两快照区间 AWR 报告 (HTML) |
 | `awr awrdiff begin <a> end <b> begin <c> end <d>` | 两区间对比报告 |
 | `awr awrdiff begin <x> end <y> baseline <id>` | 当前窗口 vs 基线对比（P1=基线参照，Δ=当前−基线） |
-| `awr baseline begin <id> end <id>` | **登记基线**：两端点快照+窗口分钟日志复制为自包含副本（`awrs/<port>/baselines/<id>/`），对 auto purge 与 `awr delete until` 免疫；要求 begin<end 且两端同 DB uptime |
+| `awr baseline begin <id> end <id>` | 登记基线：把两端点快照与窗口内的分钟采样日志复制为自包含副本（`awrs/<port>/baselines/<id>/`），不受自动清理影响；要求 begin < end 且两端同一 DB uptime |
 | `awr baseline info` | 列出已登记基线（id/端点/窗口/创建时间/STATUS） |
 | `awr baseline report <id>` | 生成基线窗口报告（同 awrrpt 链；默认名 `baseline_{db}_{b}_{e}.html`；SQL 文本自动回退主库共享库） |
 | `awr baseline delete <id>` | 删除基线副本（主库无感知） |
-| `awr topsql begin <id> end <id> [-n N] [-m <dim>]` | 屏幕输出区间 Top SQL（wdr_topsql 同款列；维度 dbtime/cpu/io/plan/lreads/preads/memory/spill/calls/rows（与 awrrpt 第 11 章 9 维对齐；memory/spill=statement_mem 的 sort+hash mem/spill，KB），默认 dbtime，-n 默认 10；纯文本不生成文件） |
+| `awr topsql begin <id> end <id> [-m <dim>] [-n N]` | 屏幕输出区间 Top SQL（wdr_topsql 同款列；`-m` 可选 dbtime / cpu / io / plan / lreads / preads / memory / spill / calls / rows，默认 dbtime；`-n` 默认 10；不生成文件） |
 | `awr event begin <id> end <id> [-E <event>]` | 屏幕输出 Top 等待事件（CPU 时间+事件按总等待排序前 5 行，wdr_event 风格；-E 只看指定事件，忽略大小写） |
 | `awr summary begin <id> end <id>` | 屏幕输出单行负载概要（dbtime/aas/tps/iops/mbps/wal_mb/s 等 12 列，wdr_summary 风格；iops/mbps/wal 需快照含 file_iostat，老快照显示 '-'） |
 | `awr tabstat begin <id> end <id> -d <db> -s <schema> -t <table>` | 屏幕输出单表区间扫描/DML 增量与存活/死元组（wdr_tabstat 风格，任意库的表均可） |
@@ -62,6 +62,9 @@ vb_tool list
 | `awr replstat begin <id> end <id>` | 屏幕输出区间**每分钟复制状态**（sent/write/flush/replay LSN + net/fsync/apply/total 字节 lag；全零健康分钟隐藏，awrrpt Replication Stat 同源同列） |
 | `awr replslot begin <id> end <id>` | 屏幕输出区间**每分钟复制槽**样本（slot/type/active/restart_lsn 等，awrrpt Replication Slots 同源同列） |
 | `awr replay begin <id> end <id>` | 屏幕输出区间**每分钟 WAL 回放**明细（**备库侧**：state/peer + sent/received/flush/replay LSN + 四段字节 lag + sync%/channel，awrrpt Wal Receiver 同源同列；每分钟全显不隐藏；主库无 walreceiver 显示提示） |
+| `awr ltx begin <id> end <id>` | 屏幕输出区间长事务监控（每 5 分钟一行，awrrpt 同源同列） |
+| `awr pagew begin <id> end <id>` | 屏幕输出区间 pagewriter 刷脏序列（每 5 分钟一行，需 `awr enable` 采样） |
+| `awr sqlhist <sql_id> begin <id> end <id>` | 单条 SQL 在窗口内的逐区间执行历史 |
 | `awr list [YYYY-MM-DD]` | 快照清单（snap_id 倒序，默认最新 30 条；指定日期列出全天） |
 | `awr show` | 总览：运行状态 / 采样间隔 / 保留期 / 最老最新快照 |
 | `awr delete until <time>` | 手动按时间清理快照 / 采样日志 / HTML 报告 |
@@ -74,7 +77,7 @@ vb_tool list
 | `tps` / `tabstat` / `tabsize` / `sqlstat` | 性能与对象统计 |
 | `lock_details` / `lockchain` | 锁等待分析 |
 | `sqlhc` | SQL 健康检查（支持 .log/.csv 及其 .gz 压缩日志） |
-| `vtop` | oratop 风格实时监控 + **11 个子屏**：主屏 OS（CPU 8 态全称/PROCS/MEM/PGSTAT/PGCACHE/NET/SOCKET/DSK/IO/FS）+ VASTBASE（SESS/LTX/ISTAT/WAIT/XLOG/REPL/DBMEM/MEMCTX/TOPMEM/TOPSQL/LOCK/LWLOCK）；子屏 `s`会话 `l`长事务 `a`负载速率 `e`等待事件 `x`WAL `r`复制 `m`内存 `t`TOPSQL `k`锁 —— 主屏 Enter/ESC 开命令行输单字母进入、子屏 ESC 返回；跨帧增量、方框化、阈值着色、终端能力自适应；`-i`/`--once`/`--color`/`--no-color`/`--plain` |
+| `vtop` | oratop 风格实时监控：主屏显示 OS 与数据库两块，11 个子屏（`s` 会话、`l` 长事务、`a` 负载速率、`e` 等待事件、`x` WAL、`r` 复制、`m` 内存、`t` TOPSQL、`k` 锁等），跨帧增量、阈值着色、终端能力自适应；`-i` / `--once` / `--color` / `--no-color` / `--plain` |
 
 完整命令见 `vb_tool list`。
 
