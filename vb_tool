@@ -30020,9 +30020,11 @@ PSQL4
       for _odb in $_odbs; do
           PGCONNECT_TIMEOUT=$_ct PGOPTIONS="$_st" psql -d "$_odb" -tAF',' -c "select '$_odb',schemaname,relname,coalesce(seq_scan,0),coalesce(seq_tup_read,0),coalesce(idx_scan,0),coalesce(idx_tup_fetch,0),coalesce(n_tup_ins,0),coalesce(n_tup_upd,0),coalesce(n_tup_del,0),coalesce(n_tup_hot_upd,0),coalesce(n_live_tup,0),coalesce(n_dead_tup,0) from pg_stat_user_tables" 2>/dev/null
       done; } > "$dbd/object_tables.csv"
+    # object_dead walks pg_class so global relisshared catalogs land here too;
+    # postgres-pass-only, same rule as object_iostat below (2026-10-26).
     { echo "dbname,schema,object,table_age,relpages,reltuples,n_dml_tup,n_live_tup,n_dead_tup"
       for _odb in $_odbs; do
-          PGCONNECT_TIMEOUT=$_ct PGOPTIONS="$_st" psql -d "$_odb" -tAF',' -c "select '$_odb',n.nspname,c.relname,age(c.relfrozenxid64),c.relpages,c.reltuples,coalesce(pg_stat_get_tuples_changed(c.oid),0),coalesce(pg_stat_get_live_tuples(c.oid),0),coalesce(pg_stat_get_dead_tuples(c.oid),0) from pg_class c left join pg_namespace n on n.oid=c.relnamespace where c.relkind in ('r','t','m')" 2>/dev/null
+          PGCONNECT_TIMEOUT=$_ct PGOPTIONS="$_st" psql -d "$_odb" -tAF',' -c "select '$_odb',n.nspname,c.relname,age(c.relfrozenxid64),c.relpages,c.reltuples,coalesce(pg_stat_get_tuples_changed(c.oid),0),coalesce(pg_stat_get_live_tuples(c.oid),0),coalesce(pg_stat_get_dead_tuples(c.oid),0) from pg_class c left join pg_namespace n on n.oid=c.relnamespace where c.relkind in ('r','t','m') and ('$_odb' = 'postgres' or not c.relisshared)" 2>/dev/null
       done; } > "$dbd/object_dead.csv"
     # ---- object buffer I/O across all databases (2026-10-15; source =
     # dbe_perf.statio_all_tables, system catalogs included, user 2026-10-15).
@@ -30031,10 +30033,14 @@ PSQL4
     # index. Partitioned parents aggregate heap/index kernel-side; toast/tidx
     # are NULL at parent level (kernel view limitation) -> coalesce to 0 here.
     # pg_toast rows are EXCLUDED: the owning table row's toast columns already
-    # carry that same I/O, keeping them would double count. ----
+    # carry that same I/O, keeping them would double count.
+    # Shared relisshared catalogs (one physical table + one instance-wide stats
+    # counter; every database reads back the same row) are kept ONLY on the
+    # postgres pass; other per-db passes skip them, else one object repeats
+    # under every dbname and Top-N/%Total sums count it N times (2026-10-26). ----
     { echo "dbname,schema,object,heap_blks_read,heap_blks_hit,idx_blks_read,idx_blks_hit,toast_blks_read,toast_blks_hit,tidx_blks_read,tidx_blks_hit"
       for _odb in $_odbs; do
-          PGCONNECT_TIMEOUT=$_ct PGOPTIONS="$_st" psql -d "$_odb" -tAF',' -c "select '$_odb',schemaname,relname,coalesce(heap_blks_read,0),coalesce(heap_blks_hit,0),coalesce(idx_blks_read,0),coalesce(idx_blks_hit,0),coalesce(toast_blks_read,0),coalesce(toast_blks_hit,0),coalesce(tidx_blks_read,0),coalesce(tidx_blks_hit,0) from dbe_perf.statio_all_tables where schemaname <> 'pg_toast'" 2>/dev/null
+          PGCONNECT_TIMEOUT=$_ct PGOPTIONS="$_st" psql -d "$_odb" -tAF',' -c "select '$_odb',schemaname,relname,coalesce(heap_blks_read,0),coalesce(heap_blks_hit,0),coalesce(idx_blks_read,0),coalesce(idx_blks_hit,0),coalesce(toast_blks_read,0),coalesce(toast_blks_hit,0),coalesce(tidx_blks_read,0),coalesce(tidx_blks_hit,0) from dbe_perf.statio_all_tables where schemaname <> 'pg_toast' and ('$_odb' = 'postgres' or not exists (select 1 from pg_class c where c.oid = relid and c.relisshared))" 2>/dev/null
       done; } > "$dbd/object_iostat.csv"
     # ---- per-index buffer I/O across all databases (2026-10-15; source =
     # dbe_perf.statio_all_indexes; feeds the Top-Tables First/Second/Third
@@ -30043,10 +30049,12 @@ PSQL4
     # full partition list and sum -- OG pgstatfuncs.cpp, verified live on the
     # 204 VB instance) keyed by parent table + parent index names, so NO
     # pg_partition resolution chain is needed. pg_toast rows excluded: the
-    # owning table's tidx columns already count that I/O. ----
+    # owning table's tidx columns already count that I/O.
+    # Shared relisshared catalogs follow the same postgres-pass-only rule
+    # (2026-10-26). ----
     { echo "dbname,schema,object,index,idx_blks_read,idx_blks_hit"
       for _odb in $_odbs; do
-          PGCONNECT_TIMEOUT=$_ct PGOPTIONS="$_st" psql -d "$_odb" -tAF',' -c "select '$_odb',schemaname,relname,indexrelname,coalesce(idx_blks_read,0),coalesce(idx_blks_hit,0) from dbe_perf.statio_all_indexes where schemaname <> 'pg_toast'" 2>/dev/null
+          PGCONNECT_TIMEOUT=$_ct PGOPTIONS="$_st" psql -d "$_odb" -tAF',' -c "select '$_odb',schemaname,relname,indexrelname,coalesce(idx_blks_read,0),coalesce(idx_blks_hit,0) from dbe_perf.statio_all_indexes where schemaname <> 'pg_toast' and ('$_odb' = 'postgres' or not exists (select 1 from pg_class c where c.oid = relid and c.relisshared))" 2>/dev/null
       done; } > "$dbd/object_index_iostat.csv"
     # ---- instance-wide physical I/O totals (2026-09-16; replaces the per-file
     # gs_file_stat capture AND the Top-10 file-IO report tables). Source =
