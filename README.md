@@ -77,7 +77,7 @@ vb_tool list
 | `tps` / `tabstat` / `tabsize` / `sqlstat` | 性能与对象统计 |
 | `lock_details` / `lockchain` | 锁等待分析 |
 | `sqlhc` | SQL 健康检查（支持 .log/.csv 及其 .gz 压缩日志） |
-| `vtop` | oratop 风格实时监控：主屏显示 OS 与数据库两块，11 个子屏（`s` 会话、`l` 长事务、`a` 负载速率、`e` 等待事件、`x` WAL、`r` 复制、`m` 内存、`t` TOPSQL、`k` 锁等），跨帧增量、阈值着色、终端能力自适应；`-i` / `--once` / `--color` / `--no-color` / `--plain` |
+| `vtop` | oratop 风格实时监控：主屏显示 OS 与数据库两块，11 个子屏（`s` 会话、`l` 长事务、`a` 负载速率、`e` 等待事件、`x` WAL、`r` 复制、`m` 内存、`t` TOPSQL、`k` 锁、`g` 线程栈），跨帧增量、阈值着色、终端能力自适应；`-i` / `--once` / `--color` / `--no-color` / `--plain` |
 
 完整命令见 `vb_tool list`。
 
