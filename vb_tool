@@ -29159,7 +29159,7 @@ Usage: vb_tool awr <create|enable|disable|awrrpt|awrdiff|baseline|topsql|event|s
   baseline begin <id> end <id> | info | report <id> | delete <id>
                            register / list / render / drop baselines
   topsql  begin <id> end <id> [-n N] [-m <dim>]
-                           Top SQL on screen; dim = dbtime|cpu|io|calls|lreads|preads|rows
+                           Top SQL on screen; dim = dbtime|cpu|io|plan|lreads|preads|memory|spill|calls|rows
   event   begin <id> end <id> [-E <event>]
                            top wait events; -E one event only
   summary begin <id> end <id>
@@ -36520,25 +36520,39 @@ def _text_table(headers, rows, align=None):
     return "\n".join(out)
 
 # topsql ranking dimensions; values are statement.csv delta column names
-# (preads is computed: fetched - hit)
+# (preads is computed: fetched - hit; memory/spill come from statement_mem.csv
+# as sort+hash sums in KB -- same semantics as awrrpt section 11: kernel
+# instruments Sort executor nodes and HashJoin only, aggregate-internal
+# sorts and HashAgg are NOT counted)
 DIM_COLUMNS = {
     "dbtime": "db_time",
     "cpu":    "cpu_time",
     "io":     "data_io_time",
-    "calls":  "n_calls",
+    "plan":   "plan_time",
     "lreads": "n_blocks_fetched",
     "preads": None,
+    "memory": None,
+    "spill":  None,
+    "calls":  "n_calls",
     "rows":   "n_returned_rows",
 }
+MEM_DIM_COLUMNS = ("memory", "spill")   # ranked from statement_mem.csv (KB)
 
-def _dim_value(metric, d):
+def _dim_value(metric, d, stm=None):
     """Dimension value of one statement delta row; None = off this board
-    (negative delta -- wdr semantics NULLs the row)."""
+    (negative delta -- wdr semantics NULLs the row). stm = the statement_mem
+    delta row of the same unique_sql_id (None = not captured)."""
     if metric == "preads":
         v = to_num(d.get("n_blocks_fetched", 0)) - to_num(d.get("n_blocks_hit", 0))
+    elif metric == "memory":
+        v = ((to_num(stm.get("sort_mem_used", 0)) + to_num(stm.get("hash_mem_used", 0)))
+             if stm else None)
+    elif metric == "spill":
+        v = ((to_num(stm.get("sort_spill_size", 0)) + to_num(stm.get("hash_spill_size", 0)))
+             if stm else None)
     else:
         v = to_num(d.get(DIM_COLUMNS[metric], 0))
-    return v if v >= 0 else None
+    return v if (v is not None and v >= 0) else None
 
 def _win_tr_label(win):
     """wdr-style compact window label for the time_range column ('0911
@@ -36581,13 +36595,17 @@ def _topsql_rows(win, metric, top_n):
     """text_topsql data rows (no banner/header); None = no usable rows."""
     ST = delta_rows(win, "statement", "unique_sql_id",
                     ["n_calls", "db_time", "cpu_time", "data_io_time",
-                     "execution_time", "n_blocks_fetched", "n_blocks_hit",
-                     "n_returned_rows"])
+                     "plan_time", "execution_time", "n_blocks_fetched",
+                     "n_blocks_hit", "n_returned_rows"])
+    STM = (delta_rows(win, "statement_mem", "unique_sql_id",
+                      ["sort_mem_used", "hash_mem_used",
+                       "sort_spill_size", "hash_spill_size"])
+           if metric in MEM_DIM_COLUMNS else {})
     board = []
     for k, d in ST.items():
         if to_num(d.get("n_calls", 0)) <= 0:
             continue
-        v = _dim_value(metric, d)
+        v = _dim_value(metric, d, STM.get(k))
         if v is None:
             continue
         board.append((v, k, d))
@@ -36610,7 +36628,7 @@ def _topsql_rows(win, metric, top_n):
         pct = 100.0 * v / total if total > 0 else 0.0
         rows_delta = to_num(d.get("n_returned_rows", 0))
         rows_per = rows_delta / calls if (calls > 0 and rows_delta >= 0) else None
-        total_cell = ("%.1f" % (v / 1e6)) if metric in ("dbtime", "cpu", "io") else ("%d" % v)
+        total_cell = ("%.1f" % (v / 1e6)) if metric in ("dbtime", "cpu", "io", "plan") else ("%d" % v)
         rows.append([row.get("user_name", ""), str(k), "%d" % calls,
                      total_cell,                               # total of the -m dimension
                      "%d" % pr if pr >= 0 else "-",
@@ -36628,6 +36646,19 @@ def text_topsql(win, metric, top_n, detail_wins=None):
     list of consecutive-snapshot interval windows) appends an 'awr topsql
     snapshot' section: one banner, one table, time_range leading column."""
     lines = _text_banner("awr topsql summary", win, extra="dim: %s" % metric)
+    if metric in MEM_DIM_COLUMNS:
+        # statement_mem one-sided capture would present full-cumulative
+        # counters as a window delta (same guard as awrrpt section 11);
+        # both sides absent (legacy snaps) also cannot rank -- precise
+        # notes, not the generic no-rows message
+        _smb = bool(win["db"].get(("begin", "statement_mem"), []))
+        _sme = bool(win["db"].get(("end", "statement_mem"), []))
+        if _smb != _sme:
+            lines.append("(no rows: statement_mem capture missing on one side of the window (older snapshot))")
+            return 0, "\n".join(lines)
+        if not _smb:
+            lines.append("(no rows: snapshots carry no statement_mem data (dim '%s' needs it))" % metric)
+            return 0, "\n".join(lines)
     rows = _topsql_rows(win, metric, top_n)
     if rows is None:
         lines.append("(no rows: window has no statement deltas on dimension '%s')" % metric)
@@ -36636,9 +36667,10 @@ def text_topsql(win, metric, top_n, detail_wins=None):
     # ...); time dimensions print seconds, count dimensions print integers.
     # avg_dbtime / avg_rows stay dimension-independent.
     dim_total_headers = {"dbtime": "total_dbtime", "cpu": "total_cputime",
-                         "io": "total_iotime", "calls": "total_calls",
-                         "lreads": "total_lreads", "preads": "total_preads",
-                         "rows": "total_rows"}
+                         "io": "total_iotime", "plan": "total_plantime",
+                         "calls": "total_calls", "lreads": "total_lreads",
+                         "preads": "total_preads", "rows": "total_rows",
+                         "memory": "total_mem", "spill": "total_spill"}
     headers = ["uname", "sql_id", "calls", dim_total_headers[metric],
                "total_pr", "avg_dbtime", "avg_et", "avg_cpu", "avg_io",
                "avg_cr", "avg_pr", "avg_rows", "pct%"]
@@ -37526,8 +37558,11 @@ def main():
     # commands (each snap is ~20 small gz CSVs, gzip+DictReader overhead
     # dominates when only 1-6 tables are needed). Set is built from grep'ing
     # `delta_rows(win, "<table>"` inside every text_* function.
+    # topsql's set is metric-conditional: -m memory/spill also rank from
+    # statement_mem.csv (KB), so it rides along only for those dims.
     TEXT_DB_TABLES = {
-        "topsql":  frozenset({"statement"}),
+        "topsql":  frozenset({"statement", "statement_mem"}
+                             if metric in MEM_DIM_COLUMNS else {"statement"}),
         "event":   frozenset({"instance_time", "wait_events"}),
         "summary": frozenset({"instance_time", "database", "statement",
                               "rel_iostat", "file_redo_iostat"}),

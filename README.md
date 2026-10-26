@@ -53,7 +53,7 @@ vb_tool list
 | `awr baseline info` | 列出已登记基线（id/端点/窗口/创建时间/STATUS） |
 | `awr baseline report <id>` | 生成基线窗口报告（同 awrrpt 链；默认名 `baseline_{db}_{b}_{e}.html`；SQL 文本自动回退主库共享库） |
 | `awr baseline delete <id>` | 删除基线副本（主库无感知） |
-| `awr topsql begin <id> end <id> [-n N] [-m <dim>]` | 屏幕输出区间 Top SQL（wdr_topsql 同款列；维度 dbtime/cpu/io/calls/lreads/preads/rows，默认 dbtime，-n 默认 10；纯文本不生成文件） |
+| `awr topsql begin <id> end <id> [-n N] [-m <dim>]` | 屏幕输出区间 Top SQL（wdr_topsql 同款列；维度 dbtime/cpu/io/plan/lreads/preads/memory/spill/calls/rows（与 awrrpt 第 11 章 9 维对齐；memory/spill=statement_mem 的 sort+hash mem/spill，KB），默认 dbtime，-n 默认 10；纯文本不生成文件） |
 | `awr event begin <id> end <id> [-E <event>]` | 屏幕输出 Top 等待事件（CPU 时间+事件按总等待排序前 5 行，wdr_event 风格；-E 只看指定事件，忽略大小写） |
 | `awr summary begin <id> end <id>` | 屏幕输出单行负载概要（dbtime/aas/tps/iops/mbps/wal_mb/s 等 12 列，wdr_summary 风格；iops/mbps/wal 需 v2.1.0+ 采集的快照，老快照显示 '-'） |
 | `awr tabstat begin <id> end <id> -d <db> -s <schema> -t <table>` | 屏幕输出单表区间扫描/DML 增量与存活/死元组（wdr_tabstat 风格，任意库的表均可） |
