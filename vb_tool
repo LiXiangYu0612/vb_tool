@@ -29249,6 +29249,9 @@ _awr_collect() {
     if [ -r /proc/net/snmp ]; then cp /proc/net/snmp "$osd/net_snmp" 2>/dev/null; fi
     if [ -r /proc/net/netstat ]; then cp /proc/net/netstat "$osd/net_netstat" 2>/dev/null; fi
     if [ -r /proc/net/softnet_stat ]; then cp /proc/net/softnet_stat "$osd/softnet_stat" 2>/dev/null; fi
+    # buddyinfo: free pages per zone per order -> snapshot-level fragmentation
+    # (2MB+ contiguous availability), rendered as Begin/End in the report
+    if [ -r /proc/buddyinfo ]; then cp /proc/buddyinfo "$osd/buddyinfo" 2>/dev/null; fi
     # bond 三态 (mode / active slave / slave list); /proc/net/bonding absent = no bond
     if [ -d /proc/net/bonding ]; then
         : > "$osd/bonding" 2>/dev/null
@@ -30437,7 +30440,7 @@ def load_window(d):
         except Exception:
             w["meta"] = {}
     for phase in ("begin", "end"):
-        for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi", "softnet_stat", "bonding", "net_rtt", "df_fs", "file_nr", "db_proc", "limits", "db_fd_types", "db_tcp_states", "sysctl", "dmesg"):
+        for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi", "softnet_stat", "buddyinfo", "bonding", "net_rtt", "df_fs", "file_nr", "db_proc", "limits", "db_fd_types", "db_tcp_states", "sysctl", "dmesg"):
             p = os.path.join(d, "os", phase, f)
             w["os"][(phase, f)] = _read_os_text(p) if os.path.isfile(p) else ""
         for t in ("statement", "statement_mem", "wait_events", "instance_time", "database", "pagewriter",
@@ -30468,7 +30471,7 @@ def load_snap(d, tables=None):
             s["meta"] = json.load(open(mp))
         except Exception:
             s["meta"] = {}
-    for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi", "softnet_stat", "bonding", "net_rtt", "df_fs", "file_nr", "db_proc", "limits", "db_fd_types", "db_tcp_states", "sysctl", "dmesg"):
+    for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi", "softnet_stat", "buddyinfo", "bonding", "net_rtt", "df_fs", "file_nr", "db_proc", "limits", "db_fd_types", "db_tcp_states", "sysctl", "dmesg"):
         p = os.path.join(d, "os", f)
         s["os"][f] = _read_os_text(p) if os.path.isfile(p) else ""
     _DB_TABLES = ("statement", "statement_mem", "wait_events", "instance_time", "database", "pagewriter",
@@ -30571,7 +30574,7 @@ def build_window_from_snaps(begin_dir, end_dir, sqltext_root=None, load_sqltext=
     b = load_snap(begin_dir, db_tables)
     e = load_snap(end_dir, db_tables)
     win = {"meta": {}, "os": {}, "db": {}}
-    for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi", "softnet_stat", "bonding", "net_rtt", "df_fs", "file_nr", "db_proc", "limits", "db_fd_types", "db_tcp_states", "sysctl", "dmesg"):
+    for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi", "softnet_stat", "buddyinfo", "bonding", "net_rtt", "df_fs", "file_nr", "db_proc", "limits", "db_fd_types", "db_tcp_states", "sysctl", "dmesg"):
         win["os"][("begin", f)] = b["os"].get(f, "")
         win["os"][("end", f)] = e["os"].get(f, "")
     for t in ("statement", "statement_mem", "wait_events", "instance_time", "database", "pagewriter",
@@ -31816,8 +31819,8 @@ def load_os_samples(sdir, begin_ts, end_ts):
     + zone watermarks (free/min/low/high kB, summed over all zones); older
     7-value logs without them stay valid."""
     out = {"cpu": [], "pg": [], "mem": [], "dsk": [], "net": [], "tcp": [], "tcpext": [],
-           "ssrtt": [], "sspeer": [], "thp": [], "conntrack": [], "lstn": [], "netmiss": [],
-           "buddy": [], "files": []}
+           "ssrtt": [], "sspeer": [], "thp": [], "conntrack": [], "lstn": [], "lstnsock": [],
+           "netmiss": [], "files": []}
     if not sdir or not os.path.isdir(sdir):
         return out
     lo = _ts_shift(begin_ts, -65)
@@ -31868,9 +31871,9 @@ def load_os_samples(sdir, begin_ts, end_ts):
                 if payload.count(",") == 3:
                     out[typ].append((ts, payload))
                 continue
-            if typ in ("conntrack", "lstn", "netmiss", "buddy"):
+            if typ in ("conntrack", "lstn", "lstnsock", "netmiss"):
                 # conntrack: count,max ; lstn: recvq,sendq ; netmiss: iface,missed
-                # buddy: total_free,order9_plus (2 payload fields = 1 comma)
+                # lstnsock: state,count (2 payload fields = 1 comma)
                 if payload.count(",") == 1:
                     out[typ].append((ts, payload))
                 continue
@@ -31884,7 +31887,7 @@ def load_os_samples(sdir, begin_ts, end_ts):
             except Exception:
                 continue
     for k in ("cpu", "pg", "mem", "dsk", "net", "tcp", "tcpext", "ssrtt", "sspeer",
-              "thp", "conntrack", "lstn", "netmiss", "buddy"):
+              "thp", "conntrack", "lstn", "lstnsock", "netmiss"):
         out[k].sort(key=lambda r: r[0])
     return out
 
@@ -34384,23 +34387,37 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                      '<tr><td>thp_collapse_alloc</td><td class="n">%d</td></tr></table>'
                      % tuple(int(v) for v in _thpd))
 
-    # Memory fragmentation (buddyinfo per-minute gauge): % of free memory NOT
-    # available as 2MB+ contiguous blocks = fragmentation. window max = worst.
-    if os_smp is not None and os_smp.get("buddy"):
-        _frag = 0.0; _tot = 0; _big = 0
-        for _, _p in os_smp["buddy"]:
-            _f2 = _p.split(",")
-            if len(_f2) == 2:
-                _t, _b = int(_f2[0]), int(_f2[1])
-                if _t > 0:
-                    _frag = max(_frag, 100.0 * (1.0 - _b / _t))
-                    _tot, _big = _t, _b
+    # Memory fragmentation from the BEGIN and END snapshots (/proc/buddyinfo):
+    # free pages per zone per order -> how much of free memory sits in 2MB+
+    # contiguous blocks (order >= 9). 1 - big/total = fragmentation %; the
+    # gap between Begin and End is how much it moved inside the window.
+    def _bud(phase):
+        tot = big = 0
+        for _ln in (win["os"].get((phase, "buddyinfo"), "") or "").splitlines():
+            _f = _ln.split()
+            if len(_f) < 5 or _f[0] != "Node":
+                continue
+            for _i, _v in enumerate(_f[4:]):
+                if not _v.isdigit():
+                    continue
+                tot += int(_v)
+                if _i >= 9:
+                    big += int(_v)
+        return tot, big
+    _bt, _bb = _bud("begin")
+    _et, _eb = _bud("end")
+    if _bt or _et:
+        def _fragpct(t, b):
+            return ("%.2f%%" % (100.0 * (1.0 - b / t))) if t else "-"
         parts.append('<div class="sub">Memory fragmentation</div>')
-        parts.append('<table class="t"><tr><th>Metric</th><th class="n">Value</th></tr>'
-                     '<tr><td>fragmentation</td><td class="n">%.1f%%</td></tr>'
-                     '<tr><td>free pages</td><td class="n">%s</td></tr>'
-                     '<tr><td>free as 2MB+ blocks</td><td class="n">%s</td></tr></table>'
-                     % (_frag, fmt_int(_tot), fmt_int(_big)))
+        parts.append('<table class="t"><tr><th>Metric</th><th class="n">Begin</th>'
+                     '<th class="n">End</th></tr>'
+                     '<tr><td>free pages</td><td class="n">%s</td><td class="n">%s</td></tr>'
+                     '<tr><td>free 2MB+ pages</td><td class="n">%s</td><td class="n">%s</td></tr>'
+                     '<tr><td>fragmentation</td><td class="n">%s</td><td class="n">%s</td></tr>'
+                     '</table>'
+                     % (fmt_int(_bt), fmt_int(_et), fmt_int(_bb), fmt_int(_eb),
+                        _fragpct(_bt, _bb), _fragpct(_et, _eb)))
 
     sub("Memory / Paging")
     parts.append('<table class="t"><tr><th>Metric</th><th class="n">Total</th>'
@@ -34683,17 +34700,40 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             parts.append('<div class="sub">Top 10 by RTT</div>')
             parts.append(_phdr + _peer_rows(sorted(_rttconns, key=lambda c: -c["rtt_ms"])[:10]) + '</table>')
 
-    # Listener accept-queue gauge (VB port; per-minute ss -lnt). Recv-Q = current
-    # accept-queue depth (pre-overflow signal), Send-Q = listen backlog capacity.
-    if os_smp is not None and os_smp.get("lstn"):
-        _lmax = max(int(p.split(",")[0]) for _, p in os_smp["lstn"])
-        _lcap = max(int(p.split(",")[1]) for _, p in os_smp["lstn"])
+    # Listener, per minute: the listen socket's Recv-Q (accepted-not-yet queue,
+    # the pre-overflow signal) and Send-Q (backlog capacity), plus how many TCP
+    # sockets in total sit on the DB port in each state (ESTAB / TIME-WAIT /
+    # CLOSE-WAIT / ...). Both come from the same minute's ss pass.
+    if os_smp is not None and (os_smp.get("lstn") or os_smp.get("lstnsock")):
+        _lq = {ts: p.split(",") for ts, p in os_smp.get("lstn", [])}
+        _ls = {}
+        for _ts, _p in os_smp.get("lstnsock", []):
+            _f = _p.split(",")
+            if len(_f) == 2:
+                _ls.setdefault(_ts, {})[_f[0]] = int(_f[1])
+        _order = ["LISTEN", "ESTAB", "SYN-SENT", "SYN-RECV", "FIN-WAIT-1", "FIN-WAIT-2",
+                  "TIME-WAIT", "CLOSE-WAIT", "CLOSING", "LAST-ACK"]
+        _states = sorted({s for d in _ls.values() for s in d},
+                         key=lambda s: (_order.index(s) if s in _order else 99, s))
         parts.append('<div class="sub">Listener accept queue</div>')
-        parts.append('<table class="t"><tr><th>Metric</th><th class="n">Value</th></tr>'
-                     '<tr><td>Recv-Q max</td><td class="n">%d</td></tr>'
-                     '<tr><td>Send-Q</td><td class="n">%d</td></tr>'
-                     '<tr><td>Peak fill</td><td class="n">%.1f%%</td></tr></table>'
-                     % (_lmax, _lcap, (100.0 * _lmax / _lcap) if _lcap else 0.0))
+        _lh = ['<table class="t"><tr><th>Time</th><th class="n">Recv-Q</th>'
+               '<th class="n">Send-Q</th>']
+        _lh += ['<th class="n">%s</th>' % esc(_s) for _s in _states]
+        _lh.append('</tr>')
+        for _ts in sorted(set(_lq) | set(_ls)):
+            _q = _lq.get(_ts, ["-", "-"])
+            _row = _ls.get(_ts, {})
+            _lh.append('<tr><td>%s</td><td class="n">%s</td><td class="n">%s</td>%s</tr>'
+                       % (esc(_ts), esc(_q[0]), esc(_q[1]),
+                          "".join('<td class="n">%s</td>' % _row.get(_s, "-")
+                                  for _s in _states)))
+        _lh.append('</table>')
+        parts.append("".join(_lh))
+        note("Recv-Q = connections completed but not yet accepted by the listener "
+             "(grows when the backend cannot keep up; overflow shows up as "
+             "ListenOverflows above). Send-Q = listen backlog. "
+             "The state columns count every TCP socket whose LOCAL port is the "
+             "DB port that minute; '-' = no row logged by the sampler.")
     _sn = osd.get("softnet")
     if _sn is not None:
         sub("Softnet")
@@ -38207,8 +38247,9 @@ _awr_lt_stack_sample() {
 #   thp,<ts>,compact_stall,compact_fail,thp_fault_alloc,thp_collapse_alloc (vmstat)
 #   conntrack,<ts>,count,max   (nf_conntrack; row omitted when module absent)
 #   lstn,<ts>,recvq,sendq      (VB-port listener accept queue; ss -lnt4)
+#   lstnsock,<ts>,<state>,<count>  (TCP sockets whose LOCAL port is the DB
+#          port, one row per state per minute; ss -tan4 sport = :PORT)
 #   netmiss,<ts>,iface,rx_missed (sysfs rx_missed_errors, only when non-zero)
-#   buddy,<ts>,total_free,order9_plus (buddyinfo; 2MB+ contiguous free = fragmentation inverse)
 #   ssrtt,<ts>,conns,rtt_min,rtt_avg,rtt_max,rtt_p95,worst_peer,worst_rtt
 #          (ss -ti over ESTABLISHED, loopback peers excluded; rtt = kernel
 #           smoothed estimate in ms; worst_rtt is worst_peer's rtt. Row is
@@ -38306,11 +38347,6 @@ _awr_repl_sample() {
         /^compact_fail /       { cfa=$2 }
         /^thp_fault_alloc /    { tfa=$2 }
         /^thp_collapse_alloc / { tca=$2 }
-        # buddyinfo: per-zone per-order free pages. $5=order0 ... $15=order10;
-        # bbig = order>=9 (2MB+ contiguous) = THP/shared_buffers 可用的连续大块
-        /^Node / {
-            for (i = 5; i <= NF; i++) { btot += $i; if (i >= 14) bbig += $i }
-        }
         /^MemTotal:/      { mt=$2 }
         /^MemFree:/       { mfr=$2 }
         /^MemAvailable:/  { mav=$2 }
@@ -38365,9 +38401,8 @@ _awr_repl_sample() {
             if (tcpok) print "tcp," ts "," taop+0 "," tpop+0 "," tces+0 "," tosg+0 "," trsg+0
             if (extok) print "tcpext," ts "," tld+0 "," tlo+0 "," tto+0 "," tsr+0
             if (cst != "" || tfa != "") print "thp," ts "," cst+0 "," cfa+0 "," tfa+0 "," tca+0
-            if (btot > 0) print "buddy," ts "," btot+0 "," bbig+0
         }
-    ' /proc/stat /proc/vmstat /proc/meminfo /proc/zoneinfo /proc/buddyinfo /proc/diskstats /proc/net/dev /proc/net/snmp /proc/net/netstat >> "$of" 2>/dev/null
+    ' /proc/stat /proc/vmstat /proc/meminfo /proc/zoneinfo /proc/diskstats /proc/net/dev /proc/net/snmp /proc/net/netstat >> "$of" 2>/dev/null
     # ---- conntrack count (firewall/nat only; file absent = no conntrack module) ----
     if [ -r /proc/sys/net/netfilter/nf_conntrack_count ]; then
         ccount=$(cat /proc/sys/net/netfilter/nf_conntrack_count 2>/dev/null)
@@ -38384,13 +38419,22 @@ _awr_repl_sample() {
         _mv=$(cat "$_m" 2>/dev/null)
         [ -n "$_mv" ] && [ "$_mv" != "0" ] && printf 'netmiss,%s,%s,%s\n' "$ts" "$_mif" "$_mv" >> "$of" 2>/dev/null
     done
-    # ---- listener accept-queue gauge (VB port only; same PGPORT the sampler's
-    # psql connects with). Recv-Q=当前积压, Send-Q=backlog 容量. ----
+    # ---- listener accept queue + per-state socket count on the VB port ----
     _ssbin=$(command -v ss 2>/dev/null || echo /usr/sbin/ss)
     if [ -x "$_ssbin" ]; then
+        # the listen socket itself: Recv-Q = accept-queue depth (backlog not yet
+        # accepted), Send-Q = backlog capacity. Sampled per minute.
         lstn=$("$_ssbin" -lnt4 sport = :"${PGPORT:-5432}" 2>/dev/null | \
                awk 'NR>1 && $1=="LISTEN" { print $2 "," $3; exit }')
         [ -n "$lstn" ] && printf 'lstn,%s,%s\n' "$ts" "$lstn" >> "$of" 2>/dev/null
+        # every TCP socket whose LOCAL port is the DB port, counted by state
+        # (LISTEN/ESTAB/TIME-WAIT/CLOSE-WAIT/...), one row per state per minute.
+        # $1 is the State column -- skip it unless it is a real state token, so
+        # an old iproute2 without that column cannot feed Recv-Q numbers in.
+        "$_ssbin" -tan4 sport = :"${PGPORT:-5432}" 2>/dev/null | \
+            awk -v ts="$ts" 'NR>1 && $1 ~ /^[A-Z][A-Z0-9-]*$/ { c[$1]++ }
+                             END { for (s in c) printf "lstnsock,%s,%s,%d\n", ts, s, c[s] }' \
+            >> "$of" 2>/dev/null
     fi
     # ---- TCP RTT sample: ss -ti over ESTABLISHED sockets; loopback peers are
     # excluded (their sub-0.1ms rtt would pin rtt_min to ~0 and drown the real
