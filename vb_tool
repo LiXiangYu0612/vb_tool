@@ -34543,6 +34543,21 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     if _fsu:
         sub("Filesystem Usage")
         parts.append(_fsu)
+    # Bond devices: collected from /proc/net/bonding at the END snapshot
+    # (name|mode|active slave|slave list). Heading always present, table only
+    # when a bond exists -- sits right above the per-interface table.
+    sub("Bond")
+    _brows = []
+    for _ln in (win["os"].get(("end", "bonding"), "") or "").strip().splitlines():
+        _f = _ln.split("|")
+        if len(_f) >= 3:
+            _brows.append('<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>'
+                          % (esc(_f[0]), esc(_f[1] or "-"), esc(_f[2] or "-"),
+                             esc((_f[3] if len(_f) > 3 else "").replace(",", ", ") or "-")))
+    if _brows:
+        parts.append('<table class="t"><tr><th>Bond</th><th>Mode</th>'
+                     '<th>Active Slave</th><th>Slave Interfaces</th></tr>'
+                     + "".join(_brows) + '</table>')
     sub("Network per interface")
     dur_os = osd.get("dur", 1.0) or 1.0
     def nrate(it, key):
@@ -34562,15 +34577,6 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                        "unknown, e.g. virtio); Speed/Duplex/Queues/Ring from ethtool "
                        "at the END snap.")
         note("\n".join(_nl))
-    _bond = win["os"].get(("end", "bonding"), "") or ""
-    if _bond.strip():
-        _bl = []
-        for _ln in _bond.strip().splitlines():
-            _f = _ln.split("|")
-            if len(_f) >= 3:
-                _bl.append("%s(%s, active=%s)" % (_f[0], _f[1] or "?", _f[2] or "?"))
-        if _bl:
-            note("bond: " + "; ".join(_bl))
     parts.append('<table class="t"><tr>' + _nh)
     if not ifaces:
         parts.append('<tr><td colspan="%d" class="note">no network interfaces</td></tr>' % (7 + (7 if _nmeta else 0)))
