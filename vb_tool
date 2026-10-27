@@ -34407,7 +34407,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         # (blocks * 2^order) so columns and totals are the same unit
         def _pg(d, o):
             return d.get(o, 0) * (1 << o)
-        parts.append('<div class="sub">Memory fragmentation</div>')
+        sub("Memory fragmentation")
         _bh = ['<table class="t"><tr><th>Zone</th><th>Phase</th>']
         _bh += ['<th class="n">%d</th>' % _o for _o in _ords]
         _bh.append('<th class="n">Total</th></tr>')
@@ -34604,7 +34604,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             if _d > 0:
                 _mrow.append('<tr><td>%s</td><td class="n">%d</td></tr>' % (esc(_if), _d))
         if _mrow:
-            parts.append('<div class="sub">RX missed</div>')
+            sub("RX missed")
             parts.append('<table class="t"><tr><th>Interface</th><th class="n">missed</th></tr>'
                          + "".join(_mrow) + '</table>')
     if os_smp is not None:
@@ -34773,7 +34773,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                 "TIME-WAIT", "CLOSE-WAIT", "CLOSING", "LAST-ACK", "CLOSED"]
         _extra = sorted(s for d in _ls.values() for s in d if s not in _std)
         _states = _std + _extra
-        parts.append('<div class="sub">TCP Sockets</div>')
+        sub("TCP Sockets")
         _lh = ['<table class="t"><tr><th>Time</th><th class="n">Recv-Q</th>'
                '<th class="n">Send-Q</th>']
         _lh += ['<th class="n">%s</th>' % esc(_s) for _s in _states]
@@ -34847,7 +34847,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     if os_smp is not None and os_smp.get("conntrack"):
         _cmax = max(int(p.split(",")[0]) for _, p in os_smp["conntrack"])
         _clim = max(int(p.split(",")[1]) for _, p in os_smp["conntrack"])
-        parts.append('<div class="sub">conntrack</div>')
+        sub("conntrack")
         parts.append('<table class="t"><tr><th>Metric</th><th class="n">Value</th></tr>'
                      '<tr><td>count max</td><td class="n">%d</td></tr>'
                      '<tr><td>limit</td><td class="n">%d</td></tr>'
