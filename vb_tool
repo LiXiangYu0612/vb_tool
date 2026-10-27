@@ -31872,16 +31872,27 @@ def load_os_samples(sdir, begin_ts, end_ts):
                 continue
             if typ == "sspeer":
                 # per-conn top-offender row (peer,lport non-numeric): raw;
-                # parsed by window_peer_peaks; 11 fields (10 commas) incl
-                # rcv_rtt/min_rtt/rcv_space appended 2026-10-27
-                if payload.count(",") == 10:
+                # parsed by window_peer_peaks; 10 fields (9 commas) incl
+                # rcv_rtt/min_rtt, the brief 11-field form with rcv_space
+                # (10 commas), or the legacy 8-field form (7 commas)
+                if payload.count(",") in (7, 9, 10):
                     out[typ].append((ts, payload))
                 continue
             if typ in ("conntrack", "lstn", "lstnsock", "netmiss"):
                 # conntrack: count,max ; lstn: recvq,sendq ; netmiss: iface,missed
-                # lstnsock: state,count (2 payload fields = 1 comma)
+                # lstnsock: state,count (2 payload fields = 1 comma).
+                # Numeric fields are validated here so a hand-edited or
+                # truncated log line can never blow up the renderer later.
                 if payload.count(",") == 1:
-                    out[typ].append((ts, payload))
+                    _p1, _p2 = payload.split(",")
+                    if typ == "lstnsock":
+                        _ok = _p2.strip().isdigit()
+                    elif typ == "netmiss":
+                        _ok = _p1 != "" and _p2.strip().isdigit()
+                    else:                       # conntrack / lstn: both numeric
+                        _ok = _p1.strip().isdigit() and _p2.strip().isdigit()
+                    if _ok:
+                        out[typ].append((ts, payload))
                 continue
             want = {"cpu": 12, "pg": 8, "tcp": 7, "tcpext": 6}.get(typ)   # tcp: 7 fields/6 commas; tcpext: ts+4 counters
             if typ == "mem":
@@ -32089,14 +32100,15 @@ def window_peer_peaks(samples, begin_ts):
         if begin_ts and ts < str(begin_ts):
             continue
         p = (payload or "").split(",")
-        if len(p) != 11:
+        # 8 fields = rows written before the rcv_rtt/min_rtt extension (render
+        # them, trailing metrics just stay absent); >= 11 = current format
+        if len(p) < 8:
             continue
         try:
             rtt, rttvar = float(p[2]), float(p[3])
             cwnd, retrans, mss, sq = int(p[4]), int(p[5]), int(p[6]), int(p[7])
-            rcv_rtt = float(p[8]) if p[8] else None
-            min_rtt = float(p[9]) if p[9] else None
-            rcv_space = int(p[10]) if p[10] else None
+            rcv_rtt = float(p[8]) if len(p) > 8 and p[8] else None
+            min_rtt = float(p[9]) if len(p) > 9 and p[9] else None
         except ValueError:
             continue
         k = (p[0], p[1])
@@ -32105,16 +32117,15 @@ def window_peer_peaks(samples, begin_ts):
             peaks[k] = d = {"max_sq": 0, "sq_ts": "", "sq_rtt": None, "sq_cwnd": None,
                             "sq_retr": None, "max_rtt": 0.0, "rtt_ts": "", "rtt_sq": None,
                             "rtt_cwnd": None, "rtt_retr": None, "mss": None,
-                            "rcv_rtt": None, "min_rtt": None, "rcv_space": None}
+                            "sq_rcv_rtt": None, "rtt_rcv_rtt": None, "min_rtt": None}
         if sq > d["max_sq"]:
-            d.update(max_sq=sq, sq_ts=ts, sq_rtt=rtt, sq_cwnd=cwnd, sq_retr=retrans)
+            d.update(max_sq=sq, sq_ts=ts, sq_rtt=rtt, sq_cwnd=cwnd, sq_retr=retrans,
+                     sq_rcv_rtt=rcv_rtt)
         if rtt > d["max_rtt"]:
             d.update(max_rtt=rtt, rtt_ts=ts, rtt_sq=sq, rtt_cwnd=cwnd, rtt_retr=retrans,
-                     rcv_rtt=rcv_rtt)
+                     rtt_rcv_rtt=rcv_rtt)
         if min_rtt is not None and (d["min_rtt"] is None or min_rtt < d["min_rtt"]):
             d["min_rtt"] = min_rtt
-        if rcv_space:
-            d["rcv_space"] = rcv_space
         if mss:
             d["mss"] = mss
     return peaks
@@ -34606,12 +34617,16 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         for _, _p in os_smp["netmiss"]:
             _f = _p.split(",")
             if len(_f) == 2:
-                _mm.setdefault(_f[0], []).append(int(_f[1]))
+                if _f[1].strip().isdigit():
+                    _mm.setdefault(_f[0], []).append(int(_f[1]))
         _mrow = []
         for _if in sorted(_mm):
             _vals = _mm[_if]
-            _d = max(0, _vals[-1] - _vals[0]) if len(_vals) >= 2 else _vals[-1]
-            _mrow.append('<tr><td>%s</td><td class="n">%d</td></tr>' % (esc(_if), _d))
+            # window delta only: a single sample is a lifetime counter, not a
+            # rate for this window -> "-" rather than a misleading number
+            _d = max(0, _vals[-1] - _vals[0]) if len(_vals) >= 2 else None
+            _mrow.append('<tr><td>%s</td><td class="n">%s</td></tr>'
+                         % (esc(_if), "-" if _d is None else _d))
         if _mrow:
             parts.append('<table class="t"><tr><th>Interface</th><th class="n">missed</th></tr>'
                          + "".join(_mrow) + '</table>')
@@ -34693,7 +34708,8 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             # value at all (idle sockets; kernels <4.10 have no min_rtt at all)
             # -> drop that column instead of printing a wall of '-'. Decided per
             # column: rcv_rtt present but min_rtt never reported is common.
-            _hasrcv = any(d["rcv_rtt"] is not None for _, d in _peaks.items())
+            _hasrcv = any((d["sq_rcv_rtt"] is not None or d["rtt_rcv_rtt"] is not None)
+                          for _, d in _peaks.items())
             _hasmnr = any(d["min_rtt"] is not None for _, d in _peaks.items())
             def _peak_rows(items, mode):
                 r = []
@@ -34708,7 +34724,8 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                         _o2, _o3 = d["rtt_cwnd"], d["rtt_retr"]
                         _vcell = ('<td class="n%s">%.3f</td>'
                                   % (thr_cell_cls(_v, 5.0, 20.0), _v))
-                    _rcv = d["rcv_rtt"]
+                    # rcv_rtt must come from the SAME minute as the row's peak
+                    _rcv = d["sq_rcv_rtt"] if mode == "sq" else d["rtt_rcv_rtt"]
                     _mnr = d["min_rtt"]
                     _extra = ""
                     if _hasrcv:
@@ -34777,7 +34794,8 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         for _ts, _p in os_smp.get("lstnsock", []):
             _f = _p.split(",")
             if len(_f) == 2:
-                _ls.setdefault(_ts, {})[_f[0]] = int(_f[1])
+                if _f[1].strip().isdigit():
+                    _ls.setdefault(_ts, {})[_f[0]] = int(_f[1])
         _std = ["LISTEN", "ESTAB", "SYN-SENT", "SYN-RECV", "FIN-WAIT-1", "FIN-WAIT-2",
                 "TIME-WAIT", "CLOSE-WAIT", "CLOSING", "LAST-ACK", "CLOSED"]
         _extra = sorted(s for d in _ls.values() for s in d if s not in _std)
@@ -34787,7 +34805,8 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         _lh += ['<th class="n">%s</th>' % esc(_s) for _s in _states]
         _lh.append('</tr>')
         for _ts in sorted(set(_lq) | set(_ls)):
-            _q = _lq.get(_ts, ["-", "-"])
+            _q = _lq.get(_ts) or []
+            _q = (_q + ["-", "-"])[:2] if _q else ["-", "-"]
             _row = _ls.get(_ts, {})
             _lh.append('<tr><td>%s</td><td class="n">%s</td><td class="n">%s</td>%s</tr>'
                        % (esc(_ts), esc(_q[0]), esc(_q[1]),
@@ -34854,6 +34873,8 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         for _ts, _p in os_smp["conntrack"]:
             _f = _p.split(",")
             if len(_f) != 2:
+                continue
+            if not (_f[0].strip().isdigit() and _f[1].strip().isdigit()):
                 continue
             _c, _l = int(_f[0]), int(_f[1])
             _ch.append('<tr><td>%s</td><td class="n">%s</td><td class="n">%s</td>'
@@ -38325,10 +38346,11 @@ _awr_lt_stack_sample() {
 #          (ss -ti over ESTABLISHED, loopback peers excluded; rtt = kernel
 #           smoothed estimate in ms; worst_rtt is worst_peer's rtt. Row is
 #           omitted when 0 qualifying conns / no ss -> renderer hides RTT)
-#   sspeer,<ts>,peer,lport,rtt,rttvar,cwnd,retrans,mss,sendq,rcv_rtt,min_rtt,rcv_space
-#          (last three are EMPTY when ss did not print that field -- they are
+#   sspeer,<ts>,peer,lport,rtt,rttvar,cwnd,retrans,mss,sendq,rcv_rtt,min_rtt
+#          (last two are EMPTY when ss did not print that field -- they are
 #           conditional on the socket having a receive queue / a recorded
-#           min_rtt; empty renders as '-' rather than a fake 0.000)
+#           min_rtt; empty renders as '-' rather than a fake 0.000. The
+#           8-field form without them is still accepted when reading old logs)
 #          (per-CONNECTION rows, only the minute's top offenders: top 3 by
 #           sendq (non-zero) + top 3 by rtt, deduped. Gives the renderer
 #           window-PEAK per-peer tables instead of a single END-snap instant;
@@ -38491,8 +38513,13 @@ _awr_repl_sample() {
     if [ -x "$_ssbin" ]; then
         # the listen socket itself: Recv-Q = accept-queue depth (backlog not yet
         # accepted), Send-Q = backlog capacity. Sampled per minute.
-        lstn=$("$_ssbin" -lnt4 sport = :"${PGPORT:-5432}" 2>/dev/null | \
-               awk 'NR>1 && $1=="LISTEN" { print $2 "," $3; exit }')
+        # dual stack on purpose: the snapshot-level socket table counts v4+v6,
+        # so the per-minute series must too. A dual-stack listener binds two
+        # sockets sharing one backlog -> report the largest queue seen.
+        lstn=$("$_ssbin" -lnt sport = :"${PGPORT:-5432}" 2>/dev/null | \
+               awk 'BEGIN { rq = 0; sq = 0 }
+                    NR>1 && $1=="LISTEN" { if ($2+0 > rq) rq=$2+0; if ($3+0 > sq) sq=$3+0; n++ }
+                    END { if (n) print rq "," sq }')
         [ -n "$lstn" ] && printf 'lstn,%s,%s\n' "$ts" "$lstn" >> "$of" 2>/dev/null
         # every TCP socket whose LOCAL port is the DB port, counted by state.
         # ALL states are written every minute (0 when absent) so a missing row
@@ -38500,7 +38527,10 @@ _awr_repl_sample() {
         # skip it unless it is a real state token, so an old iproute2 without
         # that column cannot feed Recv-Q numbers in. A state this kernel prints
         # but the canonical list lacks still gets its own row.
-        "$_ssbin" -tan4 sport = :"${PGPORT:-5432}" 2>/dev/null | \
+        # ss failing (missing, bad port filter) must yield NO rows: all-zero
+        # rows would read as "measured: none", which is a different claim.
+        _sout=$("$_ssbin" -tan sport = :"${PGPORT:-5432}" 2>/dev/null)
+        [ -n "$_sout" ] && printf '%s\n' "$_sout" | \
             awk -v ts="$ts" '
                 BEGIN { n = split("LISTEN ESTAB SYN-SENT SYN-RECV FIN-WAIT-1 FIN-WAIT-2 TIME-WAIT CLOSE-WAIT CLOSING LAST-ACK CLOSED", S, " ");
                         for (i = 1; i <= n; i++) std[S[i]] = 1 }
@@ -38531,10 +38561,10 @@ _awr_repl_sample() {
                     ci++; cpeer[ci] = peer; clport[ci] = lport; crt[ci] = rttv
                     crtv[ci] = rttvv; ccw[ci] = cwndv + 0; cre[ci] = retrv + 0
                     cmss[ci] = mssv + 0; csq[ci] = sqv + 0
-                    crcr[ci] = rcrvs; cmnr[ci] = mnrs; cspc[ci] = spcs
+                    crcr[ci] = rcrvs; cmnr[ci] = mnrs
                 }
                 peer = ""; keep = 0; gotrtt = 0; rttv = rttvv = 0
-                cwndv = retrv = mssv = 0; rcrvs = mnrs = spcs = ""
+                cwndv = retrv = mssv = 0; rcrvs = mnrs = ""
             }
             $1 == "ESTAB" || ($1 ~ /^[0-9]+$/ && NF >= 4) {
                 flushconn()
@@ -38560,7 +38590,6 @@ _awr_repl_sample() {
                     # the renderer shows '-' instead of a fake 0.000.
                     if (rcrvs == "" && match($0, /rcv_rtt:[0-9]+\.?[0-9]*/)) rcrvs = substr($0, RSTART + 8, RLENGTH - 8) + 0
                     if (mnrs == "" && match($0, /min_rtt:[0-9]+\.?[0-9]*/)) mnrs = substr($0, RSTART + 8, RLENGTH - 8) + 0
-                    if (spcs == "" && match($0, /rcv_space:[0-9]+/)) spcs = substr($0, RSTART + 10, RLENGTH - 10) + 0
                 }
             }
             END {
@@ -38590,10 +38619,10 @@ _awr_repl_sample() {
                         if (bi) used[bi] = emit[bi] = 1
                     }
                     for (i = 1; i <= ci; i++) if (emit[i])
-                        printf "sspeer,%s,%s,%s,%.3f,%.3f,%d,%d,%d,%d,%s,%s,%s\n", \
+                        printf "sspeer,%s,%s,%s,%.3f,%.3f,%d,%d,%d,%d,%s,%s\n", \
                                ts, cpeer[i], clport[i], crt[i], crtv[i], \
                                ccw[i], cre[i], cmss[i], csq[i], \
-                               crcr[i], cmnr[i], cspc[i]
+                               crcr[i], cmnr[i]
                 }
             }
         ' >> "$of" 2>/dev/null
