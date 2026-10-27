@@ -34842,17 +34842,27 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                          % (esc(r["proto"]), esc(r["name"]), _m, r["delta"], _m, r["per_sec"]))
         parts.append('</table>')
 
-    # conntrack (nf_conntrack; no rows = netfilter module not loaded). count/max
-    # gauge; near 100% fill = table full -> early_drop then packet drop.
+    # conntrack (nf_conntrack; no rows = netfilter module not loaded), per
+    # minute: count vs limit gauge; near 100% fill = table full -> early_drop
+    # then packet drop.
     if os_smp is not None and os_smp.get("conntrack"):
-        _cmax = max(int(p.split(",")[0]) for _, p in os_smp["conntrack"])
-        _clim = max(int(p.split(",")[1]) for _, p in os_smp["conntrack"])
         sub("Conntrack")
-        parts.append('<table class="t"><tr><th>Metric</th><th class="n">Value</th></tr>'
-                     '<tr><td>count max</td><td class="n">%d</td></tr>'
-                     '<tr><td>limit</td><td class="n">%d</td></tr>'
-                     '<tr><td>Peak fill</td><td class="n">%.1f%%</td></tr></table>'
-                     % (_cmax, _clim, (100.0 * _cmax / _clim) if _clim else 0.0))
+        _ch = ['<table class="t"><tr><th>Time</th><th class="n">count</th>'
+               '<th class="n">limit</th><th class="n">fill</th></tr>']
+        for _ts, _p in os_smp["conntrack"]:
+            _f = _p.split(",")
+            if len(_f) != 2:
+                continue
+            _c, _l = int(_f[0]), int(_f[1])
+            _ch.append('<tr><td>%s</td><td class="n">%s</td><td class="n">%s</td>'
+                       '<td class="n">%s</td></tr>'
+                       % (esc(_ts), fmt_int(_c), fmt_int(_l),
+                          ("%.2f%%" % (100.0 * _c / _l)) if _l else "-"))
+        _ch.append('</table>')
+        parts.append("".join(_ch))
+        note("count = nf_conntrack entries in use, limit = nf_conntrack_max. "
+             "Near 100% fill the table is full: new flows go to early_drop, "
+             "then packets get dropped.")
 
     # ================= Kernel Messages (dmesg) =================
     # LAST SUB of OS Statistics (user 2026-09-17: not a standalone section).
