@@ -34400,6 +34400,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                     _d[_i] = _d.get(_i, 0) + int(_v)
         return _z
     _bz, _ez = _bud_zones("begin"), _bud_zones("end")
+    sub("Memory Fragmentation")
     if _bz or _ez:
         _zones = sorted(set(_bz) | set(_ez))
         _ords = sorted({o for d in list(_bz.values()) + list(_ez.values()) for o in d})
@@ -34407,7 +34408,6 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         # (blocks * 2^order) so columns and totals are the same unit
         def _pg(d, o):
             return d.get(o, 0) * (1 << o)
-        sub("Memory Fragmentation")
         _bh = ['<table class="t"><tr><th>Zone</th><th>Phase</th>']
         _bh += ['<th class="n">%d</th>' % _o for _o in _ords]
         _bh.append('<th class="n">Total</th></tr>')
@@ -34592,6 +34592,9 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     parts.append('</table>')
     # per-interface rx_missed_errors (ring-full subset of the merged drop) --
     # cumulative counter -> window delta (last-minus-first)
+    # every physical-ish interface is listed every minute, 0 included: a zero
+    # is a measurement (no ring-full drop), a missing row would be "unknown"
+    sub("RX Missed")
     if os_smp is not None and os_smp.get("netmiss"):
         _mm = {}
         for _, _p in os_smp["netmiss"]:
@@ -34599,12 +34602,11 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             if len(_f) == 2:
                 _mm.setdefault(_f[0], []).append(int(_f[1]))
         _mrow = []
-        for _if, _vals in _mm.items():
+        for _if in sorted(_mm):
+            _vals = _mm[_if]
             _d = max(0, _vals[-1] - _vals[0]) if len(_vals) >= 2 else _vals[-1]
-            if _d > 0:
-                _mrow.append('<tr><td>%s</td><td class="n">%d</td></tr>' % (esc(_if), _d))
+            _mrow.append('<tr><td>%s</td><td class="n">%d</td></tr>' % (esc(_if), _d))
         if _mrow:
-            sub("RX Missed")
             parts.append('<table class="t"><tr><th>Interface</th><th class="n">missed</th></tr>'
                          + "".join(_mrow) + '</table>')
     if os_smp is not None:
@@ -34762,6 +34764,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     # measurement, '-' means the sampler did not log that state), next to the
     # listen socket's Recv-Q (accepted-not-yet queue, the pre-overflow signal)
     # and Send-Q (backlog capacity). Both come from the same minute's ss pass.
+    sub("TCP Sockets")
     if os_smp is not None and (os_smp.get("lstn") or os_smp.get("lstnsock")):
         _lq = {ts: p.split(",") for ts, p in os_smp.get("lstn", [])}
         _ls = {}
@@ -34773,7 +34776,6 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                 "TIME-WAIT", "CLOSE-WAIT", "CLOSING", "LAST-ACK", "CLOSED"]
         _extra = sorted(s for d in _ls.values() for s in d if s not in _std)
         _states = _std + _extra
-        sub("TCP Sockets")
         _lh = ['<table class="t"><tr><th>Time</th><th class="n">Recv-Q</th>'
                '<th class="n">Send-Q</th>']
         _lh += ['<th class="n">%s</th>' % esc(_s) for _s in _states]
@@ -38475,7 +38477,8 @@ _awr_repl_sample() {
         _mif=${_m%/statistics/rx_missed_errors}; _mif=${_mif##*/}
         case "$_mif" in lo|veth*|br-*|docker*|virbr*|tap*|tunl*) continue;; esac
         _mv=$(cat "$_m" 2>/dev/null)
-        [ -n "$_mv" ] && [ "$_mv" != "0" ] && printf 'netmiss,%s,%s,%s\n' "$ts" "$_mif" "$_mv" >> "$of" 2>/dev/null
+        # written even when 0: 0 = ring never overflowed, no row = unknown
+        [ -n "$_mv" ] && printf 'netmiss,%s,%s,%s\n' "$ts" "$_mif" "$_mv" >> "$of" 2>/dev/null
     done
     # ---- listener accept queue + per-state socket count on the VB port ----
     _ssbin=$(command -v ss 2>/dev/null || echo /usr/sbin/ss)
