@@ -29557,6 +29557,13 @@ _awr_collect() {
         LC_ALL=C sysctl -a 2>/dev/null | sed -E 's/^([^=]+) = (.*)$/\1|\2/' > "$osd/sysctl"
         [ -s "$osd/sysctl" ] || rm -f "$osd/sysctl"
     fi
+    # THP is a sysfs knob, not a sysctl: record the EFFECTIVE value (the one in
+    # brackets of "always [madvise] never") so it shows up with the kernel
+    # parameters as a plain setting.
+    if [ -r /sys/kernel/mm/transparent_hugepage/enabled ]; then
+        _thpv=$(sed -n 's/.*\[\([^]]*\)\].*/\1/p' /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null)
+        [ -n "$_thpv" ] && echo "kernel.transparent_hugepage.enabled|$_thpv" >> "$osd/sysctl"
+    fi
     # dmesg: INCREMENTAL kernel capture -- only lines NEWER than the last
     # line of the PREVIOUS snapshot's os/dmesg (first snapshot = full dump;
     # no blind tail: window coverage is by construction). Each snap stores
@@ -31819,7 +31826,7 @@ def load_os_samples(sdir, begin_ts, end_ts):
     + zone watermarks (free/min/low/high kB, summed over all zones); older
     7-value logs without them stay valid."""
     out = {"cpu": [], "pg": [], "mem": [], "dsk": [], "net": [], "tcp": [], "tcpext": [],
-           "ssrtt": [], "sspeer": [], "thp": [], "conntrack": [], "lstn": [], "lstnsock": [],
+           "ssrtt": [], "sspeer": [], "conntrack": [], "lstn": [], "lstnsock": [],
            "netmiss": [], "files": []}
     if not sdir or not os.path.isdir(sdir):
         return out
@@ -31865,12 +31872,6 @@ def load_os_samples(sdir, begin_ts, end_ts):
                 if payload.count(",") == 10:
                     out[typ].append((ts, payload))
                 continue
-            if typ == "thp":
-                # compact_stall,compact_fail,thp_fault_alloc,thp_collapse_alloc
-                # (4 payload fields = 3 commas after the type,ts split)
-                if payload.count(",") == 3:
-                    out[typ].append((ts, payload))
-                continue
             if typ in ("conntrack", "lstn", "lstnsock", "netmiss"):
                 # conntrack: count,max ; lstn: recvq,sendq ; netmiss: iface,missed
                 # lstnsock: state,count (2 payload fields = 1 comma)
@@ -31887,7 +31888,7 @@ def load_os_samples(sdir, begin_ts, end_ts):
             except Exception:
                 continue
     for k in ("cpu", "pg", "mem", "dsk", "net", "tcp", "tcpext", "ssrtt", "sspeer",
-              "thp", "conntrack", "lstn", "lstnsock", "netmiss"):
+              "conntrack", "lstn", "lstnsock", "netmiss"):
         out[k].sort(key=lambda r: r[0])
     return out
 
@@ -34372,52 +34373,83 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                      % (esc(_lbl), _bv, _ev, _ev - _bv))
     parts.append('</table>')
 
-    # THP / compaction (window Δ from per-minute vmstat counters; cumulative
-    # counters -> last-minus-first). compact_stall>0 = direct compaction stalls
-    # (DB latency-spike source); thp_* = transparent hugepage activity.
-    if os_smp is not None and os_smp.get("thp"):
-        _thp0 = [float(x) for x in os_smp["thp"][0][1].split(",")]
-        _thp1 = [float(x) for x in os_smp["thp"][-1][1].split(",")]
-        _thpd = [max(0, e - b) for b, e in zip(_thp0, _thp1)]
-        parts.append('<div class="sub">THP / Compaction</div>')
-        parts.append('<table class="t"><tr><th>Counter</th><th class="n">Value</th></tr>'
-                     '<tr><td>compact_stall</td><td class="n">%d</td></tr>'
-                     '<tr><td>compact_fail</td><td class="n">%d</td></tr>'
-                     '<tr><td>thp_fault_alloc</td><td class="n">%d</td></tr>'
-                     '<tr><td>thp_collapse_alloc</td><td class="n">%d</td></tr></table>'
-                     % tuple(int(v) for v in _thpd))
 
-    # Memory fragmentation from the BEGIN and END snapshots (/proc/buddyinfo):
-    # free pages per zone per order -> how much of free memory sits in 2MB+
-    # contiguous blocks (order >= 9). 1 - big/total = fragmentation %; the
-    # gap between Begin and End is how much it moved inside the window.
-    def _bud(phase):
-        tot = big = 0
+    # ================= Memory Fragmentation (buddyinfo) =================
+    # /proc/buddyinfo: per zone, the number of free blocks at each buddy order;
+    # a block of order n is 2^n contiguous pages. Begin/End come from the
+    # snapshots. The metric table computes the classic EXTERNAL FRAGMENTATION
+    # rate for a 2MB request:
+    #     frag% = 1 - (free pages usable as 2MB blocks) / (all free pages)
+    # usable = sum over order >= 9 of blocks_o * 2^o (bigger blocks split down).
+    # 0% = all free memory sits in 2MB+ pieces; 100% = no 2MB block can be
+    # formed without compaction (the direct-compaction stall source).
+    def _bud_orders(phase):
+        _o = {}
         for _ln in (win["os"].get((phase, "buddyinfo"), "") or "").splitlines():
             _f = _ln.split()
             if len(_f) < 5 or _f[0] != "Node":
                 continue
             for _i, _v in enumerate(_f[4:]):
-                if not _v.isdigit():
-                    continue
-                tot += int(_v)
-                if _i >= 9:
-                    big += int(_v)
-        return tot, big
-    _bt, _bb = _bud("begin")
-    _et, _eb = _bud("end")
-    if _bt or _et:
-        def _fragpct(t, b):
-            return ("%.2f%%" % (100.0 * (1.0 - b / t))) if t else "-"
+                if _v.isdigit():
+                    _o[_i] = _o.get(_i, 0) + int(_v)
+        return _o
+    _bo, _eo = _bud_orders("begin"), _bud_orders("end")
+    if _bo or _eo:
+        _ords = sorted(set(_bo) | set(_eo))
         parts.append('<div class="sub">Memory fragmentation</div>')
+        _bh = ['<table class="t"><tr><th>Order</th>']
+        _bh += ['<th class="n">%d</th>' % _o for _o in _ords]
+        _bh.append('<th class="n">Total</th></tr>')
+        for _lbl, _d in (("Begin", _bo), ("End", _eo)):
+            _bh.append('<tr><td>%s</td>' % _lbl)
+            _bh += ['<td class="n">%s</td>' % fmt_int(_d.get(_o, 0)) for _o in _ords]
+            _bh.append('<td class="n">%s</td></tr>'
+                       % fmt_int(sum(_d.get(_o, 0) for _o in _ords)))
+        _bh.append('<tr><td>Δ</td>')
+        _bh += ['<td class="n">%+d</td>' % (_eo.get(_o, 0) - _bo.get(_o, 0)) for _o in _ords]
+        _bh.append('<td class="n">%+d</td></tr>'
+                   % (sum(_eo.values()) - sum(_bo.values())))
+        _bh.append('</table>')
+        parts.append("".join(_bh))
+
+        def _frag(d):
+            _tot = sum(d.values())
+            # pages held in blocks of order >= 9 (buddyinfo counts BLOCKS, so
+            # a count has to be scaled by the block size 2^o to get pages)
+            _big = sum(v * (1 << o) for o, v in d.items() if o >= 9)
+            _blk = sum(v * (1 << (o - 9)) for o, v in d.items() if o >= 9)
+            _lg = max([o for o, v in d.items() if v > 0], default=None)
+            _pct = (100.0 * (1.0 - _big / _tot)) if _tot else None
+            return _tot, _big, _blk, _lg, _pct
+        _fb, _fe = _frag(_bo), _frag(_eo)
+
+        def _pc(v):
+            return "-" if v is None else ("%.2f%%" % v)
         parts.append('<table class="t"><tr><th>Metric</th><th class="n">Begin</th>'
                      '<th class="n">End</th></tr>'
                      '<tr><td>free pages</td><td class="n">%s</td><td class="n">%s</td></tr>'
-                     '<tr><td>free 2MB+ pages</td><td class="n">%s</td><td class="n">%s</td></tr>'
-                     '<tr><td>fragmentation</td><td class="n">%s</td><td class="n">%s</td></tr>'
-                     '</table>'
-                     % (fmt_int(_bt), fmt_int(_et), fmt_int(_bb), fmt_int(_eb),
-                        _fragpct(_bt, _bb), _fragpct(_et, _eb)))
+                     '<tr><td>free pages in 2MB+ blocks</td>'
+                     '<td class="n">%s</td><td class="n">%s</td></tr>'
+                     '<tr><td>2MB blocks available</td>'
+                     '<td class="n">%s</td><td class="n">%s</td></tr>'
+                     '<tr><td>largest free block order</td>'
+                     '<td class="n">%s</td><td class="n">%s</td></tr>'
+                     '<tr><td>external fragmentation 2MB</td>'
+                     '<td class="n">%s</td><td class="n">%s</td></tr></table>'
+                     % (fmt_int(_fb[0]), fmt_int(_fe[0]),
+                        fmt_int(_fb[1]), fmt_int(_fe[1]),
+                        fmt_int(_fb[2]), fmt_int(_fe[2]),
+                        "-" if _fb[3] is None else _fb[3],
+                        "-" if _fe[3] is None else _fe[3],
+                        _pc(_fb[4]), _pc(_fe[4])))
+        note("Order n = one free block of 2^n contiguous pages (2MB = order 9 "
+             "at 4KB base pages). External fragmentation = 1 - (free pages "
+             "available as 2MB+ blocks / all free pages): 0% means every free "
+             "page is in a 2MB+ chunk, 100% means no 2MB block can be formed "
+             "without compaction. '2MB blocks available' splits higher orders "
+             "down (one order 10 block = two order 9 blocks). Counts are summed "
+             "over all zones; a block cannot span zones, so the worst single "
+             "zone can be more fragmented than this total suggests.")
 
     sub("Memory / Paging")
     parts.append('<table class="t"><tr><th>Metric</th><th class="n">Total</th>'
@@ -38244,7 +38276,6 @@ _awr_lt_stack_sample() {
 #   net,<ts>,<raw /proc/net/dev iface line>  (same; proc_net_ifaces filters)
 #   tcp,<ts>,ActiveOpens,PassiveOpens,CurrEstab,OutSegs,RetransSegs  (snmp)
 #   tcpext,<ts>,ListenDrops,ListenOverflows,Timeouts,SynRetrans      (netstat TcpExt)
-#   thp,<ts>,compact_stall,compact_fail,thp_fault_alloc,thp_collapse_alloc (vmstat)
 #   conntrack,<ts>,count,max   (nf_conntrack; row omitted when module absent)
 #   lstn,<ts>,recvq,sendq      (VB-port listener accept queue; ss -lnt4)
 #   lstnsock,<ts>,<state>,<count>  (TCP sockets whose LOCAL port is the DB
@@ -38343,10 +38374,6 @@ _awr_repl_sample() {
         /^pswpout /       { pso=$2 }
         /^pgfault /       { pf=$2 }
         /^pgmajfault /    { pmf=$2 }
-        /^compact_stall /      { cst=$2 }
-        /^compact_fail /       { cfa=$2 }
-        /^thp_fault_alloc /    { tfa=$2 }
-        /^thp_collapse_alloc / { tca=$2 }
         /^MemTotal:/      { mt=$2 }
         /^MemFree:/       { mfr=$2 }
         /^MemAvailable:/  { mav=$2 }
@@ -38400,7 +38427,6 @@ _awr_repl_sample() {
             }
             if (tcpok) print "tcp," ts "," taop+0 "," tpop+0 "," tces+0 "," tosg+0 "," trsg+0
             if (extok) print "tcpext," ts "," tld+0 "," tlo+0 "," tto+0 "," tsr+0
-            if (cst != "" || tfa != "") print "thp," ts "," cst+0 "," cfa+0 "," tfa+0 "," tca+0
         }
     ' /proc/stat /proc/vmstat /proc/meminfo /proc/zoneinfo /proc/diskstats /proc/net/dev /proc/net/snmp /proc/net/netstat >> "$of" 2>/dev/null
     # ---- conntrack count (firewall/nat only; file absent = no conntrack module) ----
