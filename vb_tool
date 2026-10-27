@@ -29249,6 +29249,18 @@ _awr_collect() {
     if [ -r /proc/net/snmp ]; then cp /proc/net/snmp "$osd/net_snmp" 2>/dev/null; fi
     if [ -r /proc/net/netstat ]; then cp /proc/net/netstat "$osd/net_netstat" 2>/dev/null; fi
     if [ -r /proc/net/softnet_stat ]; then cp /proc/net/softnet_stat "$osd/softnet_stat" 2>/dev/null; fi
+    # bond 三态 (mode / active slave / slave list); /proc/net/bonding absent = no bond
+    if [ -d /proc/net/bonding ]; then
+        : > "$osd/bonding" 2>/dev/null
+        for _b in /proc/net/bonding/*; do
+            [ -f "$_b" ] || continue
+            _bn=$(basename "$_b")
+            _mode=$(awk -F: '/^Bonding Mode:/{gsub(/^ +/,"",$2); print $2}' "$_b" 2>/dev/null)
+            _act=$(awk -F: '/^Currently Active Slave:/{gsub(/^ +/,"",$2); print $2}' "$_b" 2>/dev/null)
+            _slv=$(awk -F: '/^Slave Interface:/{gsub(/^ +/,"",$2); print $2}' "$_b" 2>/dev/null | tr '\n' ',' | sed 's/,$//')
+            echo "${_bn}|${_mode}|${_act}|${_slv}" >> "$osd/bonding" 2>/dev/null
+        done
+    fi
     # file-nr: "<allocated> <unused> <max>" handle gauge -> System Activity
     # Begin/End column; absent on odd systems -> no file -> renderer hides it
     if [ -r /proc/sys/fs/file-nr ]; then cp /proc/sys/fs/file-nr "$osd/file_nr" 2>/dev/null; fi
@@ -29262,7 +29274,9 @@ _awr_collect() {
     _dpid=$(ss -lntp 2>/dev/null | grep -oP ":${PGPORT:-5432}\b.*pid=\K[0-9]+" | head -1)
     if [ -n "$_dpid" ] && [ -r "/proc/$_dpid/status" ]; then
         awk -v p="$_dpid" '/^VmSize:/{v=$2} /^VmRSS:/{r=$2} /^Threads:/{t=$2} \
-                /^Cpus_allowed_list:/{c=$2} END{print p"|"v+0"|"r+0"|"t+0; if (c != "") print "cpuset " c}' \
+                /^Cpus_allowed_list:/{c=$2} \
+                /^nonvoluntary_ctxt_switches:/{nv=$2} /^voluntary_ctxt_switches:/{vl=$2} \
+                END{print p"|"v+0"|"r+0"|"t+0; if (c != "") print "cpuset " c; if (nv != "") print "nvcswch " nv+0"|"vl+0}' \
                 "/proc/$_dpid/status" > "$osd/db_proc" 2>/dev/null
     fi
     # limits: the POSTMASTER's ACTUAL rlimits (/proc/<pid>/limits, world-
@@ -30423,7 +30437,7 @@ def load_window(d):
         except Exception:
             w["meta"] = {}
     for phase in ("begin", "end"):
-        for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi", "softnet_stat", "net_rtt", "df_fs", "file_nr", "db_proc", "limits", "db_fd_types", "db_tcp_states", "sysctl", "dmesg"):
+        for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi", "softnet_stat", "bonding", "net_rtt", "df_fs", "file_nr", "db_proc", "limits", "db_fd_types", "db_tcp_states", "sysctl", "dmesg"):
             p = os.path.join(d, "os", phase, f)
             w["os"][(phase, f)] = _read_os_text(p) if os.path.isfile(p) else ""
         for t in ("statement", "statement_mem", "wait_events", "instance_time", "database", "pagewriter",
@@ -30454,7 +30468,7 @@ def load_snap(d, tables=None):
             s["meta"] = json.load(open(mp))
         except Exception:
             s["meta"] = {}
-    for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi", "softnet_stat", "net_rtt", "df_fs", "file_nr", "db_proc", "limits", "db_fd_types", "db_tcp_states", "sysctl", "dmesg"):
+    for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi", "softnet_stat", "bonding", "net_rtt", "df_fs", "file_nr", "db_proc", "limits", "db_fd_types", "db_tcp_states", "sysctl", "dmesg"):
         p = os.path.join(d, "os", f)
         s["os"][f] = _read_os_text(p) if os.path.isfile(p) else ""
     _DB_TABLES = ("statement", "statement_mem", "wait_events", "instance_time", "database", "pagewriter",
@@ -30557,7 +30571,7 @@ def build_window_from_snaps(begin_dir, end_dir, sqltext_root=None, load_sqltext=
     b = load_snap(begin_dir, db_tables)
     e = load_snap(end_dir, db_tables)
     win = {"meta": {}, "os": {}, "db": {}}
-    for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi", "softnet_stat", "net_rtt", "df_fs", "file_nr", "db_proc", "limits", "db_fd_types", "db_tcp_states", "sysctl", "dmesg"):
+    for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi", "softnet_stat", "bonding", "net_rtt", "df_fs", "file_nr", "db_proc", "limits", "db_fd_types", "db_tcp_states", "sysctl", "dmesg"):
         win["os"][("begin", f)] = b["os"].get(f, "")
         win["os"][("end", f)] = e["os"].get(f, "")
     for t in ("statement", "statement_mem", "wait_events", "instance_time", "database", "pagewriter",
@@ -31802,7 +31816,8 @@ def load_os_samples(sdir, begin_ts, end_ts):
     + zone watermarks (free/min/low/high kB, summed over all zones); older
     7-value logs without them stay valid."""
     out = {"cpu": [], "pg": [], "mem": [], "dsk": [], "net": [], "tcp": [], "tcpext": [],
-           "ssrtt": [], "sspeer": [], "files": []}
+           "ssrtt": [], "sspeer": [], "thp": [], "conntrack": [], "lstn": [], "netmiss": [],
+           "buddy": [], "files": []}
     if not sdir or not os.path.isdir(sdir):
         return out
     lo = _ts_shift(begin_ts, -65)
@@ -31842,8 +31857,21 @@ def load_os_samples(sdir, begin_ts, end_ts):
                 continue
             if typ == "sspeer":
                 # per-conn top-offender row (peer,lport non-numeric): raw;
-                # parsed by window_peer_peaks
-                if payload.count(",") == 7:
+                # parsed by window_peer_peaks; 11 fields (10 commas) incl
+                # rcv_rtt/min_rtt/rcv_space appended 2026-10-27
+                if payload.count(",") == 10:
+                    out[typ].append((ts, payload))
+                continue
+            if typ == "thp":
+                # compact_stall,compact_fail,thp_fault_alloc,thp_collapse_alloc
+                # (4 payload fields = 3 commas after the type,ts split)
+                if payload.count(",") == 3:
+                    out[typ].append((ts, payload))
+                continue
+            if typ in ("conntrack", "lstn", "netmiss", "buddy"):
+                # conntrack: count,max ; lstn: recvq,sendq ; netmiss: iface,missed
+                # buddy: total_free,order9_plus (2 payload fields = 1 comma)
+                if payload.count(",") == 1:
                     out[typ].append((ts, payload))
                 continue
             want = {"cpu": 12, "pg": 8, "tcp": 7, "tcpext": 6}.get(typ)   # tcp: 7 fields/6 commas; tcpext: ts+4 counters
@@ -31855,7 +31883,8 @@ def load_os_samples(sdir, begin_ts, end_ts):
                 out[typ].append((ts, [float(x) for x in payload.split(",")]))
             except Exception:
                 continue
-    for k in ("cpu", "pg", "mem", "dsk", "net", "tcp", "tcpext", "ssrtt", "sspeer"):
+    for k in ("cpu", "pg", "mem", "dsk", "net", "tcp", "tcpext", "ssrtt", "sspeer",
+              "thp", "conntrack", "lstn", "netmiss", "buddy"):
         out[k].sort(key=lambda r: r[0])
     return out
 
@@ -32051,11 +32080,14 @@ def window_peer_peaks(samples, begin_ts):
         if begin_ts and ts < str(begin_ts):
             continue
         p = (payload or "").split(",")
-        if len(p) != 8:
+        if len(p) != 11:
             continue
         try:
             rtt, rttvar = float(p[2]), float(p[3])
             cwnd, retrans, mss, sq = int(p[4]), int(p[5]), int(p[6]), int(p[7])
+            rcv_rtt = float(p[8]) if p[8] else None
+            min_rtt = float(p[9]) if p[9] else None
+            rcv_space = int(p[10]) if p[10] else None
         except ValueError:
             continue
         k = (p[0], p[1])
@@ -32063,11 +32095,17 @@ def window_peer_peaks(samples, begin_ts):
         if d is None:
             peaks[k] = d = {"max_sq": 0, "sq_ts": "", "sq_rtt": None, "sq_cwnd": None,
                             "sq_retr": None, "max_rtt": 0.0, "rtt_ts": "", "rtt_sq": None,
-                            "rtt_cwnd": None, "rtt_retr": None, "mss": None}
+                            "rtt_cwnd": None, "rtt_retr": None, "mss": None,
+                            "rcv_rtt": None, "min_rtt": None, "rcv_space": None}
         if sq > d["max_sq"]:
             d.update(max_sq=sq, sq_ts=ts, sq_rtt=rtt, sq_cwnd=cwnd, sq_retr=retrans)
         if rtt > d["max_rtt"]:
-            d.update(max_rtt=rtt, rtt_ts=ts, rtt_sq=sq, rtt_cwnd=cwnd, rtt_retr=retrans)
+            d.update(max_rtt=rtt, rtt_ts=ts, rtt_sq=sq, rtt_cwnd=cwnd, rtt_retr=retrans,
+                     rcv_rtt=rcv_rtt)
+        if min_rtt is not None and (d["min_rtt"] is None or min_rtt < d["min_rtt"]):
+            d["min_rtt"] = min_rtt
+        if rcv_space:
+            d["rcv_space"] = rcv_space
         if mss:
             d["mss"] = mss
     return peaks
@@ -32673,10 +32711,12 @@ NET_ERR_CORE = [
     ("TcpExt", "TCPTimeouts", "Timeouts"), ("TcpExt", "TCPLostRetransmit", "LostRetransmit"),
     ("TcpExt", "TCPAbortOnData", "AbortOnData"), ("TcpExt", "TCPAbortOnClose", "AbortOnClose"),
     ("TcpExt", "TCPAbortOnMemory", "AbortOnMemory"), ("TcpExt", "TCPAbortOnTimeout", "AbortOnTimeout"),
+    ("TcpExt", "TCPAbortOnLinger", "AbortOnLinger"), ("TcpExt", "TCPAbortFailed", "AbortFailed"),
     ("TcpExt", "TCPBacklogDrop", "BacklogDrop"), ("TcpExt", "TCPRcvCollapsed", "RcvCollapsed"),
     ("TcpExt", "TCPSynRetrans", "SynRetrans"), ("TcpExt", "TCPFastRetrans", "FastRetrans"),
     ("TcpExt", "TCPOFOQueue", "OFOQueue"), ("TcpExt", "TCPOFODrop", "OFODrop"),
     ("TcpExt", "TCPWantZeroWindowAdv", "WantZeroWindowAdv"), ("TcpExt", "TCPToZeroWindowAdv", "ToZeroWindowAdv"),
+    ("TcpExt", "TCPZeroWindowDrop", "ZeroWindowDrop"),
     ("TcpExt", "TCPSACKReneging", "SACKReneging"), ("TcpExt", "TCPMemoryPressures", "MemoryPressures"),
 ]
 
@@ -34080,6 +34120,16 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             if ln.startswith("cpuset "):
                 return ln[7:].strip() or None
         return None
+    def _dbnvc(phase):
+        for ln in win["os"].get((phase, "db_proc"), "").splitlines():
+            if ln.startswith("nvcswch "):
+                f = ln[8:].strip().split("|")
+                if len(f) == 2:
+                    try:
+                        return int(f[0]), int(f[1])
+                    except ValueError:
+                        return None
+        return None
     _dbp, _dbe = _dbproc("begin"), _dbproc("end")
     if _dbp and _dbe:
         sub("DB Process")
@@ -34104,6 +34154,14 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             parts.append('<tr><td>Cpuset</td><td class="n">%s</td><td class="n">%s</td>'
                          '<td class="n">-</td></tr>'
                          % (esc(_csb_ or "-"), esc(_cse_ or "-")))
+        _nvb, _nve = _dbnvc("begin"), _dbnvc("end")
+        if _nvb is not None or _nve is not None:
+            _bv = fmt_int(_nvb[0]) if _nvb is not None else "-"
+            _ev = fmt_int(_nve[0]) if _nve is not None else "-"
+            _dv = ("%+d" % (_nve[0] - _nvb[0])) if (_nvb is not None and _nve is not None) else "-"
+            parts.append('<tr><td>ctx switch involuntary</td><td class="n">%s</td>'
+                         '<td class="n">%s</td><td class="n">%s</td></tr>'
+                         % (_bv, _ev, _dv))
         # effective rlimits as ROWS in the same table (name tagged
         # "(soft)"/"(hard)", reusing the Begin/End columns); static per
         # process lifetime -> Δ '-'. Unit-less rows ("Max nice priority 0
@@ -34311,6 +34369,39 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                      % (esc(_lbl), _bv, _ev, _ev - _bv))
     parts.append('</table>')
 
+    # THP / compaction (window Δ from per-minute vmstat counters; cumulative
+    # counters -> last-minus-first). compact_stall>0 = direct compaction stalls
+    # (DB latency-spike source); thp_* = transparent hugepage activity.
+    if os_smp is not None and os_smp.get("thp"):
+        _thp0 = [float(x) for x in os_smp["thp"][0][1].split(",")]
+        _thp1 = [float(x) for x in os_smp["thp"][-1][1].split(",")]
+        _thpd = [max(0, e - b) for b, e in zip(_thp0, _thp1)]
+        parts.append('<div class="sub">THP / Compaction (window Δ)</div>')
+        parts.append('<table class="t"><tr><th>Counter</th><th class="n">Δ</th></tr>'
+                     '<tr><td>compact_stall</td><td class="n">%d</td></tr>'
+                     '<tr><td>compact_fail</td><td class="n">%d</td></tr>'
+                     '<tr><td>thp_fault_alloc</td><td class="n">%d</td></tr>'
+                     '<tr><td>thp_collapse_alloc</td><td class="n">%d</td></tr></table>'
+                     % tuple(int(v) for v in _thpd))
+
+    # Memory fragmentation (buddyinfo per-minute gauge): % of free memory NOT
+    # available as 2MB+ contiguous blocks = fragmentation. window max = worst.
+    if os_smp is not None and os_smp.get("buddy"):
+        _frag = 0.0; _tot = 0; _big = 0
+        for _, _p in os_smp["buddy"]:
+            _f2 = _p.split(",")
+            if len(_f2) == 2:
+                _t, _b = int(_f2[0]), int(_f2[1])
+                if _t > 0:
+                    _frag = max(_frag, 100.0 * (1.0 - _b / _t))
+                    _tot, _big = _t, _b
+        parts.append('<div class="sub">Memory fragmentation (buddyinfo)</div>')
+        parts.append('<table class="t"><tr><th>Metric</th><th class="n">Value</th></tr>'
+                     '<tr><td>fragmentation (window max)</td><td class="n">%.1f%%</td></tr>'
+                     '<tr><td>free pages (total)</td><td class="n">%s</td></tr>'
+                     '<tr><td>free as 2MB+ blocks</td><td class="n">%s</td></tr></table>'
+                     % (_frag, fmt_int(_tot), fmt_int(_big)))
+
     sub("Memory / Paging")
     parts.append('<table class="t"><tr><th>Metric</th><th class="n">Total</th>'
                  '<th class="n">Per Second</th></tr>')
@@ -34396,6 +34487,15 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                        "unknown, e.g. virtio); Speed/Duplex/Queues/Ring from ethtool "
                        "at the END snap.")
         note("\n".join(_nl))
+    _bond = win["os"].get(("end", "bonding"), "") or ""
+    if _bond.strip():
+        _bl = []
+        for _ln in _bond.strip().splitlines():
+            _f = _ln.split("|")
+            if len(_f) >= 3:
+                _bl.append("%s(%s, active=%s)" % (_f[0], _f[1] or "?", _f[2] or "?"))
+        if _bl:
+            note("bond: " + "; ".join(_bl))
     parts.append('<table class="t"><tr>' + _nh)
     if not ifaces:
         parts.append('<tr><td colspan="%d" class="note">no network interfaces</td></tr>' % (7 + (7 if _nmeta else 0)))
@@ -34415,6 +34515,23 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         row += '</tr>'
         parts.append(row)
     parts.append('</table>')
+    # per-interface rx_missed_errors (ring-full subset of the merged drop) --
+    # cumulative counter -> window Δ (last-minus-first)
+    if os_smp is not None and os_smp.get("netmiss"):
+        _mm = {}
+        for _, _p in os_smp["netmiss"]:
+            _f = _p.split(",")
+            if len(_f) == 2:
+                _mm.setdefault(_f[0], []).append(int(_f[1]))
+        _mrow = []
+        for _if, _vals in _mm.items():
+            _d = max(0, _vals[-1] - _vals[0]) if len(_vals) >= 2 else _vals[-1]
+            if _d > 0:
+                _mrow.append('<tr><td>%s</td><td class="n">%d</td></tr>' % (esc(_if), _d))
+        if _mrow:
+            parts.append('<div class="sub">RX missed (ring-full, Δ)</div>')
+            parts.append('<table class="t"><tr><th>Interface</th><th class="n">missed Δ</th></tr>'
+                         + "".join(_mrow) + '</table>')
     if os_smp is not None:
         parts.append(osmin_net_table(os_smp, m.get("begin_ts", "")))
 
@@ -34434,7 +34551,11 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
              "snap.\n"
              "Send-Q = bytes queued unsent (limited by the receiver window or cwnd); "
              "cwnd = congestion window (in-flight limit the kernel allows).\n"
-             "retr = retransmitted segments on that connection; RTTVar = RTT variance.")
+             "retr = retransmitted segments on that connection; RTTVar = RTT variance.\n"
+             "rcv_rtt = receive-side RTT (recv queue latency): rcv_rtt >> rtt means the "
+             "peer is not reading its socket (large result-set pull stalled).\n"
+             "min_rtt = window-minimum RTT (path floor, no queueing): rtt >> min_rtt "
+             "means the excess is local queueing, not distance.")
         if _rttser:
             note("Per-stream throughput ceiling (Mathis) ~ 1.22*MSS*8 / (RTT * "
                  "sqrt(loss)) from this window's RTT and Retrans% -- how far ONE TCP "
@@ -34496,24 +34617,32 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                         _o2, _o3 = d["rtt_cwnd"], d["rtt_retr"]
                         _vcell = ('<td class="n%s">%.3f</td>'
                                   % (thr_cell_cls(_v, 5.0, 20.0), _v))
+                    _rcv = d["rcv_rtt"]
+                    _mnr = d["min_rtt"]
                     r.append('<tr><td>%s</td><td class="n">%s</td>%s<td>%s</td>'
-                             '<td class="n%s">%s</td><td class="n">%s</td><td class="n">%s</td></tr>'
+                             '<td class="n%s">%s</td><td class="n">%s</td><td class="n">%s</td>'
+                             '<td class="n%s">%s</td><td class="n">%s</td></tr>'
                              % (esc(peer), esc(lport), _vcell, esc(_vt),
                                 thr_cell_cls(_o1v, 5.0, 20.0) if (_o1 == "RTT (ms)" and _o1v is not None) else "",
                                 ("%.3f" % _o1v) if (_o1 == "RTT (ms)" and _o1v is not None)
                                 else (fmt_num(_o1v) if _o1v is not None else "-"),
                                 _o2 if _o2 is not None else "-",
-                                _o3 if _o3 is not None else "-"))
+                                _o3 if _o3 is not None else "-",
+                                thr_cell_cls(_rcv, 5.0, 20.0) if _rcv is not None else "",
+                                ("%.3f" % _rcv) if _rcv is not None else "-",
+                                ("%.3f" % _mnr) if _mnr is not None else "-"))
                 return "".join(r)
             _phdr = ('<table class="t"><tr><th>Peer</th><th>Local Port</th><th>Peak Send-Q</th>'
-                     '<th>Peak Time</th><th>RTT at peak (ms)</th><th>Cwnd</th><th>Retr</th></tr>')
+                     '<th>Peak Time</th><th>RTT at peak (ms)</th><th>Cwnd</th><th>Retr</th>'
+                     '<th>rcv_rtt (ms)</th><th>min_rtt (ms)</th></tr>')
             _bysq = [(k, d) for k, d in sorted(_peaks.items(), key=lambda kv: -kv[1]["max_sq"])
                      if d["max_sq"] > 0][:10]
             if _bysq:
                 parts.append('<div class="sub">Top 10 by Send-Q</div>')
                 parts.append(_phdr + _peak_rows(_bysq, "sq") + '</table>')
             _phdr2 = ('<table class="t"><tr><th>Peer</th><th>Local Port</th><th>Peak RTT (ms)</th>'
-                      '<th>Peak Time</th><th>Send-Q at peak</th><th>Cwnd</th><th>Retr</th></tr>')
+                      '<th>Peak Time</th><th>Send-Q at peak</th><th>Cwnd</th><th>Retr</th>'
+                      '<th>rcv_rtt (ms)</th><th>min_rtt (ms)</th></tr>')
             _byrtt = sorted(_peaks.items(), key=lambda kv: -kv[1]["max_rtt"])[:10]
             if _byrtt:
                 parts.append('<div class="sub">Top 10 by RTT</div>')
@@ -34539,6 +34668,17 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             parts.append('<div class="sub">Top 10 by RTT</div>')
             parts.append(_phdr + _peer_rows(sorted(_rttconns, key=lambda c: -c["rtt_ms"])[:10]) + '</table>')
 
+    # Listener accept-queue gauge (VB port; per-minute ss -lnt). Recv-Q = current
+    # accept-queue depth (pre-overflow signal), Send-Q = listen backlog capacity.
+    if os_smp is not None and os_smp.get("lstn"):
+        _lmax = max(int(p.split(",")[0]) for _, p in os_smp["lstn"])
+        _lcap = max(int(p.split(",")[1]) for _, p in os_smp["lstn"])
+        parts.append('<div class="sub">Listener accept queue (VB port)</div>')
+        parts.append('<table class="t"><tr><th>Metric</th><th class="n">Value</th></tr>'
+                     '<tr><td>Recv-Q max (window)</td><td class="n">%d</td></tr>'
+                     '<tr><td>Send-Q (backlog)</td><td class="n">%d</td></tr>'
+                     '<tr><td>Peak fill</td><td class="n">%.1f%%</td></tr></table>'
+                     % (_lmax, _lcap, (100.0 * _lmax / _lcap) if _lcap else 0.0))
     _sn = osd.get("softnet")
     if _sn is not None:
         sub("Softnet")
@@ -34586,6 +34726,18 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             parts.append('<tr><td>%s</td><td>%s</td><td%s>%+.0f</td><td%s>%.3f</td></tr>'
                          % (esc(r["proto"]), esc(r["name"]), _m, r["delta"], _m, r["per_sec"]))
         parts.append('</table>')
+
+    # conntrack (nf_conntrack; no rows = netfilter module not loaded). count/max
+    # gauge; near 100% fill = table full -> early_drop then packet drop.
+    if os_smp is not None and os_smp.get("conntrack"):
+        _cmax = max(int(p.split(",")[0]) for _, p in os_smp["conntrack"])
+        _clim = max(int(p.split(",")[1]) for _, p in os_smp["conntrack"])
+        parts.append('<div class="sub">conntrack (netfilter)</div>')
+        parts.append('<table class="t"><tr><th>Metric</th><th class="n">Value</th></tr>'
+                     '<tr><td>count max (window)</td><td class="n">%d</td></tr>'
+                     '<tr><td>limit (nf_conntrack_max)</td><td class="n">%d</td></tr>'
+                     '<tr><td>Peak fill</td><td class="n">%.1f%%</td></tr></table>'
+                     % (_cmax, _clim, (100.0 * _cmax / _clim) if _clim else 0.0))
 
     # ================= Kernel Messages (dmesg) =================
     # LAST SUB of OS Statistics (user 2026-09-17: not a standalone section).
@@ -38037,11 +38189,16 @@ _awr_lt_stack_sample() {
 #   net,<ts>,<raw /proc/net/dev iface line>  (same; proc_net_ifaces filters)
 #   tcp,<ts>,ActiveOpens,PassiveOpens,CurrEstab,OutSegs,RetransSegs  (snmp)
 #   tcpext,<ts>,ListenDrops,ListenOverflows,Timeouts,SynRetrans      (netstat TcpExt)
+#   thp,<ts>,compact_stall,compact_fail,thp_fault_alloc,thp_collapse_alloc (vmstat)
+#   conntrack,<ts>,count,max   (nf_conntrack; row omitted when module absent)
+#   lstn,<ts>,recvq,sendq      (VB-port listener accept queue; ss -lnt4)
+#   netmiss,<ts>,iface,rx_missed (sysfs rx_missed_errors, only when non-zero)
+#   buddy,<ts>,total_free,order9_plus (buddyinfo; 2MB+ contiguous free = fragmentation inverse)
 #   ssrtt,<ts>,conns,rtt_min,rtt_avg,rtt_max,rtt_p95,worst_peer,worst_rtt
 #          (ss -ti over ESTABLISHED, loopback peers excluded; rtt = kernel
 #           smoothed estimate in ms; worst_rtt is worst_peer's rtt. Row is
 #           omitted when 0 qualifying conns / no ss -> renderer hides RTT)
-#   sspeer,<ts>,peer,lport,rtt,rttvar,cwnd,retrans,mss,sendq
+#   sspeer,<ts>,peer,lport,rtt,rttvar,cwnd,retrans,mss,sendq,rcv_rtt,min_rtt,rcv_space
 #          (per-CONNECTION rows, only the minute's top offenders: top 3 by
 #           sendq (non-zero) + top 3 by rtt, deduped. Gives the renderer
 #           window-PEAK per-peer tables instead of a single END-snap instant;
@@ -38127,6 +38284,15 @@ _awr_repl_sample() {
         /^pswpout /       { pso=$2 }
         /^pgfault /       { pf=$2 }
         /^pgmajfault /    { pmf=$2 }
+        /^compact_stall /      { cst=$2 }
+        /^compact_fail /       { cfa=$2 }
+        /^thp_fault_alloc /    { tfa=$2 }
+        /^thp_collapse_alloc / { tca=$2 }
+        # buddyinfo: per-zone per-order free pages. $5=order0 ... $15=order10;
+        # bbig = order>=9 (2MB+ contiguous) = THP/shared_buffers 可用的连续大块
+        /^Node / {
+            for (i = 5; i <= NF; i++) { btot += $i; if (i >= 14) bbig += $i }
+        }
         /^MemTotal:/      { mt=$2 }
         /^MemFree:/       { mfr=$2 }
         /^MemAvailable:/  { mav=$2 }
@@ -38180,8 +38346,34 @@ _awr_repl_sample() {
             }
             if (tcpok) print "tcp," ts "," taop+0 "," tpop+0 "," tces+0 "," tosg+0 "," trsg+0
             if (extok) print "tcpext," ts "," tld+0 "," tlo+0 "," tto+0 "," tsr+0
+            if (cst != "" || tfa != "") print "thp," ts "," cst+0 "," cfa+0 "," tfa+0 "," tca+0
+            if (btot > 0) print "buddy," ts "," btot+0 "," bbig+0
         }
-    ' /proc/stat /proc/vmstat /proc/meminfo /proc/zoneinfo /proc/diskstats /proc/net/dev /proc/net/snmp /proc/net/netstat >> "$of" 2>/dev/null
+    ' /proc/stat /proc/vmstat /proc/meminfo /proc/zoneinfo /proc/buddyinfo /proc/diskstats /proc/net/dev /proc/net/snmp /proc/net/netstat >> "$of" 2>/dev/null
+    # ---- conntrack count (firewall/nat only; file absent = no conntrack module) ----
+    if [ -r /proc/sys/net/netfilter/nf_conntrack_count ]; then
+        ccount=$(cat /proc/sys/net/netfilter/nf_conntrack_count 2>/dev/null)
+        cmax=$(cat /proc/sys/net/netfilter/nf_conntrack_max 2>/dev/null)
+        [ -n "$ccount" ] && printf 'conntrack,%s,%s,%s\n' "$ts" "${ccount:-0}" "${cmax:-0}" >> "$of" 2>/dev/null
+    fi
+    # ---- per-interface rx_missed_errors (ring-full drops). /proc/net/dev's
+    # "drop" already merges rx_missed into rx_dropped, so this is the SPLIT
+    # (not a duplicate): missed = ring-overflow subset of that merged drop.
+    for _m in /sys/class/net/*/statistics/rx_missed_errors; do
+        [ -r "$_m" ] || continue
+        _mif=${_m%/statistics/rx_missed_errors}; _mif=${_mif##*/}
+        case "$_mif" in lo|veth*|br-*|docker*|virbr*|tap*|tunl*) continue;; esac
+        _mv=$(cat "$_m" 2>/dev/null)
+        [ -n "$_mv" ] && [ "$_mv" != "0" ] && printf 'netmiss,%s,%s,%s\n' "$ts" "$_mif" "$_mv" >> "$of" 2>/dev/null
+    done
+    # ---- listener accept-queue gauge (VB port only; same PGPORT the sampler's
+    # psql connects with). Recv-Q=当前积压, Send-Q=backlog 容量. ----
+    _ssbin=$(command -v ss 2>/dev/null || echo /usr/sbin/ss)
+    if [ -x "$_ssbin" ]; then
+        lstn=$("$_ssbin" -lnt4 sport = :"${PGPORT:-5432}" 2>/dev/null | \
+               awk 'NR>1 && $1=="LISTEN" { print $2 "," $3; exit }')
+        [ -n "$lstn" ] && printf 'lstn,%s,%s\n' "$ts" "$lstn" >> "$of" 2>/dev/null
+    fi
     # ---- TCP RTT sample: ss -ti over ESTABLISHED sockets; loopback peers are
     # excluded (their sub-0.1ms rtt would pin rtt_min to ~0 and drown the real
     # network signal). Emits per minute: ONE aggregate ssrtt row (iff >=1
@@ -38204,9 +38396,10 @@ _awr_repl_sample() {
                     ci++; cpeer[ci] = peer; clport[ci] = lport; crt[ci] = rttv
                     crtv[ci] = rttvv; ccw[ci] = cwndv + 0; cre[ci] = retrv + 0
                     cmss[ci] = mssv + 0; csq[ci] = sqv + 0
+                    crcr[ci] = rcvrv + 0; cmnr[ci] = minrv + 0; cspc[ci] = rcvsv + 0
                 }
                 peer = ""; keep = 0; gotrtt = 0; rttv = rttvv = 0
-                cwndv = retrv = mssv = 0
+                cwndv = retrv = mssv = 0; rcvrv = minrv = rcvsv = 0
             }
             $1 == "ESTAB" || ($1 ~ /^[0-9]+$/ && NF >= 4) {
                 flushconn()
@@ -38225,6 +38418,9 @@ _awr_repl_sample() {
                     if (!cwndv && match($0, /cwnd:[0-9]+/)) cwndv = substr($0, RSTART + 5, RLENGTH - 5) + 0
                     if (!retrv && match($0, /retrans:[0-9]+\//)) retrv = substr($0, RSTART + 8, RLENGTH - 8) + 0
                     if (!mssv && match($0, /mss:[0-9]+/)) mssv = substr($0, RSTART + 4, RLENGTH - 4) + 0
+                    if (!rcvrv && match($0, /rcv_rtt:[0-9]+\.?[0-9]*/)) rcvrv = substr($0, RSTART + 8, RLENGTH - 8) + 0
+                    if (!minrv && match($0, /min_rtt:[0-9]+\.?[0-9]*/)) minrv = substr($0, RSTART + 8, RLENGTH - 8) + 0
+                    if (!rcvsv && match($0, /rcv_space:[0-9]+/)) rcvsv = substr($0, RSTART + 10, RLENGTH - 10) + 0
                 }
             }
             END {
@@ -38254,9 +38450,10 @@ _awr_repl_sample() {
                         if (bi) used[bi] = emit[bi] = 1
                     }
                     for (i = 1; i <= ci; i++) if (emit[i])
-                        printf "sspeer,%s,%s,%s,%.3f,%.3f,%d,%d,%d,%d\n", \
+                        printf "sspeer,%s,%s,%s,%.3f,%.3f,%d,%d,%d,%d,%.3f,%.3f,%d\n", \
                                ts, cpeer[i], clport[i], crt[i], crtv[i], \
-                               ccw[i], cre[i], cmss[i], csq[i]
+                               ccw[i], cre[i], cmss[i], csq[i], \
+                               crcr[i], cmnr[i], cspc[i]
                 }
             }
         ' >> "$of" 2>/dev/null
