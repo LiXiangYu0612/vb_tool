@@ -34380,45 +34380,60 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
 
 
     # ================= Memory Fragmentation (buddyinfo) =================
-    # /proc/buddyinfo: per zone, the number of free blocks at each buddy order;
-    # a block of order n is 2^n contiguous pages. Begin/End come from the
-    # snapshots. The metric table computes the classic EXTERNAL FRAGMENTATION
-    # rate for a 2MB request:
-    #     frag% = 1 - (free pages usable as 2MB blocks) / (all free pages)
-    # usable = sum over order >= 9 of blocks_o * 2^o (bigger blocks split down).
-    # 0% = all free memory sits in 2MB+ pieces; 100% = no 2MB block can be
-    # formed without compaction (the direct-compaction stall source).
-    def _bud_orders(phase):
-        _o = {}
+    # /proc/buddyinfo lists, PER ZONE, how many free blocks exist at each buddy
+    # order; a block of order n is 2^n contiguous pages. Fragmentation is a
+    # per-zone property (a block can never span zones), so nothing here is
+    # summed across zones. Begin/End come from the snapshots.
+    #   frag% = 1 - (free pages usable as 2MB blocks) / (free pages of the zone)
+    # usable = sum over order >= 9 of blocks_o * 2^o (bigger blocks split down)
+    def _bud_zones(phase):
+        _z = {}
         for _ln in (win["os"].get((phase, "buddyinfo"), "") or "").splitlines():
             _f = _ln.split()
             if len(_f) < 5 or _f[0] != "Node":
                 continue
+            _key = "node %s zone %s" % (_f[1].rstrip(","),
+                                        _f[3] if _f[2] == "zone" else "?")
+            _d = _z.setdefault(_key, {})
             for _i, _v in enumerate(_f[4:]):
                 if _v.isdigit():
-                    _o[_i] = _o.get(_i, 0) + int(_v)
-        return _o
-    _bo, _eo = _bud_orders("begin"), _bud_orders("end")
-    if _bo or _eo:
-        _ords = sorted(set(_bo) | set(_eo))
+                    _d[_i] = _d.get(_i, 0) + int(_v)
+        return _z
+    _bz, _ez = _bud_zones("begin"), _bud_zones("end")
+    if _bz or _ez:
+        _zones = sorted(set(_bz) | set(_ez))
+        _ords = sorted({o for d in list(_bz.values()) + list(_ez.values()) for o in d})
+        # buddyinfo counts BLOCKS; every number below is converted to PAGES
+        # (blocks * 2^order) so columns and totals are the same unit
+        def _pg(d, o):
+            return d.get(o, 0) * (1 << o)
         parts.append('<div class="sub">Memory fragmentation</div>')
-        _bh = ['<table class="t"><tr><th>Order</th>']
+        _bh = ['<table class="t"><tr><th>Zone</th><th>Phase</th>']
         _bh += ['<th class="n">%d</th>' % _o for _o in _ords]
         _bh.append('<th class="n">Total</th></tr>')
-        for _lbl, _d in (("Begin", _bo), ("End", _eo)):
-            _bh.append('<tr><td>%s</td>' % _lbl)
-            _bh += ['<td class="n">%s</td>' % fmt_int(_d.get(_o, 0)) for _o in _ords]
-            _bh.append('<td class="n">%s</td></tr>'
-                       % fmt_int(sum(_d.get(_o, 0) for _o in _ords)))
-        _bh.append('<tr><td>delta</td>')
-        _bh += ['<td class="n">%+d</td>' % (_eo.get(_o, 0) - _bo.get(_o, 0)) for _o in _ords]
-        _bh.append('<td class="n">%+d</td></tr>'
-                   % (sum(_eo.values()) - sum(_bo.values())))
+        for _z in _zones:
+            _b, _e = _bz.get(_z, {}), _ez.get(_z, {})
+            for _ph in ("Begin", "End", "delta"):
+                _bh.append('<tr><td>%s</td><td>%s</td>' % (esc(_z), _ph))
+                for _o in _ords:
+                    if _ph == "delta":
+                        _bh.append('<td class="n">%+d</td>' % (_pg(_e, _o) - _pg(_b, _o)))
+                    else:
+                        _bh.append('<td class="n">%s</td>'
+                                   % fmt_int(_pg(_b if _ph == "Begin" else _e, _o)))
+                if _ph == "delta":
+                    _bh.append('<td class="n">%+d</td></tr>'
+                               % (sum(_pg(_e, o) for o in _ords)
+                                  - sum(_pg(_b, o) for o in _ords)))
+                else:
+                    _bh.append('<td class="n">%s</td></tr>'
+                               % fmt_int(sum(_pg(_b if _ph == "Begin" else _e, o)
+                                             for o in _ords)))
         _bh.append('</table>')
         parts.append("".join(_bh))
 
         def _frag(d):
-            _tot = sum(d.values())
+            _tot = sum(v * (1 << o) for o, v in d.items())   # free pages
             # pages held in blocks of order >= 9 (buddyinfo counts BLOCKS, so
             # a count has to be scaled by the block size 2^o to get pages)
             _big = sum(v * (1 << o) for o, v in d.items() if o >= 9)
@@ -34426,35 +34441,41 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             _lg = max([o for o, v in d.items() if v > 0], default=None)
             _pct = (100.0 * (1.0 - _big / _tot)) if _tot else None
             return _tot, _big, _blk, _lg, _pct
-        _fb, _fe = _frag(_bo), _frag(_eo)
 
         def _pc(v):
             return "-" if v is None else ("%.2f%%" % v)
-        parts.append('<table class="t"><tr><th>Metric</th><th class="n">Begin</th>'
-                     '<th class="n">End</th></tr>'
-                     '<tr><td>free pages</td><td class="n">%s</td><td class="n">%s</td></tr>'
-                     '<tr><td>free pages in 2MB+ blocks</td>'
-                     '<td class="n">%s</td><td class="n">%s</td></tr>'
-                     '<tr><td>2MB blocks available</td>'
-                     '<td class="n">%s</td><td class="n">%s</td></tr>'
-                     '<tr><td>largest free block order</td>'
-                     '<td class="n">%s</td><td class="n">%s</td></tr>'
-                     '<tr><td>external fragmentation 2MB</td>'
-                     '<td class="n">%s</td><td class="n">%s</td></tr></table>'
-                     % (fmt_int(_fb[0]), fmt_int(_fe[0]),
-                        fmt_int(_fb[1]), fmt_int(_fe[1]),
-                        fmt_int(_fb[2]), fmt_int(_fe[2]),
-                        "-" if _fb[3] is None else _fb[3],
-                        "-" if _fe[3] is None else _fe[3],
-                        _pc(_fb[4]), _pc(_fe[4])))
+        parts.append('<table class="t"><tr><th>Zone</th><th>Phase</th>'
+                     '<th class="n">free pages</th><th class="n">2MB+ pages</th>'
+                     '<th class="n">2MB blocks</th><th class="n">largest order</th>'
+                     '<th class="n">fragmentation</th></tr>')
+        for _z in _zones:
+            _fb = _frag(_bz.get(_z, {}))
+            _fe = _frag(_ez.get(_z, {}))
+            for _ph, _m in (("Begin", _fb), ("End", _fe)):
+                parts.append('<tr><td>%s</td><td>%s</td><td class="n">%s</td>'
+                             '<td class="n">%s</td><td class="n">%s</td>'
+                             '<td class="n">%s</td><td class="n">%s</td></tr>'
+                             % (esc(_z), _ph, fmt_int(_m[0]), fmt_int(_m[1]),
+                                fmt_int(_m[2]),
+                                "-" if _m[3] is None else _m[3], _pc(_m[4])))
+            _dp = ("%+.2f%%" % (_fe[4] - _fb[4])
+                   if (_fe[4] is not None and _fb[4] is not None) else "-")
+            parts.append('<tr><td>%s</td><td>delta</td><td class="n">%+d</td>'
+                         '<td class="n">%+d</td><td class="n">%+d</td>'
+                         '<td class="n">-</td><td class="n">%s</td></tr>'
+                         % (esc(_z), _fe[0] - _fb[0], _fe[1] - _fb[1],
+                            _fe[2] - _fb[2], _dp))
+        parts.append('</table>')
         note("Order n = one free block of 2^n contiguous pages (2MB = order 9 "
-             "at 4KB base pages). External fragmentation = 1 - (free pages "
-             "available as 2MB+ blocks / all free pages): 0% means every free "
-             "page is in a 2MB+ chunk, 100% means no 2MB block can be formed "
-             "without compaction. '2MB blocks available' splits higher orders "
-             "down (one order 10 block = two order 9 blocks). Counts are summed "
-             "over all zones; a block cannot span zones, so the worst single "
-             "zone can be more fragmented than this total suggests.")
+             "at 4KB base pages); /proc/buddyinfo counts BLOCKS, so every cell "
+             "above is blocks * 2^order = PAGES. Everything is per zone: a "
+             "block can never span zones, so a node-wide average would hide the "
+             "fragmented zone. "
+             "External fragmentation = 1 - (free pages available as 2MB+ blocks "
+             "/ the zone's free pages): 0% means every free page of that zone is "
+             "in a 2MB+ chunk, 100% means no 2MB block can be formed there "
+             "without compaction. '2MB blocks' counts order 9 blocks obtainable "
+             "by splitting bigger ones (one order 10 block = two order 9).")
 
     sub("Memory / Paging")
     parts.append('<table class="t"><tr><th>Metric</th><th class="n">Total</th>'
@@ -34737,10 +34758,10 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             parts.append('<div class="sub">Top 10 by RTT</div>')
             parts.append(_phdr + _peer_rows(sorted(_rttconns, key=lambda c: -c["rtt_ms"])[:10]) + '</table>')
 
-    # Listener, per minute: the listen socket's Recv-Q (accepted-not-yet queue,
-    # the pre-overflow signal) and Send-Q (backlog capacity), plus how many TCP
-    # sockets in total sit on the DB port in each state (ESTAB / TIME-WAIT /
-    # CLOSE-WAIT / ...). Both come from the same minute's ss pass.
+    # TCP sockets on the DB port, per minute: every state is a column (a 0 is a
+    # measurement, '-' means the sampler did not log that state), next to the
+    # listen socket's Recv-Q (accepted-not-yet queue, the pre-overflow signal)
+    # and Send-Q (backlog capacity). Both come from the same minute's ss pass.
     if os_smp is not None and (os_smp.get("lstn") or os_smp.get("lstnsock")):
         _lq = {ts: p.split(",") for ts, p in os_smp.get("lstn", [])}
         _ls = {}
@@ -34748,11 +34769,11 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             _f = _p.split(",")
             if len(_f) == 2:
                 _ls.setdefault(_ts, {})[_f[0]] = int(_f[1])
-        _order = ["LISTEN", "ESTAB", "SYN-SENT", "SYN-RECV", "FIN-WAIT-1", "FIN-WAIT-2",
-                  "TIME-WAIT", "CLOSE-WAIT", "CLOSING", "LAST-ACK"]
-        _states = sorted({s for d in _ls.values() for s in d},
-                         key=lambda s: (_order.index(s) if s in _order else 99, s))
-        parts.append('<div class="sub">Listener accept queue</div>')
+        _std = ["LISTEN", "ESTAB", "SYN-SENT", "SYN-RECV", "FIN-WAIT-1", "FIN-WAIT-2",
+                "TIME-WAIT", "CLOSE-WAIT", "CLOSING", "LAST-ACK", "CLOSED"]
+        _extra = sorted(s for d in _ls.values() for s in d if s not in _std)
+        _states = _std + _extra
+        parts.append('<div class="sub">TCP Sockets</div>')
         _lh = ['<table class="t"><tr><th>Time</th><th class="n">Recv-Q</th>'
                '<th class="n">Send-Q</th>']
         _lh += ['<th class="n">%s</th>' % esc(_s) for _s in _states]
@@ -34766,11 +34787,13 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                                   for _s in _states)))
         _lh.append('</table>')
         parts.append("".join(_lh))
-        note("Recv-Q = connections completed but not yet accepted by the listener "
-             "(grows when the backend cannot keep up; overflow shows up as "
-             "ListenOverflows above). Send-Q = listen backlog. "
-             "The state columns count every TCP socket whose LOCAL port is the "
-             "DB port that minute; '-' = no row logged by the sampler.")
+        note("Counts every TCP socket whose LOCAL port is the DB port, in each "
+             "state; 0 = that state was sampled and had no socket. "
+             "Recv-Q / Send-Q are the listening socket's: Recv-Q = connections "
+             "completed but not yet accepted (grows when the backend cannot keep "
+             "up; overflow shows up as ListenOverflows above), Send-Q = the "
+             "listen backlog. '-' = that state was not logged by the sampler "
+             "(older snapshots).")
     _sn = osd.get("softnet")
     if _sn is not None:
         sub("Softnet")
@@ -38458,13 +38481,19 @@ _awr_repl_sample() {
         lstn=$("$_ssbin" -lnt4 sport = :"${PGPORT:-5432}" 2>/dev/null | \
                awk 'NR>1 && $1=="LISTEN" { print $2 "," $3; exit }')
         [ -n "$lstn" ] && printf 'lstn,%s,%s\n' "$ts" "$lstn" >> "$of" 2>/dev/null
-        # every TCP socket whose LOCAL port is the DB port, counted by state
-        # (LISTEN/ESTAB/TIME-WAIT/CLOSE-WAIT/...), one row per state per minute.
-        # $1 is the State column -- skip it unless it is a real state token, so
-        # an old iproute2 without that column cannot feed Recv-Q numbers in.
+        # every TCP socket whose LOCAL port is the DB port, counted by state.
+        # ALL states are written every minute (0 when absent) so a missing row
+        # always means "not sampled", never "none". $1 is the State column --
+        # skip it unless it is a real state token, so an old iproute2 without
+        # that column cannot feed Recv-Q numbers in. A state this kernel prints
+        # but the canonical list lacks still gets its own row.
         "$_ssbin" -tan4 sport = :"${PGPORT:-5432}" 2>/dev/null | \
-            awk -v ts="$ts" 'NR>1 && $1 ~ /^[A-Z][A-Z0-9-]*$/ { c[$1]++ }
-                             END { for (s in c) printf "lstnsock,%s,%s,%d\n", ts, s, c[s] }' \
+            awk -v ts="$ts" '
+                BEGIN { n = split("LISTEN ESTAB SYN-SENT SYN-RECV FIN-WAIT-1 FIN-WAIT-2 TIME-WAIT CLOSE-WAIT CLOSING LAST-ACK CLOSED", S, " ");
+                        for (i = 1; i <= n; i++) std[S[i]] = 1 }
+                NR > 1 && $1 ~ /^[A-Z][A-Z0-9-]*$/ { c[$1]++ }
+                END { for (i = 1; i <= n; i++) printf "lstnsock,%s,%s,%d\n", ts, S[i], c[S[i]] + 0
+                      for (s in c) if (!(s in std)) printf "lstnsock,%s,%s,%d\n", ts, s, c[s] }' \
             >> "$of" 2>/dev/null
     fi
     # ---- TCP RTT sample: ss -ti over ESTABLISHED sockets; loopback peers are
