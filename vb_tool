@@ -34376,8 +34376,8 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         _thp0 = [float(x) for x in os_smp["thp"][0][1].split(",")]
         _thp1 = [float(x) for x in os_smp["thp"][-1][1].split(",")]
         _thpd = [max(0, e - b) for b, e in zip(_thp0, _thp1)]
-        parts.append('<div class="sub">THP / Compaction (window Δ)</div>')
-        parts.append('<table class="t"><tr><th>Counter</th><th class="n">Δ</th></tr>'
+        parts.append('<div class="sub">THP / Compaction</div>')
+        parts.append('<table class="t"><tr><th>Counter</th><th class="n">Value</th></tr>'
                      '<tr><td>compact_stall</td><td class="n">%d</td></tr>'
                      '<tr><td>compact_fail</td><td class="n">%d</td></tr>'
                      '<tr><td>thp_fault_alloc</td><td class="n">%d</td></tr>'
@@ -34395,10 +34395,10 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                 if _t > 0:
                     _frag = max(_frag, 100.0 * (1.0 - _b / _t))
                     _tot, _big = _t, _b
-        parts.append('<div class="sub">Memory fragmentation (buddyinfo)</div>')
+        parts.append('<div class="sub">Memory fragmentation</div>')
         parts.append('<table class="t"><tr><th>Metric</th><th class="n">Value</th></tr>'
-                     '<tr><td>fragmentation (window max)</td><td class="n">%.1f%%</td></tr>'
-                     '<tr><td>free pages (total)</td><td class="n">%s</td></tr>'
+                     '<tr><td>fragmentation</td><td class="n">%.1f%%</td></tr>'
+                     '<tr><td>free pages</td><td class="n">%s</td></tr>'
                      '<tr><td>free as 2MB+ blocks</td><td class="n">%s</td></tr></table>'
                      % (_frag, fmt_int(_tot), fmt_int(_big)))
 
@@ -34529,8 +34529,8 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             if _d > 0:
                 _mrow.append('<tr><td>%s</td><td class="n">%d</td></tr>' % (esc(_if), _d))
         if _mrow:
-            parts.append('<div class="sub">RX missed (ring-full, Δ)</div>')
-            parts.append('<table class="t"><tr><th>Interface</th><th class="n">missed Δ</th></tr>'
+            parts.append('<div class="sub">RX missed</div>')
+            parts.append('<table class="t"><tr><th>Interface</th><th class="n">missed</th></tr>'
                          + "".join(_mrow) + '</table>')
     if os_smp is not None:
         parts.append(osmin_net_table(os_smp, m.get("begin_ts", "")))
@@ -34690,8 +34690,8 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         _lcap = max(int(p.split(",")[1]) for _, p in os_smp["lstn"])
         parts.append('<div class="sub">Listener accept queue</div>')
         parts.append('<table class="t"><tr><th>Metric</th><th class="n">Value</th></tr>'
-                     '<tr><td>Recv-Q max (window)</td><td class="n">%d</td></tr>'
-                     '<tr><td>Send-Q (backlog)</td><td class="n">%d</td></tr>'
+                     '<tr><td>Recv-Q max</td><td class="n">%d</td></tr>'
+                     '<tr><td>Send-Q</td><td class="n">%d</td></tr>'
                      '<tr><td>Peak fill</td><td class="n">%.1f%%</td></tr></table>'
                      % (_lmax, _lcap, (100.0 * _lmax / _lcap) if _lcap else 0.0))
     _sn = osd.get("softnet")
@@ -34747,10 +34747,10 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     if os_smp is not None and os_smp.get("conntrack"):
         _cmax = max(int(p.split(",")[0]) for _, p in os_smp["conntrack"])
         _clim = max(int(p.split(",")[1]) for _, p in os_smp["conntrack"])
-        parts.append('<div class="sub">conntrack (netfilter)</div>')
+        parts.append('<div class="sub">conntrack</div>')
         parts.append('<table class="t"><tr><th>Metric</th><th class="n">Value</th></tr>'
-                     '<tr><td>count max (window)</td><td class="n">%d</td></tr>'
-                     '<tr><td>limit (nf_conntrack_max)</td><td class="n">%d</td></tr>'
+                     '<tr><td>count max</td><td class="n">%d</td></tr>'
+                     '<tr><td>limit</td><td class="n">%d</td></tr>'
                      '<tr><td>Peak fill</td><td class="n">%.1f%%</td></tr></table>'
                      % (_cmax, _clim, (100.0 * _cmax / _clim) if _clim else 0.0))
 
