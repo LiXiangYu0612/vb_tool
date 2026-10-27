@@ -26579,7 +26579,7 @@ _vtop_screen_wait() { # WAIT page -- two blocks, both [SESS]-style (boxed banner
         done < <(tail -n +2 "$we_f" 2>/dev/null)
     fi
     # ★基线太旧 = 没有基线 (用户 2026-09-28 拍板, 与 [REPL] 页同一条规则): 基线文件跨页面
-    #   存活, 所以"离开本页一小时再回来"时这一帧的 Δwaits / Δtotal_wait_time 是**一小时**
+    #   存活, 所以"离开本页一小时再回来"时这一帧的 deltawaits / deltatotal_wait_time 是**一小时**
     #   的累计 —— 这两列**不除秒**, 一小时的量看着就像等待事件大爆发, 而页头只写
     #   refresh 15s。超阈值就把基线当作不存在(与"首次进页没有基线文件"走同一条路: 本节
     #   只显示 '-' 占位行), 下一帧自然恢复。we_pts 以前读出来却没人用, 现在正是用它。
@@ -29557,12 +29557,17 @@ _awr_collect() {
         LC_ALL=C sysctl -a 2>/dev/null | sed -E 's/^([^=]+) = (.*)$/\1|\2/' > "$osd/sysctl"
         [ -s "$osd/sysctl" ] || rm -f "$osd/sysctl"
     fi
-    # THP is a sysfs knob, not a sysctl: record the EFFECTIVE value (the one in
-    # brackets of "always [madvise] never") so it shows up with the kernel
-    # parameters as a plain setting.
+    # THP is a sysfs knob, not a sysctl: only whether it is on/off matters here
+    # (user 2026-10-27), so map the effective value (bracketed one of
+    # "always [madvise] never") to enabled/disabled and file it with the rest
+    # of the kernel parameters.
     if [ -r /sys/kernel/mm/transparent_hugepage/enabled ]; then
         _thpv=$(sed -n 's/.*\[\([^]]*\)\].*/\1/p' /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null)
-        [ -n "$_thpv" ] && echo "kernel.transparent_hugepage.enabled|$_thpv" >> "$osd/sysctl"
+        case "$_thpv" in
+            "")        ;;
+            never)     echo "transparent_hugepage|disabled" >> "$osd/sysctl" ;;
+            *)         echo "transparent_hugepage|enabled"  >> "$osd/sysctl" ;;
+        esac
     fi
     # dmesg: INCREMENTAL kernel capture -- only lines NEWER than the last
     # line of the PREVIOUS snapshot's os/dmesg (first snapshot = full dump;
@@ -30292,7 +30297,7 @@ def pct_change(base, cur):
     return (cur - base) / base * 100.0
 
 def arrow_delta(base, cur):
-    """Δ string like '+18.00 s (10.00x)' for display."""
+    """delta string like '+18.00 s (10.00x)' for display."""
     base = to_num(base); cur = to_num(cur)
     d = cur - base
     parts = []
@@ -31091,7 +31096,7 @@ def loadprofile_wal_pw_rows(win, duration):
         ok = (col != "writetim") or tim_ok
         rows.append((label, b, e, e - b, ((e - b) / duration) if duration else 0.0, ok, False, False))
     # pagewriter: Begin/End stay RAW PAGE COUNTS (user 2026-09-15: keep the
-    # original unit there); only Δ Total / Δ Per Second are byte-scaled
+    # original unit there); only delta Total / delta Per Second are byte-scaled
     # (pages x BLCKSZ 8K) and rendered via fmt_bytes like the 'WAL written
     # (xlog insert lsn)' row's deltas
     _pb = _sum("begin", "pagewriter", "pgwr_actual_flush_total_num")
@@ -31993,7 +31998,7 @@ def os_minute_disk_series(samples):
 def os_minute_net_series(samples):
     """{iface: [(ts, deltas, dt)]} -- bytes/packets deltas carried raw; the
     table divides by dt for rates and shows errs/drop as per-minute counts
-    (same Δ semantics as the whole-window table)."""
+    (same delta semantics as the whole-window table)."""
     per_if = {}
     for ts, raw in samples.get("net", []):
         for it in proc_net_ifaces(raw):
@@ -32203,7 +32208,7 @@ def osmin_net_table(samples, begin_ts):
     h = []
     if rows:
         h.append('<table class="t"><tr><th>Time</th><th>Interface</th><th>RX B/s</th><th>TX B/s</th>'
-                 '<th>RX pkt/s</th><th>TX pkt/s</th><th>rx/tx errs (&Delta;)</th><th>rx/tx drop (&Delta;)</th></tr>')
+                 '<th>RX pkt/s</th><th>TX pkt/s</th><th>rx/tx errs (delta)</th><th>rx/tx drop (delta)</th></tr>')
         for ts, ifc, d, dt in rows:
             h.append('<tr><td>%s</td><td>%s</td><td class="n">%s</td><td class="n">%s</td>'
                      '<td class="n">%.1f</td><td class="n">%.1f</td>'
@@ -32831,7 +32836,7 @@ def filesystem_usage_html(win):
          '<th class="n">Inode Free (Begin)</th><th class="n">Inode Free (End)</th>'
          '<th class="n">Space Total (Begin)</th><th class="n">Space Total (End)</th>'
          '<th class="n">Space Free (Begin)</th><th class="n">Space Free (End)</th>'
-         '<th class="n">Δ Inodes Used</th><th class="n">Δ Space Used</th></tr>']
+         '<th class="n">delta Inodes Used</th><th class="n">delta Space Used</th></tr>']
     for (dev, mnt), rb, re_, it_b, it_e, if_b, if_e, kt_b, kt_e, ka_b, ka_e, dino, dkb in rows:
         h.append('<tr><td>%s</td><td>%s</td><td>%s</td>'
                  % (esc(dev), esc(mnt), esc(re_.get("type", ""))))
@@ -33380,8 +33385,8 @@ def render(awr_dir, current_dir, metric, top_n, out_html):
                   key=lambda k: cST.get(k, {}).get(metric_col, 0.0), reverse=True)
     parts.append("<table><tr><th>#</th><th>Query</th><th class='num'>calls base→cur</th>"
                  "<th class='num'>%s base→cur</th><th class='num'>per-call %s</th>"
-                 "<th class='num'>CPU Time Δ</th><th class='num'>IO Time Δ</th>"
-                 "<th class='num'>blocks Δ</th></tr>" % (esc(metric_label), esc(metric_label)))
+                 "<th class='num'>CPU Time delta</th><th class='num'>IO Time delta</th>"
+                 "<th class='num'>blocks delta</th></tr>" % (esc(metric_label), esc(metric_label)))
     if not keys:
         parts.append("<tr><td colspan='8' class='muted'>no data</td></tr>")
     for i, k in enumerate(keys[:top_n], 1):
@@ -33413,7 +33418,7 @@ def render(awr_dir, current_dir, metric, top_n, out_html):
         # calls base→cur (count, neutral)
         cells.append('<td class="num">%s → %s<br><span class="muted">%+s</span></td>'
                      % (fmt_int(bcalls), fmt_int(ccalls), fmt_int(ccalls - bcalls)))
-        # metric base→cur (latency: red if worse) + muted Δ with multiplier
+        # metric base→cur (latency: red if worse) + muted delta with multiplier
         cells.append('<td class="num %s">%s → %s<br><span class="muted">%s</span></td>' % (
             "worse" if cmt > bmt and bmt > 0 else "",
             fmt_us(bmt), fmt_us(cmt), esc(arrow_delta(bmt, cmt))))
@@ -33431,7 +33436,7 @@ def render(awr_dir, current_dir, metric, top_n, out_html):
     parts.append("</table>")
 
     # ---- Wait Events diff ----
-    parts.append("<h2>Wait Events (window Δ)</h2>")
+    parts.append("<h2>Wait Events (window delta)</h2>")
     bWE = delta_rows(bl, "wait_events", "event", ["wait", "total_wait_time"])
     cWE = delta_rows(cur, "wait_events", "event", ["wait", "total_wait_time"])
     we_keys = sorted(set(bWE) | set(cWE),
@@ -33451,12 +33456,12 @@ def render(awr_dir, current_dir, metric, top_n, out_html):
     parts.append("</table>")
 
     # ---- OS diff ----
-    parts.append("<h2>System / OS (window Δ)</h2>")
+    parts.append("<h2>System / OS (window delta)</h2>")
 
     # --- CPU utilization breakdown ---
     parts.append("<h3 class='sub'>CPU utilization</h3>")
     parts.append("<table><tr><th>Component</th><th class='num'>awr</th>"
-                 "<th class='num'>current</th><th class='num'>Δ (pp)</th></tr>")
+                 "<th class='num'>current</th><th class='num'>delta (pp)</th></tr>")
     def cpurow(label, field, warn_up=False):
         bv = bos["cpu"].get(field, 0.0); cv = cos["cpu"].get(field, 0.0)
         cls = " class='num bad'" if warn_up and (cv - bv) > 0.5 else " class='num'"
@@ -33474,7 +33479,7 @@ def render(awr_dir, current_dir, metric, top_n, out_html):
     # --- System rates ---
     parts.append("<h3 class='sub'>System rates (per second)</h3>")
     parts.append("<table><tr><th>Metric</th><th class='num'>awr</th>"
-                 "<th class='num'>current</th><th class='num'>Δ</th></tr>")
+                 "<th class='num'>current</th><th class='num'>delta</th></tr>")
     def srow(label, bv, cv, fmt):
         parts.append("<tr><td>%s</td><td class='num'>%s</td><td class='num'>%s</td>"
                      "<td class='num'>%+s</td></tr>" % (esc(label), fmt(bv), fmt(cv), fmt(cv - bv)))
@@ -33483,8 +33488,8 @@ def render(awr_dir, current_dir, metric, top_n, out_html):
     srow("procs_running (snapshot end)", bos.get("runq_end",0), cos.get("runq_end",0), lambda x: "%d" % int(x))
     parts.append("</table>")
 
-    # --- Disk per device (current rate; Δ vs awr) ---
-    parts.append("<h3 class='sub'>Disk I/O per device (current window rate; (Δ) vs awr)</h3>")
+    # --- Disk per device (current rate; delta vs awr) ---
+    parts.append("<h3 class='sub'>Disk I/O per device (current window rate; (delta) vs awr)</h3>")
     bdd = {d["name"]: d for d in bos.get("disks", [])}
     cdd = {d["name"]: d for d in cos.get("disks", [])}
     parts.append("<table><tr><th>Device</th><th class='num'>read IOPS</th>"
@@ -33505,8 +33510,8 @@ def render(awr_dir, current_dir, metric, top_n, out_html):
         ))
     parts.append("</table>")
 
-    # --- Network per interface (current rate; Δ vs awr) ---
-    parts.append("<h3 class='sub'>Network per interface (current window rate; (Δ) vs awr)</h3>")
+    # --- Network per interface (current rate; delta vs awr) ---
+    parts.append("<h3 class='sub'>Network per interface (current window rate; (delta) vs awr)</h3>")
     bni = {i["name"]: i for i in bos.get("ifaces", [])}
     cni = {i["name"]: i for i in cos.get("ifaces", [])}
     parts.append("<table><tr><th>Interface</th><th class='num'>rx B/s</th>"
@@ -33536,11 +33541,11 @@ def render(awr_dir, current_dir, metric, top_n, out_html):
     parts.append("</table>")
 
     # --- Softirqs ---
-    parts.append("<h3 class='sub'>Softirqs (window Δ, summed across CPUs)</h3>")
+    parts.append("<h3 class='sub'>Softirqs (window delta, summed across CPUs)</h3>")
     bsf = bos.get("softirqs", {}); csf = cos.get("softirqs", {})
     cats = sorted(set(bsf) | set(csf), key=lambda k: abs(csf.get(k, 0.0)), reverse=True)
     parts.append("<table><tr><th>Category</th><th class='num'>awr</th>"
-                 "<th class='num'>current</th><th class='num'>Δ</th></tr>")
+                 "<th class='num'>current</th><th class='num'>delta</th></tr>")
     if not cats:
         parts.append("<tr><td colspan='4' class='muted'>no softirqs data</td></tr>")
     for cat in cats:
@@ -33550,13 +33555,13 @@ def render(awr_dir, current_dir, metric, top_n, out_html):
     parts.append("</table>")
 
     # ---- Instance time model diff ----
-    parts.append("<h2>Instance Time Model (window Δ)</h2>")
+    parts.append("<h2>Instance Time Model (window delta)</h2>")
     bIT = delta_rows(bl, "instance_time", "stat_name", ["value"])
     cIT = delta_rows(cur, "instance_time", "stat_name", ["value"])
     it_keys = sorted(set(bIT) | set(cIT),
                      key=lambda k: cIT.get(k, {}).get("value", 0.0), reverse=True)
     parts.append("<table><tr><th>Stat</th><th class='num'>awr</th><th class='num'>current</th>"
-                 "<th class='num'>Δ</th></tr>")
+                 "<th class='num'>delta</th></tr>")
     if not it_keys:
         parts.append("<tr><td colspan='4' class='muted'>no data</td></tr>")
     for k in it_keys:
@@ -33569,13 +33574,13 @@ def render(awr_dir, current_dir, metric, top_n, out_html):
     parts.append("</table>")
 
     # ---- DB-level stats diff ----
-    parts.append("<h2>DB-level Stats (window Δ, summed over databases)</h2>")
+    parts.append("<h2>DB-level Stats (window delta, summed over databases)</h2>")
     cols = [("xact_commit", "commits", "count"), ("xact_rollback", "rollbacks", "count"),
             ("blks_read", "blks_read", "count"), ("blks_hit", "blks_hit", "count"),
             ("deadlocks", "deadlocks", "count"), ("tup_returned", "tup_returned", "count"),
             ("tup_fetched", "tup_fetched", "count")]
     parts.append("<table><tr><th>Metric</th><th class='num'>awr</th><th class='num'>current</th>"
-                 "<th class='num'>Δ</th></tr>")
+                 "<th class='num'>delta</th></tr>")
     if not bdb and not cdb:
         parts.append("<tr><td colspan='4' class='muted'>no data</td></tr>")
     for col, label, kind in cols:
@@ -33593,7 +33598,7 @@ def render(awr_dir, current_dir, metric, top_n, out_html):
 
     # ---- footer ----
     parts.append("<div class='footer'>Generated by vb_tool awr compare &middot; "
-                 "Δ = current_window(end−begin) − awr_window(end−begin) &middot; "
+                 "delta = current_window(end−begin) − awr_window(end−begin) &middot; "
                  "time-class metrics: red = increased (potential regression).</div>")
     parts.append("</div></body></html>")
 
@@ -33608,7 +33613,7 @@ def render(awr_dir, current_dir, metric, top_n, out_html):
 
 def render_single(window_dir, metric, top_n, out_html):
     """Single-window report: every value is this window's own end−begin delta.
-    Mirrors render()'s sections but single-column (no awr/current/Δ diff)."""
+    Mirrors render()'s sections but single-column (no awr/current/delta diff)."""
     win = load_window(window_dir)
     m = win["meta"]
 
@@ -33664,7 +33669,7 @@ def render_single(window_dir, metric, top_n, out_html):
     card("Net bytes", fmt_bytes(osd["net_bytes"]))
 
     # ---- Top SQL ----
-    parts.append("<h2>Top SQL (by %s, window Δ)</h2>" % esc(metric_label))
+    parts.append("<h2>Top SQL (by %s, window delta)</h2>" % esc(metric_label))
     ST = delta_rows(win, "statement", "unique_sql_id",
                     ["n_calls", "db_time", "cpu_time", "data_io_time",
                      "n_blocks_fetched", "n_returned_rows"])
@@ -33695,7 +33700,7 @@ def render_single(window_dir, metric, top_n, out_html):
     parts.append("</table>")
 
     # ---- Wait Events ----
-    parts.append("<h2>Wait Events (window Δ)</h2>")
+    parts.append("<h2>Wait Events (window delta)</h2>")
     WE = delta_rows(win, "wait_events", "event", ["wait", "total_wait_time"])
     we_keys = sorted(WE.keys(), key=lambda k: WE[k].get("total_wait_time", 0.0), reverse=True)
     parts.append("<table><tr><th>Event</th><th>Type</th><th class='num'>waits</th>"
@@ -33758,8 +33763,8 @@ def render_single(window_dir, metric, top_n, out_html):
     dur = osd.get("dur", 1.0) or 1.0
     parts.append("<table><tr><th>Interface</th><th class='num'>rx B/s</th>"
                  "<th class='num'>tx B/s</th><th class='num'>rx pkt/s</th>"
-                 "<th class='num'>tx pkt/s</th><th class='num'>rx/tx errs (Δ)</th>"
-                 "<th class='num'>rx/tx drop (Δ)</th></tr>")
+                 "<th class='num'>tx pkt/s</th><th class='num'>rx/tx errs (delta)</th>"
+                 "<th class='num'>rx/tx drop (delta)</th></tr>")
     ifaces = osd.get("ifaces", [])
     if not ifaces:
         parts.append("<tr><td colspan='7' class='muted'>no network interfaces</td></tr>")
@@ -33776,7 +33781,7 @@ def render_single(window_dir, metric, top_n, out_html):
                          it.get("rx_drop", 0.0), it.get("tx_drop", 0.0)))
     parts.append("</table>")
 
-    parts.append("<h3 class='sub'>Softirqs (window Δ, summed across CPUs)</h3>")
+    parts.append("<h3 class='sub'>Softirqs (window delta, summed across CPUs)</h3>")
     sf = osd.get("softirqs", {})
     cats = sorted(sf.keys(), key=lambda k: abs(sf[k]), reverse=True)
     parts.append("<table><tr><th>Category</th><th class='num'>count</th></tr>")
@@ -33787,7 +33792,7 @@ def render_single(window_dir, metric, top_n, out_html):
     parts.append("</table>")
 
     # ---- Instance time model ----
-    parts.append("<h2>Instance Time Model (window Δ)</h2>")
+    parts.append("<h2>Instance Time Model (window delta)</h2>")
     IT = delta_rows(win, "instance_time", "stat_name", ["value"])
     it_keys = sorted(IT.keys(), key=lambda k: IT[k].get("value", 0.0), reverse=True)
     parts.append("<table><tr><th>Stat</th><th class='num'>value</th></tr>")
@@ -33799,7 +33804,7 @@ def render_single(window_dir, metric, top_n, out_html):
     parts.append("</table>")
 
     # ---- DB-level stats ----
-    parts.append("<h2>DB-level Stats (window Δ, summed over databases)</h2>")
+    parts.append("<h2>DB-level Stats (window delta, summed over databases)</h2>")
     cols = [("xact_commit", "commits"), ("xact_rollback", "rollbacks"),
             ("blks_read", "blks_read"), ("blks_hit", "blks_hit"),
             ("deadlocks", "deadlocks"), ("tup_returned", "tup_returned"),
@@ -34138,7 +34143,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     if _dbp and _dbe:
         sub("DB Process")
         parts.append('<table class="t"><tr><th></th><th class="n">Begin</th>'
-                     '<th class="n">End</th><th class="n">Δ</th></tr>')
+                     '<th class="n">End</th><th class="n">delta</th></tr>')
         parts.append('<tr><td>Postmaster PID (port %s)</td><td class="n">%s</td>'
                      '<td class="n">%s</td><td class="n">-</td></tr>'
                      % (esc(str(m.get("port", "") or "-")), fmt_int(_dbp[0]), fmt_int(_dbe[0])))
@@ -34168,7 +34173,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                          % (_bv, _ev, _dv))
         # effective rlimits as ROWS in the same table (name tagged
         # "(soft)"/"(hard)", reusing the Begin/End columns); static per
-        # process lifetime -> Δ '-'. Unit-less rows ("Max nice priority 0
+        # process lifetime -> delta '-'. Unit-less rows ("Max nice priority 0
         # 0") and space-bearing names ("Max open files") handled via the
         # known-unit wordlist.
         def _limits_map(txt):
@@ -34361,7 +34366,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     _bm = parse_meminfo(win["os"].get(("begin", "meminfo"), ""))
     _em = parse_meminfo(win["os"].get(("end", "meminfo"), ""))
     parts.append('<table class="t"><tr><th>Metric</th><th class="n">Begin MB</th>'
-                 '<th class="n">End MB</th><th class="n">Δ MB</th></tr>')
+                 '<th class="n">End MB</th><th class="n">delta MB</th></tr>')
     for _lbl in ("MemTotal","MemFree","MemAvailable","Buffers","Cached",
                  "Active","Active(file)","Active(anon)",
                  "Inactive","Inactive(file)","Inactive(anon)",
@@ -34405,7 +34410,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             _bh += ['<td class="n">%s</td>' % fmt_int(_d.get(_o, 0)) for _o in _ords]
             _bh.append('<td class="n">%s</td></tr>'
                        % fmt_int(sum(_d.get(_o, 0) for _o in _ords)))
-        _bh.append('<tr><td>Δ</td>')
+        _bh.append('<tr><td>delta</td>')
         _bh += ['<td class="n">%+d</td>' % (_eo.get(_o, 0) - _bo.get(_o, 0)) for _o in _ords]
         _bh.append('<td class="n">%+d</td></tr>'
                    % (sum(_eo.values()) - sum(_bo.values())))
@@ -34522,13 +34527,13 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     def nrate(it, key):
         return it.get(key, 0.0) / dur_os
     _nmeta = osd.get("net_meta") or {}
-    _nh = '<th>Interface</th><th class="n">RX B per Sec</th><th class="n">TX B per Sec</th><th class="n">RX Pkt per Sec</th><th class="n">TX Pkt per Sec</th><th class="n">RX/TX Errs (Δ)</th><th class="n">RX/TX Drop (Δ)</th>'
+    _nh = '<th>Interface</th><th class="n">RX B per Sec</th><th class="n">TX B per Sec</th><th class="n">RX Pkt per Sec</th><th class="n">TX Pkt per Sec</th><th class="n">RX/TX Errs (delta)</th><th class="n">RX/TX Drop (delta)</th>'
     if _nmeta:
         _nh += '<th class="n">RX Util %</th><th class="n">TX Util %</th><th class="n">Speed</th><th class="n">Duplex</th><th class="n">Queues</th><th class="n">RX Ring</th><th class="n">TX Ring</th>'
     _nh += '</tr>'
     ifaces = osd.get("ifaces", [])
     if ifaces:
-        _nl = ["errs/drop (Δ) = whole-window cumulative deltas, not rates; errs usually "
+        _nl = ["errs/drop (delta) = whole-window cumulative deltas, not rates; errs usually "
                "mean driver or negotiation faults, drops mean ring-buffer or backlog "
                "exhaustion (consider larger ethtool ring buffers or more queues)."]
         if _nmeta:
@@ -34565,7 +34570,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         parts.append(row)
     parts.append('</table>')
     # per-interface rx_missed_errors (ring-full subset of the merged drop) --
-    # cumulative counter -> window Δ (last-minus-first)
+    # cumulative counter -> window delta (last-minus-first)
     if os_smp is not None and os_smp.get("netmiss"):
         _mm = {}
         for _, _p in os_smp["netmiss"]:
@@ -34959,7 +34964,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         note("WARNING: negative delta detected (cumulative counter end < begin) — possible counter reset/wraparound; values in this report may be unreliable.")
     parts.append('<table class="t"><tr><th>Metric</th>'
                  '<th class="n">Begin</th><th class="n">End</th>'
-                 '<th class="n">Δ Total</th><th class="n">Δ Per Second</th></tr>')
+                 '<th class="n">delta Total</th><th class="n">delta Per Second</th></tr>')
     def lp(label, col, blocks=False):
         _b = _dbsum("begin", col); _e = _dbsum("end", col); _d = _e - _b
         parts.append('<tr><td>%s</td><td class="n">%s</td><td class="n">%s</td>'
@@ -35134,7 +35139,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         _hdr = '<table class="t"><tr><th>%s</th>' % esc(key_header or key_col)
         if cnt_col:
             _hdr += '<th class="n">Begin cnt</th><th class="n">End cnt</th>'
-        _hdr += '<th class="n">Begin Size</th><th class="n">End Size</th><th class="n">Δ Size</th></tr>'
+        _hdr += '<th class="n">Begin Size</th><th class="n">End Size</th><th class="n">delta Size</th></tr>'
         _cspan = 6 if cnt_col else 4
         parts.append(_hdr)
         if not _keys:
@@ -35179,7 +35184,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     _es = _sess_sum(win["db"].get(("end", "session_by_sess"), []))
     sub("Session Memory Summary")
     parts.append('<table class="t"><tr><th>Metric</th><th class="n">Begin</th><th class="n">End</th>'
-                 '<th class="n">Δ</th></tr>')
+                 '<th class="n">delta</th></tr>')
     for _lbl, _b, _e, _fmt in (("session count", _bs[0], _es[0], lambda v: fmt_int(v)),
                                ("total size", _bs[1], _es[1], fmt_bytes),
                                ("avg size", _bs[2], _es[2], fmt_bytes),
@@ -35395,7 +35400,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                 _hdr += [_c + " (Begin)", _c + " (End)"]
                 _num += [True]   # be emits TWO headers; extra flag so zip() keeps (End)
             elif _mode == "d":
-                _hdr += [_c + " Δ"]
+                _hdr += [_c + " delta"]
             else:
                 _hdr += [_c]
             _num += [True]           # col_spec columns are numeric -> right-align headers too
@@ -35748,7 +35753,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
 def render_awrdiff(win1, win2, metric, top_n, out_html):
     """AWR-style DIFF report: Period 1 vs Period 2. Each period is a
     build_window_from_snaps() result (its own end-begin delta). Every metric =
-    P1 | P2 | Δ (Δ = P2-P1; %Diff where sensible). Mirrors render_single_awr
+    P1 | P2 | delta (delta = P2-P1; %Diff where sensible). Mirrors render_single_awr
     sections. metric unused (all 6 SQL orderings shown)."""
     CSS_AWR = """
 body { font-family: Arial, Helvetica, Geneva, sans-serif; font-size: 13px; color: #000; background: #fff; margin: 10px; }
@@ -35911,7 +35916,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         '<table><tr><th class="nobg"></th><th class="n">Snaps</th><th class="c">Window</th><th class="n">Duration (s)</th></tr>'
         '<tr><td>Period 1:</td><td class="n">%s &rarr; %s</td><td class="c">%s &rarr; %s</td><td class="n">%s</td></tr>'
         '<tr class="alt"><td>Period 2:</td><td class="n">%s &rarr; %s</td><td>%s &rarr; %s</td><td class="n">%s</td></tr>'
-        '<tr><td>DB Time (s):</td><td></td><td class="c">%s / %s</td><td class="n">&Delta; %s</td></tr>'
+        '<tr><td>DB Time (s):</td><td></td><td class="c">%s / %s</td><td class="n">delta %s</td></tr>'
         '</table></div>' % (
             esc(m2.get("db_name") or m2.get("name") or "?"), esc(m2.get("hostname", "?")),
             esc(_os_version()),
@@ -35959,7 +35964,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         parts.append('<tr><td class="k">%s</td>' % _rl + ''.join(
             '<td class="n%s">%.1f</td>' % (busy_cell_cls(_src["cpu"].get(f, 0.0)) if f == "busy" else '',
                                            _src["cpu"].get(f, 0.0)) for f in _cf) + '</tr>')
-    parts.append('<tr><td class="k">&Delta; (pp)</td>' + ''.join(
+    parts.append('<tr><td class="k">delta (pp)</td>' + ''.join(
         '<td class="n%s">%+.1f</td>' % (
             ' bad' if (f == "iowait" and
                        osd2["cpu"].get(f, 0.0) - osd1["cpu"].get(f, 0.0) > 0.5) else '',
@@ -35990,7 +35995,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         parts.append('</table>')
         parts.append('<table class="t"><tr><th>Node</th><th colspan="3">numa_hit</th>'
                      '<th colspan="3">local_node</th><th colspan="3">other_node</th></tr>'
-                     '<tr><th></th>' + '<th class="n">P1</th><th class="n">P2</th><th class="n">&Delta;</th>' * 3
+                     '<tr><th></th>' + '<th class="n">P1</th><th class="n">P2</th><th class="n">delta</th>' * 3
                      + '</tr>')
         _any = False
         for nid in sorted(_nodes, key=lambda x: int(x) if x.isdigit() else 0):
@@ -36037,13 +36042,13 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     parts.append('<table class="t"><tr><th></th>%s</tr>' % _hdr)
     parts.append(_row("P1", _c1, False))
     parts.append(_row("P2", _c2, False))
-    parts.append(_row("&Delta;", [b - a for a, b in zip(_c1, _c2)], True))
+    parts.append(_row("delta", [b - a for a, b in zip(_c1, _c2)], True))
     parts.append('</table>')
     sub("OS Memory - period-end snapshot, MB")
     _m1 = parse_meminfo(win1["os"].get(("end", "meminfo"), ""))
     _m2 = parse_meminfo(win2["os"].get(("end", "meminfo"), ""))
     parts.append('<table class="t"><tr><th>Metric</th><th class="n">P1 MB</th>'
-                 '<th class="n">P2 MB</th><th class="n">&Delta; MB</th></tr>')
+                 '<th class="n">P2 MB</th><th class="n">delta MB</th></tr>')
     for lbl in ("MemTotal", "MemFree", "MemAvailable", "Buffers", "Cached", "Active",
                 "Slab", "SReclaimable", "SUnreclaim", "Shmem", "Dirty", "PageTables", "SwapFree"):
         v1 = _m1.get(lbl, 0) // 1024; v2 = _m2.get(lbl, 0) // 1024
@@ -36053,7 +36058,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     sub("Memory / Paging")
     vm1 = osd1.get("vm", {}); vm2 = osd2.get("vm", {})
     parts.append('<table class="t"><tr><th>Metric</th><th class="n">P1 /s</th>'
-                 '<th class="n">P2 /s</th><th class="n">&Delta; /s</th></tr>')
+                 '<th class="n">P2 /s</th><th class="n">delta /s</th></tr>')
     for lbl, key in [("page in (pgpgin)", "pgpgin"), ("page out (pgpgout)", "pgpgout"),
                      ("swap in (pswpin)", "pswpin"), ("swap out (pswpout)", "pswpout"),
                      ("minor fault (pgfault)", "pgfault"), ("major fault (pgmajfault)", "pgmajfault")]:
@@ -36137,7 +36142,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     if _s1 is not None or _s2 is not None:
         sub("Softnet")
         parts.append('<table class="t"><tr><th>Metric</th><th class="n">P1</th>'
-                     '<th class="n">P2</th><th class="n">&Delta;</th></tr>')
+                     '<th class="n">P2</th><th class="n">delta</th></tr>')
         for _lbl, _key, _b, _r in (("packets processed", "packets", None, None),
                                    ("dropped", "dropped", 0, 100),
                                    ("time_squeeze", "squeezed", 0, 1000)):
@@ -36154,7 +36159,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     if osd1.get("netstat_ok") or osd2.get("netstat_ok"):
         sub("Network Protocol Errors")
         parts.append('<table class="t"><tr><th>Protocol</th><th>Counter</th>'
-                     '<th class="n">P1 &Delta;</th><th class="n">P2 &Delta;</th><th class="n">&Delta;</th></tr>')
+                     '<th class="n">P1 delta</th><th class="n">P2 delta</th><th class="n">delta</th></tr>')
         # Core rows in fixed order
         dur1 = osd1.get("dur", 1.0) or 1.0
         dur2 = osd2.get("dur", 1.0) or 1.0
@@ -36197,7 +36202,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     it_keys = sorted(set(IT1) | set(IT2),
                      key=lambda k: max(IT1.get(k, {}).get("value", 0), IT2.get(k, {}).get("value", 0)), reverse=True)
     parts.append('<table class="t"><tr><th>Stat</th><th class="n">P1 (s)</th>'
-                 '<th class="n">P2 (s)</th><th class="n">&Delta; (s)</th></tr>')
+                 '<th class="n">P2 (s)</th><th class="n">delta (s)</th></tr>')
     if not it_keys:
         parts.append('<tr><td colspan="4" class="note">no data</td></tr>')
     for k in it_keys:
@@ -36221,7 +36226,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         return _e - _b
     sec("Load Profile")
     parts.append('<table class="t"><tr><th>Metric</th><th class="n">P1 total</th>'
-                 '<th class="n">P2 total</th><th class="n">&Delta;</th>'
+                 '<th class="n">P2 total</th><th class="n">delta</th>'
                  '<th class="n">P1 /s</th><th class="n">P2 /s</th></tr>')
     # logical reads = blks_hit + blks_read (awrrpt parity, user 2026-10-15);
     # SQL calls sits directly under rollbacks
@@ -36334,7 +36339,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     _cr = [r for r in _cr if r[1] or r[2]]
     _cr.sort(key=lambda x: max(x[1], x[2]), reverse=True)
     parts.append('<table class="t"><tr><th>Database</th><th class="n">P1 Hit%</th>'
-                 '<th class="n">P2 Hit%</th><th class="n">&Delta;</th></tr>')
+                 '<th class="n">P2 Hit%</th><th class="n">delta</th></tr>')
     if not _cr:
         parts.append('<tr><td colspan="4" class="note">no data</td></tr>')
     for _dn, r1, r2 in _cr:
@@ -36372,7 +36377,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         d1 = _grp(end_r1, key_col, val_col, key_norm); d2 = _grp(end_r2, key_col, val_col, key_norm)
         _keys = sorted(set(d1) | set(d2), key=lambda k: max(d1.get(k, 0), d2.get(k, 0)), reverse=True)[:top]
         parts.append('<table class="t"><tr><th>%s</th><th class="n">P1</th><th class="n">P2</th>'
-                     '<th class="n">&Delta;</th></tr>' % esc(key_col))
+                     '<th class="n">delta</th></tr>' % esc(key_col))
         if not _keys:
             parts.append('<tr><td colspan="4" class="note">no data</td></tr>')
         for k in _keys:
@@ -36416,7 +36421,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         d1 = _delta(begin_r1, end_r1); d2 = _delta(begin_r2, end_r2)
         _keys = sorted(set(d1) | set(d2),
                        key=lambda k: d2.get(k, {}).get(sort_col, 0) + d1.get(k, {}).get(sort_col, 0), reverse=True)[:top]
-        _hdr = list(key_cols) + [c + " P1" for c in cnt_cols] + [c + " P2" for c in cnt_cols] + [c + " &Delta;" for c in cnt_cols]
+        _hdr = list(key_cols) + [c + " P1" for c in cnt_cols] + [c + " P2" for c in cnt_cols] + [c + " delta" for c in cnt_cols]
         _num = [False] * len(key_cols) + [True] * (3 * len(cnt_cols))
         parts.append('<table class="t"><tr>' + ''.join(
             '<th%s>%s</th>' % (' class="n"' if nu else '', esc(c))
@@ -36438,7 +36443,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
              win2["db"].get(("begin", "object_tables"), []), win2["db"].get(("end", "object_tables"), []),
              ("dbname", "schema", "object"),
              ("seq_scan", "seq_tup_read", "idx_scan", "idx_tup_fetch", "n_tup_upd", "n_tup_del"), "seq_tup_read")
-    obj_diff("Top Objects by Dead Tuples (window Δ)",
+    obj_diff("Top Objects by Dead Tuples (window delta)",
              win1["db"].get(("begin", "object_dead"), []), win1["db"].get(("end", "object_dead"), []),
              win2["db"].get(("begin", "object_dead"), []), win2["db"].get(("end", "object_dead"), []),
              ("dbname", "schema", "object"),
@@ -36454,11 +36459,11 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         # delta'd without presenting full-cumulative counters as a window
         parts.append('<div class="note">object I/O: capture missing on one side of a window (older snapshot); tables skipped</div>')
     else:
-        obj_diff("Top Tables by Logical Reads (window Δ)",
+        obj_diff("Top Tables by Logical Reads (window delta)",
                  _io1b, _io1e, _io2b, _io2e,
                  ("dbname", "schema", "object"),
                  ("logical", "heap", "index", "toast"), "logical")
-        obj_diff("Top Tables by Physical Reads (window Δ)",
+        obj_diff("Top Tables by Physical Reads (window delta)",
                  _io1b, _io1e, _io2b, _io2e,
                  ("dbname", "schema", "object"),
                  ("physical", "pheap", "pindex", "ptoast"), "physical")
@@ -36470,7 +36475,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                      reverse=True)[:10]
     parts.append('<table class="t"><tr><th>Event</th><th>Class</th>'
                  '<th class="n">P1 Waits</th><th class="n">P2 Waits</th>'
-                 '<th class="n">P1 Time (s)</th><th class="n">P2 Time (s)</th><th class="n">&Delta; (s)</th></tr>')
+                 '<th class="n">P1 Time (s)</th><th class="n">P2 Time (s)</th><th class="n">delta (s)</th></tr>')
     if not _we_top:
         parts.append('<tr><td colspan="7" class="note">no data</td></tr>')
     for k in _we_top:
@@ -36588,7 +36593,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                      reverse=True)
     parts.append('<table class="t"><tr><th>Event</th><th>Class</th>'
                  '<th class="n">P1 Waits</th><th class="n">P2 Waits</th>'
-                 '<th class="n">P1 Time (s)</th><th class="n">P2 Time (s)</th><th class="n">&Delta; (s)</th></tr>')
+                 '<th class="n">P1 Time (s)</th><th class="n">P2 Time (s)</th><th class="n">delta (s)</th></tr>')
     if not _we_all:
         parts.append('<tr><td colspan="7" class="note">no data</td></tr>')
     for k in _we_all:
@@ -36687,7 +36692,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
 
     _close_foldsec()
     parts.append('<div class="foot">Generated by vb_tool awr awrdiff &middot; diff report &middot; '
-                 'each value = period(end-begin); &Delta; = P2-P1; %%Diff = (P2-P1)/|P1|.</div>')
+                 'each value = period(end-begin); delta = P2-P1; %%Diff = (P2-P1)/|P1|.</div>')
     parts.append('</body></html>')
 
     htmls = "".join(parts)
