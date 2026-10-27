@@ -34835,11 +34835,12 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                          % (esc(r["proto"]), esc(r["name"]), _m, r["delta"], _m, r["per_sec"]))
         parts.append('</table>')
 
-    # conntrack (nf_conntrack; no rows = netfilter module not loaded), per
-    # minute: count vs limit gauge; near 100% fill = table full -> early_drop
-    # then packet drop.
+    # conntrack (nf_conntrack), per minute: count vs limit gauge; near 100%
+    # fill = table full -> early_drop then packet drop. The heading is always
+    # emitted (so the TOC has it); with no rows (module not loaded) it stays
+    # empty rather than disappearing.
+    sub("Conntrack")
     if os_smp is not None and os_smp.get("conntrack"):
-        sub("Conntrack")
         _ch = ['<table class="t"><tr><th>Time</th><th class="n">count</th>'
                '<th class="n">limit</th><th class="n">fill</th></tr>']
         for _ts, _p in os_smp["conntrack"]:
