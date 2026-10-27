@@ -34407,7 +34407,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         # (blocks * 2^order) so columns and totals are the same unit
         def _pg(d, o):
             return d.get(o, 0) * (1 << o)
-        sub("Memory fragmentation")
+        sub("Memory Fragmentation")
         _bh = ['<table class="t"><tr><th>Zone</th><th>Phase</th>']
         _bh += ['<th class="n">%d</th>' % _o for _o in _ords]
         _bh.append('<th class="n">Total</th></tr>')
@@ -34604,7 +34604,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             if _d > 0:
                 _mrow.append('<tr><td>%s</td><td class="n">%d</td></tr>' % (esc(_if), _d))
         if _mrow:
-            sub("RX missed")
+            sub("RX Missed")
             parts.append('<table class="t"><tr><th>Interface</th><th class="n">missed</th></tr>'
                          + "".join(_mrow) + '</table>')
     if os_smp is not None:
@@ -34847,7 +34847,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     if os_smp is not None and os_smp.get("conntrack"):
         _cmax = max(int(p.split(",")[0]) for _, p in os_smp["conntrack"])
         _clim = max(int(p.split(",")[1]) for _, p in os_smp["conntrack"])
-        sub("conntrack")
+        sub("Conntrack")
         parts.append('<table class="t"><tr><th>Metric</th><th class="n">Value</th></tr>'
                      '<tr><td>count max</td><td class="n">%d</td></tr>'
                      '<tr><td>limit</td><td class="n">%d</td></tr>'
