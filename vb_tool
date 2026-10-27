@@ -34787,13 +34787,6 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                                   for _s in _states)))
         _lh.append('</table>')
         parts.append("".join(_lh))
-        note("Counts every TCP socket whose LOCAL port is the DB port, in each "
-             "state; 0 = that state was sampled and had no socket. "
-             "Recv-Q / Send-Q are the listening socket's: Recv-Q = connections "
-             "completed but not yet accepted (grows when the backend cannot keep "
-             "up; overflow shows up as ListenOverflows above), Send-Q = the "
-             "listen backlog. '-' = that state was not logged by the sampler "
-             "(older snapshots).")
     _sn = osd.get("softnet")
     if _sn is not None:
         sub("Softnet")
