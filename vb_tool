@@ -34688,7 +34688,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     if os_smp is not None and os_smp.get("lstn"):
         _lmax = max(int(p.split(",")[0]) for _, p in os_smp["lstn"])
         _lcap = max(int(p.split(",")[1]) for _, p in os_smp["lstn"])
-        parts.append('<div class="sub">Listener accept queue (VB port)</div>')
+        parts.append('<div class="sub">Listener accept queue</div>')
         parts.append('<table class="t"><tr><th>Metric</th><th class="n">Value</th></tr>'
                      '<tr><td>Recv-Q max (window)</td><td class="n">%d</td></tr>'
                      '<tr><td>Send-Q (backlog)</td><td class="n">%d</td></tr>'
