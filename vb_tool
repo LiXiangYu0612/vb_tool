@@ -34555,7 +34555,9 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
              "rcv_rtt = receive-side RTT (recv queue latency): rcv_rtt >> rtt means the "
              "peer is not reading its socket (large result-set pull stalled).\n"
              "min_rtt = window-minimum RTT (path floor, no queueing): rtt >> min_rtt "
-             "means the excess is local queueing, not distance.")
+             "means the excess is local queueing, not distance.\n"
+             "ss reports both only for sockets with sampled receive activity; '-' = "
+             "not reported for that connection (not a zero measurement).")
         if _rttser:
             note("Per-stream throughput ceiling (Mathis) ~ 1.22*MSS*8 / (RTT * "
                  "sqrt(loss)) from this window's RTT and Retrans% -- how far ONE TCP "
@@ -34604,6 +34606,12 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             # or had the worst RTT at ANY minute of the window, with the minute
             # it happened -- a mid-window stall that closed before the end snap
             # still shows up (unlike the END-snap fallback below)
+            # rcv_rtt / min_rtt are conditional in ss -ti: a window may hold no
+            # value at all (idle sockets; kernels <4.10 have no min_rtt at all)
+            # -> drop that column instead of printing a wall of '-'. Decided per
+            # column: rcv_rtt present but min_rtt never reported is common.
+            _hasrcv = any(d["rcv_rtt"] is not None for _, d in _peaks.items())
+            _hasmnr = any(d["min_rtt"] is not None for _, d in _peaks.items())
             def _peak_rows(items, mode):
                 r = []
                 for (peer, lport), d in items:
@@ -34619,22 +34627,28 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                                   % (thr_cell_cls(_v, 5.0, 20.0), _v))
                     _rcv = d["rcv_rtt"]
                     _mnr = d["min_rtt"]
+                    _extra = ""
+                    if _hasrcv:
+                        _extra += ('<td class="n%s">%s</td>'
+                                   % (thr_cell_cls(_rcv, 5.0, 20.0) if _rcv is not None else "",
+                                      ("%.3f" % _rcv) if _rcv is not None else "-"))
+                    if _hasmnr:
+                        _extra += ('<td class="n">%s</td>'
+                                   % (("%.3f" % _mnr) if _mnr is not None else "-"))
                     r.append('<tr><td>%s</td><td class="n">%s</td>%s<td>%s</td>'
-                             '<td class="n%s">%s</td><td class="n">%s</td><td class="n">%s</td>'
-                             '<td class="n%s">%s</td><td class="n">%s</td></tr>'
+                             '<td class="n%s">%s</td><td class="n">%s</td><td class="n">%s</td>%s</tr>'
                              % (esc(peer), esc(lport), _vcell, esc(_vt),
                                 thr_cell_cls(_o1v, 5.0, 20.0) if (_o1 == "RTT (ms)" and _o1v is not None) else "",
                                 ("%.3f" % _o1v) if (_o1 == "RTT (ms)" and _o1v is not None)
                                 else (fmt_num(_o1v) if _o1v is not None else "-"),
                                 _o2 if _o2 is not None else "-",
                                 _o3 if _o3 is not None else "-",
-                                thr_cell_cls(_rcv, 5.0, 20.0) if _rcv is not None else "",
-                                ("%.3f" % _rcv) if _rcv is not None else "-",
-                                ("%.3f" % _mnr) if _mnr is not None else "-"))
+                                _extra))
                 return "".join(r)
             _phdr = ('<table class="t"><tr><th>Peer</th><th>Local Port</th><th>Peak Send-Q</th>'
                      '<th>Peak Time</th><th>RTT at peak (ms)</th><th>Cwnd</th><th>Retr</th>'
-                     '<th>rcv_rtt (ms)</th><th>min_rtt (ms)</th></tr>')
+                     + ('<th>rcv_rtt (ms)</th>' if _hasrcv else '')
+                     + ('<th>min_rtt (ms)</th>' if _hasmnr else '') + '</tr>')
             _bysq = [(k, d) for k, d in sorted(_peaks.items(), key=lambda kv: -kv[1]["max_sq"])
                      if d["max_sq"] > 0][:10]
             if _bysq:
@@ -34642,7 +34656,8 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                 parts.append(_phdr + _peak_rows(_bysq, "sq") + '</table>')
             _phdr2 = ('<table class="t"><tr><th>Peer</th><th>Local Port</th><th>Peak RTT (ms)</th>'
                       '<th>Peak Time</th><th>Send-Q at peak</th><th>Cwnd</th><th>Retr</th>'
-                      '<th>rcv_rtt (ms)</th><th>min_rtt (ms)</th></tr>')
+                      + ('<th>rcv_rtt (ms)</th>' if _hasrcv else '')
+                     + ('<th>min_rtt (ms)</th>' if _hasmnr else '') + '</tr>')
             _byrtt = sorted(_peaks.items(), key=lambda kv: -kv[1]["max_rtt"])[:10]
             if _byrtt:
                 parts.append('<div class="sub">Top 10 by RTT</div>')
@@ -38199,6 +38214,9 @@ _awr_lt_stack_sample() {
 #           smoothed estimate in ms; worst_rtt is worst_peer's rtt. Row is
 #           omitted when 0 qualifying conns / no ss -> renderer hides RTT)
 #   sspeer,<ts>,peer,lport,rtt,rttvar,cwnd,retrans,mss,sendq,rcv_rtt,min_rtt,rcv_space
+#          (last three are EMPTY when ss did not print that field -- they are
+#           conditional on the socket having a receive queue / a recorded
+#           min_rtt; empty renders as '-' rather than a fake 0.000)
 #          (per-CONNECTION rows, only the minute's top offenders: top 3 by
 #           sendq (non-zero) + top 3 by rtt, deduped. Gives the renderer
 #           window-PEAK per-peer tables instead of a single END-snap instant;
@@ -38396,10 +38414,10 @@ _awr_repl_sample() {
                     ci++; cpeer[ci] = peer; clport[ci] = lport; crt[ci] = rttv
                     crtv[ci] = rttvv; ccw[ci] = cwndv + 0; cre[ci] = retrv + 0
                     cmss[ci] = mssv + 0; csq[ci] = sqv + 0
-                    crcr[ci] = rcvrv + 0; cmnr[ci] = minrv + 0; cspc[ci] = rcvsv + 0
+                    crcr[ci] = rcrvs; cmnr[ci] = mnrs; cspc[ci] = spcs
                 }
                 peer = ""; keep = 0; gotrtt = 0; rttv = rttvv = 0
-                cwndv = retrv = mssv = 0; rcvrv = minrv = rcvsv = 0
+                cwndv = retrv = mssv = 0; rcrvs = mnrs = spcs = ""
             }
             $1 == "ESTAB" || ($1 ~ /^[0-9]+$/ && NF >= 4) {
                 flushconn()
@@ -38418,9 +38436,14 @@ _awr_repl_sample() {
                     if (!cwndv && match($0, /cwnd:[0-9]+/)) cwndv = substr($0, RSTART + 5, RLENGTH - 5) + 0
                     if (!retrv && match($0, /retrans:[0-9]+\//)) retrv = substr($0, RSTART + 8, RLENGTH - 8) + 0
                     if (!mssv && match($0, /mss:[0-9]+/)) mssv = substr($0, RSTART + 4, RLENGTH - 4) + 0
-                    if (!rcvrv && match($0, /rcv_rtt:[0-9]+\.?[0-9]*/)) rcvrv = substr($0, RSTART + 8, RLENGTH - 8) + 0
-                    if (!minrv && match($0, /min_rtt:[0-9]+\.?[0-9]*/)) minrv = substr($0, RSTART + 8, RLENGTH - 8) + 0
-                    if (!rcvsv && match($0, /rcv_space:[0-9]+/)) rcvsv = substr($0, RSTART + 10, RLENGTH - 10) + 0
+                    # rcv_rtt / min_rtt / rcv_space are CONDITIONAL in ss -ti
+                    # (printed only once the socket has a receive queue / a
+                    # recorded min_rtt). Keep "absent" distinct from a real 0
+                    # by holding them as strings: "" prints as an empty field,
+                    # the renderer shows '-' instead of a fake 0.000.
+                    if (rcrvs == "" && match($0, /rcv_rtt:[0-9]+\.?[0-9]*/)) rcrvs = substr($0, RSTART + 8, RLENGTH - 8) + 0
+                    if (mnrs == "" && match($0, /min_rtt:[0-9]+\.?[0-9]*/)) mnrs = substr($0, RSTART + 8, RLENGTH - 8) + 0
+                    if (spcs == "" && match($0, /rcv_space:[0-9]+/)) spcs = substr($0, RSTART + 10, RLENGTH - 10) + 0
                 }
             }
             END {
@@ -38450,7 +38473,7 @@ _awr_repl_sample() {
                         if (bi) used[bi] = emit[bi] = 1
                     }
                     for (i = 1; i <= ci; i++) if (emit[i])
-                        printf "sspeer,%s,%s,%s,%.3f,%.3f,%d,%d,%d,%d,%.3f,%.3f,%d\n", \
+                        printf "sspeer,%s,%s,%s,%.3f,%.3f,%d,%d,%d,%d,%s,%s,%s\n", \
                                ts, cpeer[i], clport[i], crt[i], crtv[i], \
                                ccw[i], cre[i], cmss[i], csq[i], \
                                crcr[i], cmnr[i], cspc[i]
