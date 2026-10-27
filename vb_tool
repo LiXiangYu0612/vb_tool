@@ -31885,12 +31885,14 @@ def load_os_samples(sdir, begin_ts, end_ts):
                 # truncated log line can never blow up the renderer later.
                 if payload.count(",") == 1:
                     _p1, _p2 = payload.split(",")
+                    # isdecimal(), NOT isdigit(): isdigit() is also true for
+                    # superscripts like '²', which int() then rejects
                     if typ == "lstnsock":
-                        _ok = _p2.strip().isdigit()
+                        _ok = _p2.strip().isdecimal()
                     elif typ == "netmiss":
-                        _ok = _p1 != "" and _p2.strip().isdigit()
+                        _ok = _p1 != "" and _p2.strip().isdecimal()
                     else:                       # conntrack / lstn: both numeric
-                        _ok = _p1.strip().isdigit() and _p2.strip().isdigit()
+                        _ok = _p1.strip().isdecimal() and _p2.strip().isdecimal()
                     if _ok:
                         out[typ].append((ts, payload))
                 continue
@@ -32084,7 +32086,7 @@ def os_minute_rtt_series(samples):
                              "rtt_min": float(p[1]), "rtt_avg": float(p[2]),
                              "rtt_max": float(p[3]), "rtt_p95": float(p[4]),
                              "worst_peer": p[5], "worst_rtt": float(p[6])}))
-        except ValueError:
+        except (ValueError, OverflowError):   # float('inf') -> int() overflow
             continue
     return out
 
@@ -32101,7 +32103,7 @@ def window_peer_peaks(samples, begin_ts):
             continue
         p = (payload or "").split(",")
         # 8 fields = rows written before the rcv_rtt/min_rtt extension (render
-        # them, trailing metrics just stay absent); >= 11 = current format
+        # them, trailing metrics stay absent); >= 10 = rows carrying them
         if len(p) < 8:
             continue
         try:
@@ -34617,7 +34619,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         for _, _p in os_smp["netmiss"]:
             _f = _p.split(",")
             if len(_f) == 2:
-                if _f[1].strip().isdigit():
+                if _f[1].strip().isdecimal():
                     _mm.setdefault(_f[0], []).append(int(_f[1]))
         _mrow = []
         for _if in sorted(_mm):
@@ -34794,7 +34796,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         for _ts, _p in os_smp.get("lstnsock", []):
             _f = _p.split(",")
             if len(_f) == 2:
-                if _f[1].strip().isdigit():
+                if _f[1].strip().isdecimal():
                     _ls.setdefault(_ts, {})[_f[0]] = int(_f[1])
         _std = ["LISTEN", "ESTAB", "SYN-SENT", "SYN-RECV", "FIN-WAIT-1", "FIN-WAIT-2",
                 "TIME-WAIT", "CLOSE-WAIT", "CLOSING", "LAST-ACK", "CLOSED"]
@@ -34874,7 +34876,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             _f = _p.split(",")
             if len(_f) != 2:
                 continue
-            if not (_f[0].strip().isdigit() and _f[1].strip().isdigit()):
+            if not (_f[0].strip().isdecimal() and _f[1].strip().isdecimal()):
                 continue
             _c, _l = int(_f[0]), int(_f[1])
             _ch.append('<tr><td>%s</td><td class="n">%s</td><td class="n">%s</td>'
@@ -38338,10 +38340,11 @@ _awr_lt_stack_sample() {
 #   tcp,<ts>,ActiveOpens,PassiveOpens,CurrEstab,OutSegs,RetransSegs  (snmp)
 #   tcpext,<ts>,ListenDrops,ListenOverflows,Timeouts,SynRetrans      (netstat TcpExt)
 #   conntrack,<ts>,count,max   (nf_conntrack; row omitted when module absent)
-#   lstn,<ts>,recvq,sendq      (VB-port listener accept queue; ss -lnt4)
+#   lstn,<ts>,recvq,sendq      (VB-port listener accept queue; ss -lnt,
+#          dual stack; max queue across a v4+v6 listener pair)
 #   lstnsock,<ts>,<state>,<count>  (TCP sockets whose LOCAL port is the DB
-#          port, one row per state per minute; ss -tan4 sport = :PORT)
-#   netmiss,<ts>,iface,rx_missed (sysfs rx_missed_errors, only when non-zero)
+#          port, one row per state per minute; ss -tan sport = :PORT)
+#   netmiss,<ts>,iface,rx_missed (sysfs rx_missed_errors, written even when 0)
 #   ssrtt,<ts>,conns,rtt_min,rtt_avg,rtt_max,rtt_p95,worst_peer,worst_rtt
 #          (ss -ti over ESTABLISHED, loopback peers excluded; rtt = kernel
 #           smoothed estimate in ms; worst_rtt is worst_peer's rtt. Row is
@@ -38583,7 +38586,7 @@ _awr_repl_sample() {
                     if (!cwndv && match($0, /cwnd:[0-9]+/)) cwndv = substr($0, RSTART + 5, RLENGTH - 5) + 0
                     if (!retrv && match($0, /retrans:[0-9]+\//)) retrv = substr($0, RSTART + 8, RLENGTH - 8) + 0
                     if (!mssv && match($0, /mss:[0-9]+/)) mssv = substr($0, RSTART + 4, RLENGTH - 4) + 0
-                    # rcv_rtt / min_rtt / rcv_space are CONDITIONAL in ss -ti
+                    # rcv_rtt / min_rtt are CONDITIONAL in ss -ti
                     # (printed only once the socket has a receive queue / a
                     # recorded min_rtt). Keep "absent" distinct from a real 0
                     # by holding them as strings: "" prints as an empty field,
