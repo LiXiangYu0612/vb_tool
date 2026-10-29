@@ -32058,19 +32058,22 @@ def dbproc_minute_table(samples):
     postmaster REG fd holdings under $PGDATA as dbfile / tempfile (pgsql_tmp
     trees) / xlog (pg_xlog), cells "live(deleted)". A 0 is a measurement;
     '-' = the sampler did not log that column that minute (pre-2026-10-30
-    logs carry no dbfd rows)."""
+    logs carry no dbfd rows). User same day: LISTEN column dropped (it lives
+    in the begin/end 'TCP Listen' rows above), Send-Q dropped (static
+    backlog capacity), Recv-Q relabeled 'LISTEN Recv-Q'."""
     if samples is None or not (samples.get("lstn") or samples.get("lstnsock")):
         return _osmin_note({"files": (samples or {}).get("files", [])})
-    _lq = {ts: p.split(",") for ts, p in samples.get("lstn", [])}
+    _lq = {ts: p.split(",")[0] for ts, p in samples.get("lstn", [])}
     _ls = {}
     for _ts, _p in samples.get("lstnsock", []):
         _f = _p.split(",")
         if len(_f) == 2 and _f[1].strip().isdecimal():
             _ls.setdefault(_ts, {})[_f[0]] = int(_f[1])
     _fd = dict(samples.get("dbfd", []))
-    _std = ["LISTEN", "ESTAB", "SYN-SENT", "SYN-RECV", "FIN-WAIT-1", "FIN-WAIT-2",
+    _std = ["ESTAB", "SYN-SENT", "SYN-RECV", "FIN-WAIT-1", "FIN-WAIT-2",
             "TIME-WAIT", "CLOSE-WAIT", "CLOSING", "LAST-ACK", "CLOSED"]
-    _extra = sorted(s for d in _ls.values() for s in d if s not in _std)
+    _extra = sorted(s for d in _ls.values() for s in d
+                    if s not in _std and s != "LISTEN")   # LISTEN stays a begin/end row
     _states = _std + _extra
     def _fdcell(v, a, b):
         # "live(deleted)" from the 6-int dbfd payload; '-' when that minute
@@ -32081,19 +32084,17 @@ def dbproc_minute_table(samples):
         if len(_x) == 6 and _x[a].strip().isdecimal() and _x[b].strip().isdecimal():
             return "%d(%d deleted)" % (int(_x[a]), int(_x[b]))
         return "-"
-    _h = ['<table class="t"><tr><th>Time</th><th class="n">Recv-Q</th>'
-          '<th class="n">Send-Q</th>']
+    _h = ['<table class="t"><tr><th>Time</th><th class="n">LISTEN Recv-Q</th>']
     _h += ['<th class="n">%s</th>' % esc(_s) for _s in _states]
     _h += ['<th class="n">DBFile FDs</th><th class="n">TempFile FDs</th>'
            '<th class="n">XLog FDs</th></tr>']
     for _ts in sorted(set(_lq) | set(_ls)):
-        _q = _lq.get(_ts) or []
-        _q = (_q + ["-", "-"])[:2] if _q else ["-", "-"]
+        _q = _lq.get(_ts, "-")
         _row = _ls.get(_ts, {})
         _v = _fd.get(_ts)
-        _h.append('<tr><td>%s</td><td class="n">%s</td><td class="n">%s</td>%s'
+        _h.append('<tr><td>%s</td><td class="n">%s</td>%s'
                   '<td class="n">%s</td><td class="n">%s</td><td class="n">%s</td></tr>'
-                  % (esc(_ts), esc(_q[0]), esc(_q[1]),
+                  % (esc(_ts), esc(_q),
                      "".join('<td class="n">%s</td>' % _row.get(_s, "-")
                              for _s in _states),
                      _fdcell(_v, 0, 1), _fdcell(_v, 2, 3), _fdcell(_v, 4, 5)))
