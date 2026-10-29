@@ -31839,7 +31839,7 @@ def load_os_samples(sdir, begin_ts, end_ts):
     7-value logs without them stay valid."""
     out = {"cpu": [], "pg": [], "mem": [], "dsk": [], "net": [], "tcp": [], "tcpext": [],
            "ssrtt": [], "sspeer": [], "conntrack": [], "lstn": [], "lstnsock": [],
-           "netmiss": [], "files": []}
+           "dbfd": [], "netmiss": [], "files": []}
     if not sdir or not os.path.isdir(sdir):
         return out
     lo = _ts_shift(begin_ts, -65)
@@ -31903,6 +31903,13 @@ def load_os_samples(sdir, begin_ts, end_ts):
                     if _ok:
                         out[typ].append((ts, payload))
                 continue
+            if typ == "dbfd":
+                # postmaster reg-fd buckets under $PGDATA: 6 ints =
+                # dbfile live/deleted, tempfile live/deleted, xlog live/deleted
+                if payload.count(",") == 5 and \
+                        all(p.strip().isdecimal() for p in payload.split(",")):
+                    out[typ].append((ts, payload))
+                continue
             want = {"cpu": 12, "pg": 8, "tcp": 7, "tcpext": 6}.get(typ)   # tcp: 7 fields/6 commas; tcpext: ts+4 counters
             if typ == "mem":
                 # 7-value row: 9 fields/8 commas; 11-value (+ zone wm): 13/12
@@ -31913,7 +31920,7 @@ def load_os_samples(sdir, begin_ts, end_ts):
             except Exception:
                 continue
     for k in ("cpu", "pg", "mem", "dsk", "net", "tcp", "tcpext", "ssrtt", "sspeer",
-              "conntrack", "lstn", "lstnsock", "netmiss"):
+              "conntrack", "lstn", "lstnsock", "dbfd", "netmiss"):
         out[k].sort(key=lambda r: r[0])
     return out
 
@@ -32043,6 +32050,55 @@ def _osmin_note(samples):
     if not samples.get("files"):
         return '<div class="note">no per-minute OS samples in this period (sampler runs while awr is enabled)</div>'
     return '<div class="note">no usable per-minute samples in this period</div>'
+
+def dbproc_minute_table(samples):
+    """DB Process 'Per-minute detail' body (user 2026-10-30): the former
+    standalone TCP Sockets section's per-minute table, now folded under DB
+    Process like CPU utilization's, plus the sampler's dbfd columns --
+    postmaster REG fd holdings under $PGDATA as dbfile / tempfile (pgsql_tmp
+    trees) / xlog (pg_xlog), cells "live(deleted)". A 0 is a measurement;
+    '-' = the sampler did not log that column that minute (pre-2026-10-30
+    logs carry no dbfd rows)."""
+    if samples is None or not (samples.get("lstn") or samples.get("lstnsock")):
+        return _osmin_note({"files": (samples or {}).get("files", [])})
+    _lq = {ts: p.split(",") for ts, p in samples.get("lstn", [])}
+    _ls = {}
+    for _ts, _p in samples.get("lstnsock", []):
+        _f = _p.split(",")
+        if len(_f) == 2 and _f[1].strip().isdecimal():
+            _ls.setdefault(_ts, {})[_f[0]] = int(_f[1])
+    _fd = dict(samples.get("dbfd", []))
+    _std = ["LISTEN", "ESTAB", "SYN-SENT", "SYN-RECV", "FIN-WAIT-1", "FIN-WAIT-2",
+            "TIME-WAIT", "CLOSE-WAIT", "CLOSING", "LAST-ACK", "CLOSED"]
+    _extra = sorted(s for d in _ls.values() for s in d if s not in _std)
+    _states = _std + _extra
+    def _fdcell(v, a, b):
+        # "live(deleted)" from the 6-int dbfd payload; '-' when that minute
+        # has no dbfd row (old logs)
+        if v is None:
+            return "-"
+        _x = v.split(",")
+        if len(_x) == 6 and _x[a].strip().isdecimal() and _x[b].strip().isdecimal():
+            return "%d(%d deleted)" % (int(_x[a]), int(_x[b]))
+        return "-"
+    _h = ['<table class="t"><tr><th>Time</th><th class="n">Recv-Q</th>'
+          '<th class="n">Send-Q</th>']
+    _h += ['<th class="n">%s</th>' % esc(_s) for _s in _states]
+    _h += ['<th class="n">DBFile FDs</th><th class="n">TempFile FDs</th>'
+           '<th class="n">XLog FDs</th></tr>']
+    for _ts in sorted(set(_lq) | set(_ls)):
+        _q = _lq.get(_ts) or []
+        _q = (_q + ["-", "-"])[:2] if _q else ["-", "-"]
+        _row = _ls.get(_ts, {})
+        _v = _fd.get(_ts)
+        _h.append('<tr><td>%s</td><td class="n">%s</td><td class="n">%s</td>%s'
+                  '<td class="n">%s</td><td class="n">%s</td><td class="n">%s</td></tr>'
+                  % (esc(_ts), esc(_q[0]), esc(_q[1]),
+                     "".join('<td class="n">%s</td>' % _row.get(_s, "-")
+                             for _s in _states),
+                     _fdcell(_v, 0, 1), _fdcell(_v, 2, 3), _fdcell(_v, 4, 5)))
+    _h.append('</table>')
+    return "".join(_h)
 
 def os_minute_tcp_series(samples):
     """[(ts, {opens_s, retrans_s, retrans_pct}, currestab)] from consecutive
@@ -34382,6 +34438,11 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                          '<td class="n"><b>%d</b></td><td class="n"><b>%+d</b></td></tr>'
                          % (_tb, _te, _te - _tb))
         parts.append('</table>')
+        # per-minute detail (user 2026-10-30): the former standalone TCP
+        # Sockets section now lives here, folded by default exactly like CPU
+        # utilization's per-minute detail, and carries the dbfd columns --
+        # see dbproc_minute_table.
+        parts.append(_fold("Per-minute detail", dbproc_minute_table(os_smp)))
     sub("OS Memory Usage")
     _bm = parse_meminfo(win["os"].get(("begin", "meminfo"), ""))
     _em = parse_meminfo(win["os"].get(("end", "meminfo"), ""))
@@ -34792,37 +34853,6 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             parts.append('<div class="sub">Top 10 by RTT</div>')
             parts.append(_phdr + _peer_rows(sorted(_rttconns, key=lambda c: -c["rtt_ms"])[:10]) + '</table>')
 
-    # TCP sockets on the DB port, per minute: every state is a column (a 0 is a
-    # measurement, '-' means the sampler did not log that state), next to the
-    # listen socket's Recv-Q (accepted-not-yet queue, the pre-overflow signal)
-    # and Send-Q (backlog capacity). Both come from the same minute's ss pass.
-    sub("TCP Sockets")
-    if os_smp is not None and (os_smp.get("lstn") or os_smp.get("lstnsock")):
-        _lq = {ts: p.split(",") for ts, p in os_smp.get("lstn", [])}
-        _ls = {}
-        for _ts, _p in os_smp.get("lstnsock", []):
-            _f = _p.split(",")
-            if len(_f) == 2:
-                if _f[1].strip().isdecimal():
-                    _ls.setdefault(_ts, {})[_f[0]] = int(_f[1])
-        _std = ["LISTEN", "ESTAB", "SYN-SENT", "SYN-RECV", "FIN-WAIT-1", "FIN-WAIT-2",
-                "TIME-WAIT", "CLOSE-WAIT", "CLOSING", "LAST-ACK", "CLOSED"]
-        _extra = sorted(s for d in _ls.values() for s in d if s not in _std)
-        _states = _std + _extra
-        _lh = ['<table class="t"><tr><th>Time</th><th class="n">Recv-Q</th>'
-               '<th class="n">Send-Q</th>']
-        _lh += ['<th class="n">%s</th>' % esc(_s) for _s in _states]
-        _lh.append('</tr>')
-        for _ts in sorted(set(_lq) | set(_ls)):
-            _q = _lq.get(_ts) or []
-            _q = (_q + ["-", "-"])[:2] if _q else ["-", "-"]
-            _row = _ls.get(_ts, {})
-            _lh.append('<tr><td>%s</td><td class="n">%s</td><td class="n">%s</td>%s</tr>'
-                       % (esc(_ts), esc(_q[0]), esc(_q[1]),
-                          "".join('<td class="n">%s</td>' % _row.get(_s, "-")
-                                  for _s in _states)))
-        _lh.append('</table>')
-        parts.append("".join(_lh))
     _sn = osd.get("softnet")
     if _sn is not None:
         sub("Softnet")
@@ -38351,6 +38381,10 @@ _awr_lt_stack_sample() {
 #          dual stack; max queue across a v4+v6 listener pair)
 #   lstnsock,<ts>,<state>,<count>  (TCP sockets whose LOCAL port is the DB
 #          port, one row per state per minute; ss -tan sport = :PORT)
+#   dbfd,<ts>,dbfile_live,dbfile_del,tmp_live,tmp_del,xlog_live,xlog_del
+#          (REG fds of the DB port's postmaster under $PGDATA only: dbfile /
+#          pgsql_tmp tempfile / pg_xlog, live + deleted-but-held; row absent
+#          when the postmaster or its fd dir was not readable)
 #   netmiss,<ts>,iface,rx_missed (sysfs rx_missed_errors, written even when 0)
 #   ssrtt,<ts>,conns,rtt_min,rtt_avg,rtt_max,rtt_p95,worst_peer,worst_rtt
 #          (ss -ti over ESTABLISHED, loopback peers excluded; rtt = kernel
@@ -38548,6 +38582,40 @@ _awr_repl_sample() {
                 END { for (i = 1; i <= n; i++) printf "lstnsock,%s,%s,%d\n", ts, S[i], c[S[i]] + 0
                       for (s in c) if (!(s in std)) printf "lstnsock,%s,%s,%d\n", ts, s, c[s] }' \
             >> "$of" 2>/dev/null
+    fi
+    # ---- db fd holdings (user 2026-10-30): REG fds of the DB port's
+    # postmaster under $PGDATA only, three buckets -- dbfile / tempfile
+    # (pgsql_tmp trees: sort/hash spills, routinely deleted-while-held) /
+    # xlog (pg_xlog, user: 单独算). VB is single-process multi-thread, every
+    # backend's fd lives on the postmaster, so ONE /proc walk covers the
+    # whole instance (same pid discovery as the snapshot-side db_proc
+    # collector; postmaster runs with cwd=$PGDATA). Tablespaces outside
+    # $PGDATA are deliberately NOT counted (user: 只统计 DATADIR 下). The row
+    # is written whenever the postmaster and its fd dir are readable --
+    # 0 included; no pid / unreadable fd dir -> NO rows (missing row = not
+    # sampled, never "none").
+    _dpid=$(ss -lntp 2>/dev/null | grep -oP ":${PGPORT:-5432}\b.*pid=\K[0-9]+" | head -1)
+    if [ -n "$_dpid" ] && [ -d "/proc/$_dpid/fd" ]; then
+        _pdd=$(readlink "/proc/$_dpid/cwd" 2>/dev/null)
+        if [ -n "$_pdd" ]; then
+            _pdd="${_pdd%/}/"
+            _fdout=$(ls -l "/proc/$_dpid/fd" 2>/dev/null)
+            [ -n "$_fdout" ] && printf '%s\n' "$_fdout" | \
+                awk -v ts="$ts" -v pd="$_pdd" '
+                    { t = $0; sub(/^.* -> /, "", t)
+                      if (t ~ / \(deleted\)$/) { d = 1; sub(/ \(deleted\)$/, "", t) } else d = 0
+                      if (t !~ /^\//) next                      # socket:[..] pipe:[..] anon_inode:..
+                      if (t ~ /^\/dev\//) next                  # device nodes
+                      if (substr(t, 1, length(pd)) != pd) next  # outside $PGDATA
+                      r = substr(t, length(pd) + 1)
+                      b = "db"
+                      if (index("/" r, "/pgsql_tmp/") > 0) b = "tmp"
+                      else if (substr(r, 1, 8) == "pg_xlog/" || substr(r, 1, 7) == "pg_wal/") b = "xlog"
+                      cl[b]++; if (d) cd[b]++ }
+                    END { printf "dbfd,%s,%d,%d,%d,%d,%d,%d\n", ts, cl["db"]+0, cd["db"]+0,
+                            cl["tmp"]+0, cd["tmp"]+0, cl["xlog"]+0, cd["xlog"]+0 }' \
+                >> "$of" 2>/dev/null
+        fi
     fi
     # ---- TCP RTT sample: ss -ti over ESTABLISHED sockets; loopback peers are
     # excluded (their sub-0.1ms rtt would pin rtt_min to ~0 and drown the real
