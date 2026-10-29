@@ -11330,15 +11330,21 @@ def print_sql_text(db_name, user_name, sql_raw, params, line_schema=None):
             sp = line_schema          # ② 行内 schema=xxx 字面量
         env = dict(os.environ)
         if sp:
+            # ★与 sqlhc 完全同口径 (SET search_path = <sp>, public): 反查/推导只拿到
+            #   单个 schema(原 search_path 首个真实存在项 / SQL 首个限定表), 不补
+            #   public 的话语句里未限定且落在 public 的表会误报 relation does not
+            #   exist (204 实测红例: from s1.t_a join t_b -> search_path=s1 -> t_b 丢)。
+            #   sp 已是 public 则不重复。
+            sp_set = sp if sp.lower() == 'public' else sp + ',public'
             env['PGOPTIONS'] = (env.get('PGOPTIONS', '') +
                                 (' ' if env.get('PGOPTIONS') else '') +
-                                '-c search_path=' + sp).strip()
+                                '-c search_path=' + sp_set).strip()
         sql_clean = sql_final.strip().rstrip(';').strip()
         if sql_clean:
             expl = ('explain (outline) ' if outline else 'explain ') + sql_clean
-            t2 = 'sqlplan(explain%s database: %s%s)' % (
-                ' outline' if outline else '', db_name,
-                '  search_path: ' + sp if sp else '')
+            # search_path 恒写: 没设也明示 (default), 不留"看不出设没设"的空位
+            t2 = 'sqlplan(explain%s database: %s  search_path: %s)' % (
+                ' outline' if outline else '', db_name, sp if sp else '(default)')
             print()
             print('=' * display_width(t2))
             print(t2)
@@ -24811,7 +24817,8 @@ print(s.strip())
     if [ -n "$explain_type" ]; then
     PGCONNECT_TIMEOUT=5 psql -d "$db_name" -X -q -P footer=off << PSQLEOF
 -- ★用解析出的 schema, 不再一律拿 user 当 schema (用户 2026-09-28):
---   sql_schema = statement_history 反查到的真实 schema, 反查不到时解析端已回落成 user
+--   sql_schema = statement_history 反查到的真实 schema, 反查不到时解析端已回落成
+--   public (2026-09-28 最终口径是 public, 不是 user; 旧注释写的 user 是过时的)
 SET search_path = ${sql_schema}, public;
 \echo '================'
 \echo '   query plan   '
