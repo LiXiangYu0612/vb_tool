@@ -34645,7 +34645,24 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     def nrate(it, key):
         return it.get(key, 0.0) / dur_os
     _nmeta = osd.get("net_meta") or {}
+    # RX Missed as a COLUMN of this table (user 2026-10-30: no standalone
+    # section): rx_missed_errors window delta from the per-minute netmiss
+    # samples -- the ring-full SUBSET of the merged RX drop. Column present
+    # only when the window has netmiss samples (old snaps: no column);
+    # '-' = this iface is not netmiss-sampled (sampler skips lo/veth/...) or
+    # has a single sample (a lifetime counter is not a window delta).
+    _md = {}
+    if os_smp is not None:
+        _mm = {}
+        for _, _p in os_smp.get("netmiss", []):
+            _f = _p.split(",")
+            if len(_f) == 2 and _f[1].strip().isdecimal():
+                _mm.setdefault(_f[0], []).append(int(_f[1]))
+        for _if, _vals in _mm.items():
+            _md[_if] = (max(0, _vals[-1] - _vals[0]) if len(_vals) >= 2 else None)
     _nh = '<th>Interface</th><th class="n">RX B per Sec</th><th class="n">TX B per Sec</th><th class="n">RX Pkt per Sec</th><th class="n">TX Pkt per Sec</th><th class="n">RX/TX Errs (Delta)</th><th class="n">RX/TX Drop (Delta)</th>'
+    if _md:
+        _nh += '<th class="n">RX Missed (Delta)</th>'
     if _nmeta:
         _nh += '<th class="n">RX Util %</th><th class="n">TX Util %</th><th class="n">Speed</th><th class="n">Duplex</th><th class="n">Queues</th><th class="n">RX Ring</th><th class="n">TX Ring</th>'
     _nh += '</tr>'
@@ -34654,6 +34671,9 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         _nl = ["errs/drop (delta) = whole-window cumulative deltas, not rates; errs usually "
                "mean driver or negotiation faults, drops mean ring-buffer or backlog "
                "exhaustion (consider larger ethtool ring buffers or more queues)."]
+        if _md:
+            _nl.append("RX Missed (Delta) = the rx_missed_errors subset of RX drop "
+                       "(receive ring full); '-' = iface not sampled or single sample.")
         if _nmeta:
             _nl.append("RX/TX Util% = traffic vs the negotiated link speed ('-' when "
                        "unknown, e.g. virtio); Speed/Duplex/Queues/Ring from ethtool "
@@ -34661,13 +34681,17 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         note("\n".join(_nl))
     parts.append('<table class="t"><tr>' + _nh)
     if not ifaces:
-        parts.append('<tr><td colspan="%d" class="note">no network interfaces</td></tr>' % (7 + (7 if _nmeta else 0)))
+        parts.append('<tr><td colspan="%d" class="note">no network interfaces</td></tr>'
+                     % (7 + (1 if _md else 0) + (7 if _nmeta else 0)))
     for it in ifaces:
         row = '<tr><td>%s</td><td class="n">%.0f</td><td class="n">%.0f</td><td class="n">%.1f</td><td class="n">%.1f</td><td class="n">%.0f / %.0f</td><td class="n">%.0f / %.0f</td>' % (
                          esc(it["name"]), nrate(it, "rx_bytes"), nrate(it, "tx_bytes"),
                          nrate(it, "rx_packets"), nrate(it, "tx_packets"),
                          it.get("rx_errs", 0.0), it.get("tx_errs", 0.0),
                          it.get("rx_drop", 0.0), it.get("tx_drop", 0.0))
+        if _md:
+            _mv = _md.get(it["name"])
+            row += '<td class="n">%s</td>' % ("-" if _mv is None else "%d" % _mv)
         if _nmeta:
             # utilization vs negotiated link speed; '-' when speed unknown (virtio)
             _sp = speed_mbps(_cell(_nmeta.get(it["name"]) or {}, "speed"))
@@ -34678,29 +34702,6 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         row += '</tr>'
         parts.append(row)
     parts.append('</table>')
-    # per-interface rx_missed_errors (ring-full subset of the merged drop) --
-    # cumulative counter -> window delta (last-minus-first)
-    # every physical-ish interface is listed every minute, 0 included: a zero
-    # is a measurement (no ring-full drop), a missing row would be "unknown"
-    sub("RX Missed")
-    if os_smp is not None and os_smp.get("netmiss"):
-        _mm = {}
-        for _, _p in os_smp["netmiss"]:
-            _f = _p.split(",")
-            if len(_f) == 2:
-                if _f[1].strip().isdecimal():
-                    _mm.setdefault(_f[0], []).append(int(_f[1]))
-        _mrow = []
-        for _if in sorted(_mm):
-            _vals = _mm[_if]
-            # window delta only: a single sample is a lifetime counter, not a
-            # rate for this window -> "-" rather than a misleading number
-            _d = max(0, _vals[-1] - _vals[0]) if len(_vals) >= 2 else None
-            _mrow.append('<tr><td>%s</td><td class="n">%s</td></tr>'
-                         % (esc(_if), "-" if _d is None else _d))
-        if _mrow:
-            parts.append('<table class="t"><tr><th>Interface</th><th class="n">missed</th></tr>'
-                         + "".join(_mrow) + '</table>')
     if os_smp is not None:
         parts.append(osmin_net_table(os_smp, m.get("begin_ts", "")))
 
