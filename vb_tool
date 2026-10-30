@@ -34318,6 +34318,8 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     # Softirq breakdown (audit 2026-10-30): window delta was parsed into osd
     # but only the dead legacy renderer ever showed it -- TIMER/NET_RX direction
     # is a standard IRQ/softirq triage need
+    parts.append('<table class="t"><tr>%s</tr><tr>%s</tr></table>'
+                 % ("".join(_th), "".join(_td)))
     # Softirq + IRQ per-CPU distribution (user 2026-10-30: WHICH CPU runs the
     # irq/softirq is the signal -- a single hot NET_RX/IRQ core is the RPS /
     # affinity / multi-queue argument a summed total hides). Both tables are
@@ -34389,8 +34391,6 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                      % (esc(k), esc(dv), _cells, fmt_int(sum(vec)), _maxcell(vec)))
         h.append('</table>')
         parts.append(''.join(h))
-    parts.append('<table class="t"><tr>%s</tr><tr>%s</tr></table>'
-                 % ("".join(_th), "".join(_td)))
     # DB Process: the postmaster listening on THIS awr's port (multi-instance
     # safe), its cpuset pinning and its EFFECTIVE rlimits (/proc/<pid>/limits,
     # world-readable) -- the running process's limits are the authoritative
