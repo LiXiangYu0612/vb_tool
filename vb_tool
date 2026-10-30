@@ -29178,7 +29178,7 @@ Usage: vb_tool awr <create|enable|disable|awrrpt|awrdiff|baseline|topsql|event|s
   cpu | io | page          begin <id> end <id> -- per-minute CPU / disk IO / paging
   mem | net                begin <id> end <id> -- per-minute memory level / per-NIC traffic
   tcp                      begin <id> end <id> -- per-minute TCP counters + RTT + accept queue
-  fd                       begin <id> end <id> -- per-minute postmaster fd buckets + DB-port TCP states
+  fd                       begin <id> end <id> -- per-minute postmaster fd buckets + conntrack
   replstat | replslot | replay
                            begin <id> end <id> -- per-minute replication / slots /
                            walreceiver samples
@@ -37451,11 +37451,10 @@ def text_tcp(win, repl_dir=None):
     return 0, "\n".join(lines)
 
 def text_fd(win, repl_dir=None):
-    """awr fd: the DB Process per-minute detail as a screen table --
-    postmaster reg-fd buckets under $PGDATA (dbfile/tempfile/xlog,
-    live(deleted)), the DB-port TCP states (total + common four + FIN-WAIT
-    1/2 as FW1/FW2), LISTEN Recv-Q and conntrack Used/Limit. Columns follow
-    the html fold; '-' = not sampled that minute (old logs / crash gap)."""
+    """awr fd: postmaster reg-fd buckets under $PGDATA per minute
+    (dbfile/tempfile/xlog, live(deleted)) plus conntrack Used/Limit -- NO TCP
+    state columns (user 2026-10-30: those live in the html DB Process fold;
+    the CLI fd command stays fd-only). '-' = not sampled that minute."""
     lines = _text_banner("awr fd detail", win)
     m = win["meta"]
     samples = (load_os_samples(repl_dir, m.get("begin_ts", ""), m.get("end_ts", ""))
@@ -37464,23 +37463,16 @@ def text_fd(win, repl_dir=None):
         lines.append("(no per-minute OS samples in this period -- the sampler runs")
         lines.append(" while 'awr enable' is on; manual snapshots alone carry no series)")
         return 0, "\n".join(lines)
-    lq = {ts: p.split(",")[0] for ts, p in samples.get("lstn", [])}
-    ls = {}
-    for ts, p in samples.get("lstnsock", []):
-        f = p.split(",")
-        if len(f) == 2 and f[1].strip().isdecimal():
-            ls.setdefault(ts, {})[f[0]] = int(f[1])
     fd = dict(samples.get("dbfd", []))
     ct = {}
     for ts, p in (samples.get("conntrack") or []):
         f = p.split(",")
         if len(f) == 2 and f[0].strip().isdecimal() and f[1].strip().isdecimal():
             ct[ts] = (int(f[0]), int(f[1]))
-    if not (lq or ls or fd or ct):
+    if not (fd or ct):
         lines.append("(no usable per-minute samples in this period)")
         return 0, "\n".join(lines)
-    headers = ["time", "LISTEN Recv-Q", "TCP Total", "ESTAB", "SYN-RECV",
-               "TIME-WAIT", "CLOSE-WAIT", "FW-1/2"]
+    headers = ["time"]
     if ct:
         headers += ["Conntrack Used", "Conntrack Limit"]
     headers += ["DBFile FDs", "TempFile FDs", "XLog FDs"]
@@ -37492,14 +37484,8 @@ def text_fd(win, repl_dir=None):
             return "%d(%d del)" % (int(x[a]), int(x[b]))
         return "-"
     rows = []
-    for ts in sorted(set(lq) | set(ls) | set(fd) | set(ct)):
-        row = ls.get(ts, {})
-        fw = ("%d/%d" % (row.get("FIN-WAIT-1", 0), row.get("FIN-WAIT-2", 0))
-              if row else "-")
-        r = [ts, lq.get(ts, "-"),
-             str(sum(row.values())) if row else "-",
-             row.get("ESTAB", "-"), row.get("SYN-RECV", "-"),
-             row.get("TIME-WAIT", "-"), row.get("CLOSE-WAIT", "-"), fw]
+    for ts in sorted(set(fd) | set(ct)):
+        r = [ts]
         if ct:
             c = ct.get(ts)
             r += ([str(c[0]), str(c[1])] if c else ["-", "-"])
