@@ -32415,7 +32415,9 @@ def osmin_tcp_table(samples, begin_ts):
                     thr_cell_cls(_rp, 3.0, 5.0) if _rp is not None else "",
                     ("%.3f" % _rp) if _rp is not None else "-", ce, _rc, _xc))
     h.append('</table>')
-    return "".join(h)
+    # same collapsed per-minute fold as CPU/Network/DB Process (user
+    # 2026-10-30); the section header itself stays a real TOC entry
+    return _fold("Per-minute detail", "".join(h))
 
 def osmin_mem_table(samples, begin_ts):
     series = {ts: d for ts, d in os_minute_pg_series(samples)
