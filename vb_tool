@@ -32061,9 +32061,9 @@ def dbproc_minute_table(samples):
     logs carry no dbfd rows). User same day: LISTEN column dropped (it lives
     in the begin/end 'TCP Listen' rows above), Send-Q dropped (static
     backlog capacity), Recv-Q relabeled 'LISTEN Recv-Q'. Conntrack merged in
-    too (was its own section): Used / Limit / Fill % columns after the TCP
-    states, present only when the window has conntrack samples (module not
-    loaded -> no columns)."""
+    too (was its own section): Used / Limit columns after the TCP states
+    (Fill % dropped, user: Used+Limit suffice), present only when the window
+    has conntrack samples (module not loaded -> no columns)."""
     if samples is None or not (samples.get("lstn") or samples.get("lstnsock")
                                or samples.get("conntrack") or samples.get("dbfd")):
         return _osmin_note({"files": (samples or {}).get("files", [])})
@@ -32081,10 +32081,17 @@ def dbproc_minute_table(samples):
         _f = _p.split(",")
         if len(_f) == 2 and _f[0].strip().isdecimal() and _f[1].strip().isdecimal():
             _ct[_ts] = (int(_f[0]), int(_f[1]))
-    _std = ["ESTAB", "SYN-SENT", "SYN-RECV", "FIN-WAIT-1", "FIN-WAIT-2",
-            "TIME-WAIT", "CLOSE-WAIT", "CLOSING", "LAST-ACK", "CLOSED"]
+    # user 2026-10-30: only the four COMMON states are fixed columns --
+    # ESTAB (session level), TIME-WAIT (short-connection storms), CLOSE-WAIT
+    # (app not closing its side), SYN-RECV (accept-queue pressure). The rest
+    # are transient closing states (ms-seconds lifetime, a per-minute instant
+    # sample never catches them) or semantically impossible here (SYN-SENT is
+    # an outbound-connect state; this table filters sport = DB port); they
+    # become dynamic extra columns ONLY when actually seen nonzero in the
+    # window. LISTEN stays excluded (begin/end rows carry it).
+    _std = ["ESTAB", "SYN-RECV", "TIME-WAIT", "CLOSE-WAIT"]
     _extra = sorted(s for d in _ls.values() for s in d
-                    if s not in _std and s != "LISTEN")   # LISTEN stays a begin/end row
+                    if s not in _std and s != "LISTEN" and d.get(s))
     _states = _std + _extra
     def _fdcell(v, a, b):
         # "live(deleted)" from the 6-int dbfd payload; '-' when that minute
@@ -32098,8 +32105,7 @@ def dbproc_minute_table(samples):
     _h = ['<table class="t"><tr><th>Time</th><th class="n">LISTEN Recv-Q</th>']
     _h += ['<th class="n">%s</th>' % esc(_s) for _s in _states]
     if _ct:
-        _h += ['<th class="n">Conntrack Used</th><th class="n">Conntrack Limit</th>'
-               '<th class="n">Conntrack Fill %</th>']
+        _h += ['<th class="n">Conntrack Used</th><th class="n">Conntrack Limit</th>']
     _h += ['<th class="n">DBFile FDs</th><th class="n">TempFile FDs</th>'
            '<th class="n">XLog FDs</th></tr>']
     for _ts in sorted(set(_lq) | set(_ls) | set(_fd) | set(_ct)):
@@ -32110,11 +32116,10 @@ def dbproc_minute_table(samples):
         if not _ct:
             _cc = ""
         elif _c:
-            _cc = ('<td class="n">%s</td><td class="n">%s</td><td class="n">%s</td>'
-                   % (fmt_int(_c[0]), fmt_int(_c[1]),
-                      ("%.2f%%" % (100.0 * _c[0] / _c[1])) if _c[1] else "-"))
+            _cc = ('<td class="n">%s</td><td class="n">%s</td>'
+                   % (fmt_int(_c[0]), fmt_int(_c[1])))
         else:
-            _cc = '<td class="n">-</td><td class="n">-</td><td class="n">-</td>'
+            _cc = '<td class="n">-</td><td class="n">-</td>'
         _h.append('<tr><td>%s</td><td class="n">%s</td>%s%s'
                   '<td class="n">%s</td><td class="n">%s</td><td class="n">%s</td></tr>'
                   % (esc(_ts), esc(_q),
@@ -32125,8 +32130,8 @@ def dbproc_minute_table(samples):
     _h.append('</table>')
     if _ct:
         _h.append('<div class="note">Conntrack Used = nf_conntrack entries in use, '
-                  'Limit = nf_conntrack_max. Near 100% fill the table is full: new '
-                  'flows go to early_drop, then packets get dropped.</div>')
+                  'Limit = nf_conntrack_max. When Used approaches Limit the table '
+                  'is full: new flows go to early_drop, then packets get dropped.</div>')
     return "".join(_h)
 
 def os_minute_tcp_series(samples):
