@@ -29154,7 +29154,7 @@ _se_kb_dump() {
 
 awr_help() {
     cat <<'EOF'
-Usage: vb_tool awr <create|enable|disable|awrrpt|awrdiff|baseline|topsql|event|summary|tabstat|cpu|io|page|mem|net|tcp|fd|replstat|replslot|replay|ltx|pagew|sqlhist|list|show|delete|config> [options]
+Usage: vb_tool awr <create|enable|disable|awrrpt|awrdiff|baseline|topsql|event|summary|tabstat|cpu|io|page|mem|net|tcp|tcpstat|fd|replstat|replslot|replay|ltx|pagew|sqlhist|list|show|delete|config> [options]
 
   create  [--root <dir>]   one snapshot now, no html
   enable | disable         start/stop the crontab sampler (snapshot every
@@ -29177,7 +29177,8 @@ Usage: vb_tool awr <create|enable|disable|awrrpt|awrdiff|baseline|topsql|event|s
                            one table's window deltas (any database)
   cpu | io | page          begin <id> end <id> -- per-minute CPU / disk IO / paging
   mem | net                begin <id> end <id> -- per-minute memory level / per-NIC traffic
-  tcp                      begin <id> end <id> -- per-minute TCP counters + RTT + accept queue
+  tcpstat                  begin <id> end <id> -- per-minute TCP counters + RTT + accept queue (host L4)
+  tcp                      begin <id> end <id> -- per-minute DB-port socket states + conntrack
   fd                       begin <id> end <id> -- per-minute postmaster fd buckets (dbfile/tempfile/xlog)
   replstat | replslot | replay
                            begin <id> end <id> -- per-minute replication / slots /
@@ -37406,12 +37407,13 @@ def text_net(win, repl_dir=None):
     lines.append(_text_table(headers, trows, align="ll" + "r" * 6))
     return 0, "\n".join(lines)
 
-def text_tcp(win, repl_dir=None):
-    """awr tcp: the TCP Statistics section as a screen table -- host L4
+def text_tcpstat(win, repl_dir=None):
+    """awr tcpstat: the TCP Statistics section as a screen table -- host L4
     counters (tcp) + per-minute RTT gauges (ssrtt) + accept-queue counters
     (tcpext) on one minute axis; RTT/tcpext columns appear only when the
-    sampler logged them."""
-    lines = _text_banner("awr tcp detail", win)
+    sampler logged them. (Renamed from 'tcp' by user 2026-10-30: the name
+    'tcp' now belongs to the DB-port socket-state table.)"""
+    lines = _text_banner("awr tcpstat detail", win)
     m = win["meta"]
     samples = (load_os_samples(repl_dir, m.get("begin_ts", ""), m.get("end_ts", ""))
                if repl_dir else {"files": []})
@@ -37446,6 +37448,54 @@ def text_tcp(win, repl_dir=None):
             y = xser.get(ts)
             r += (["%.2f" % y["listen_drops_s"], "%.2f" % y["listen_overflows_s"],
                    "%.2f" % y["timeouts_s"], "%.2f" % y["syn_retrans_s"]] if y else ["-"] * 4)
+        rows.append(r)
+    lines.append(_text_table(headers, rows, align="l" + "r" * (len(headers) - 1)))
+    return 0, "\n".join(lines)
+
+def text_tcp(win, repl_dir=None):
+    """awr tcp: DB-port socket states per minute -- LISTEN Recv-Q, TCP Total
+    (incl. the listeners), the four common states, FIN-WAIT-1/2 as FW1/FW2,
+    plus conntrack Used/Limit (columns only when the window has conntrack
+    samples). Same columns as the html DB Process per-minute fold minus the
+    fd buckets (user 2026-10-30); '-' = not sampled that minute."""
+    lines = _text_banner("awr tcp detail", win)
+    m = win["meta"]
+    samples = (load_os_samples(repl_dir, m.get("begin_ts", ""), m.get("end_ts", ""))
+               if repl_dir else {"files": []})
+    if not samples.get("files"):
+        lines.append("(no per-minute OS samples in this period -- the sampler runs")
+        lines.append(" while 'awr enable' is on; manual snapshots alone carry no series)")
+        return 0, "\n".join(lines)
+    lq = {ts: p.split(",")[0] for ts, p in samples.get("lstn", [])}
+    ls = {}
+    for ts, p in samples.get("lstnsock", []):
+        f = p.split(",")
+        if len(f) == 2 and f[1].strip().isdecimal():
+            ls.setdefault(ts, {})[f[0]] = int(f[1])
+    ct = {}
+    for ts, p in (samples.get("conntrack") or []):
+        f = p.split(",")
+        if len(f) == 2 and f[0].strip().isdecimal() and f[1].strip().isdecimal():
+            ct[ts] = (int(f[0]), int(f[1]))
+    if not (lq or ls or ct):
+        lines.append("(no usable per-minute samples in this period)")
+        return 0, "\n".join(lines)
+    headers = ["time", "LISTEN Recv-Q", "TCP Total", "ESTAB", "SYN-RECV",
+               "TIME-WAIT", "CLOSE-WAIT", "FW-1/2"]
+    if ct:
+        headers += ["Conntrack Used", "Conntrack Limit"]
+    rows = []
+    for ts in sorted(set(lq) | set(ls) | set(ct)):
+        row = ls.get(ts, {})
+        fw = ("%d/%d" % (row.get("FIN-WAIT-1", 0), row.get("FIN-WAIT-2", 0))
+              if row else "-")
+        r = [ts, lq.get(ts, "-"),
+             str(sum(row.values())) if row else "-",
+             row.get("ESTAB", "-"), row.get("SYN-RECV", "-"),
+             row.get("TIME-WAIT", "-"), row.get("CLOSE-WAIT", "-"), fw]
+        if ct:
+            c = ct.get(ts)
+            r += ([str(c[0]), str(c[1])] if c else ["-", "-"])
         rows.append(r)
     lines.append(_text_table(headers, rows, align="l" + "r" * (len(headers) - 1)))
     return 0, "\n".join(lines)
@@ -38116,7 +38166,7 @@ def main():
         if not (begin_dir and end_dir):
             sys.stderr.write("Error: --text needs --begin DIR and --end DIR\n"); return 2
         if text_section not in ("topsql", "event", "summary", "tabstat",
-                                "cpu", "io", "page", "mem", "net", "tcp", "fd",
+                                "cpu", "io", "page", "mem", "net", "tcp", "tcpstat", "fd",
                                 "replstat", "replslot",
                                 "replay", "ltx", "pagew", "sqlhist"):
             sys.stderr.write("Error: --text expects topsql|event|summary|tabstat"
@@ -38170,6 +38220,8 @@ def main():
                 return text_mem(w, repl_dir)
             elif text_section == "net":
                 return text_net(w, repl_dir)
+            elif text_section == "tcpstat":
+                return text_tcpstat(w, repl_dir)
             elif text_section == "tcp":
                 return text_tcp(w, repl_dir)
             elif text_section == "fd":
@@ -40028,7 +40080,7 @@ _awr_text_report() {
         return 1
     fi
     case "$section" in
-        cpu|io|page|mem|net|tcp|fd) ;;   # OS-only: per-minute instantaneous /proc samples, no DB cumulative counters
+        cpu|io|page|mem|net|tcp|tcpstat|fd) ;;   # OS-only: per-minute instantaneous /proc samples, no DB cumulative counters
         *) _awr_check_uptime "$bdir" "$edir" || return 1;;
     esac
     _awr_render --begin "$bdir" --end "$edir" --text "$section" --repl-dir "$root" --sqltext-root "$(_awr_root)" "${pass[@]}"
@@ -40049,6 +40101,7 @@ _awr_pagew()   { _awr_text_report pagew   "$@"; }
 _awr_mem()     { _awr_text_report mem     "$@"; }
 _awr_net()     { _awr_text_report net     "$@"; }
 _awr_tcp()     { _awr_text_report tcp     "$@"; }
+_awr_tcpstat() { _awr_text_report tcpstat "$@"; }
 _awr_fd()      { _awr_text_report fd      "$@"; }
 _awr_sqlhist() {
     local sid="$1"; shift   # run_awr already consumed 'sqlhist'
@@ -40086,6 +40139,7 @@ run_awr() {
         mem)            _awr_mem "$@";;
         net)            _awr_net "$@";;
         tcp)            _awr_tcp "$@";;
+        tcpstat)        _awr_tcpstat "$@";;
         fd)             _awr_fd "$@";;
         replstat)       _awr_replstat "$@";;
         replslot)       _awr_replslot "$@";;
