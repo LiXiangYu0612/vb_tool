@@ -29216,7 +29216,8 @@ _awr_root() {
             mkdir -p "$root"
             mv "$base"/snap_* "$base"/sequence "$base"/retention "$base"/interval \
                "$base"/repl_*.log "$base"/slot_*.log "$base"/os_*.log "$base"/os_*.log.gz \
-               "$base"/walrcv_*.log "$base"/lt_*.log "$base"/stack_*.log \
+               "$base"/walrcv_*.log "$base"/lt_*.log "$base"/lt_*.log.gz \
+               "$base"/pw_*.log "$base"/stack_*.log "$base"/stack_*.log.gz \
                "$base"/sessmem_*.log "$base"/sessmem_*.log.gz "$root"/ 2>/dev/null
             echo "awr: migrated existing snapshots/config into per-port layout $root" >&2
         ) 9>"$base/.migrate.lock"
@@ -30062,13 +30063,13 @@ PSQL4
     _odbs=$(PGCONNECT_TIMEOUT=$_ct PGOPTIONS="$_st" psql -d postgres -tAc "select datname from pg_database where datallowconn and not datistemplate order by 1" 2>/dev/null)
     { echo "dbname,schema,object,seq_scan,seq_tup_read,idx_scan,idx_tup_fetch,n_tup_ins,n_tup_upd,n_tup_del,n_tup_hot_upd,n_live_tup,n_dead_tup"
       for _odb in $_odbs; do
-          PGCONNECT_TIMEOUT=$_ct PGOPTIONS="$_st" psql -d "$_odb" -tAF',' -c "select '$_odb',schemaname,relname,coalesce(seq_scan,0),coalesce(seq_tup_read,0),coalesce(idx_scan,0),coalesce(idx_tup_fetch,0),coalesce(n_tup_ins,0),coalesce(n_tup_upd,0),coalesce(n_tup_del,0),coalesce(n_tup_hot_upd,0),coalesce(n_live_tup,0),coalesce(n_dead_tup,0) from pg_stat_user_tables" 2>/dev/null
+          PGCONNECT_TIMEOUT=$_ct PGOPTIONS="$_st" psql -d "$_odb" -v odb="$_odb" -tAF',' -c "select :'odb',schemaname,relname,coalesce(seq_scan,0),coalesce(seq_tup_read,0),coalesce(idx_scan,0),coalesce(idx_tup_fetch,0),coalesce(n_tup_ins,0),coalesce(n_tup_upd,0),coalesce(n_tup_del,0),coalesce(n_tup_hot_upd,0),coalesce(n_live_tup,0),coalesce(n_dead_tup,0) from pg_stat_user_tables" 2>/dev/null
       done; } > "$dbd/object_tables.csv"
     # object_dead walks pg_class so global relisshared catalogs land here too;
     # postgres-pass-only, same rule as object_iostat below (2026-10-26).
     { echo "dbname,schema,object,table_age,relpages,reltuples,n_dml_tup,n_live_tup,n_dead_tup"
       for _odb in $_odbs; do
-          PGCONNECT_TIMEOUT=$_ct PGOPTIONS="$_st" psql -d "$_odb" -tAF',' -c "select '$_odb',n.nspname,c.relname,age(c.relfrozenxid64),c.relpages,c.reltuples,coalesce(pg_stat_get_tuples_changed(c.oid),0),coalesce(pg_stat_get_live_tuples(c.oid),0),coalesce(pg_stat_get_dead_tuples(c.oid),0) from pg_class c left join pg_namespace n on n.oid=c.relnamespace where c.relkind in ('r','t','m') and ('$_odb' = 'postgres' or not c.relisshared)" 2>/dev/null
+          PGCONNECT_TIMEOUT=$_ct PGOPTIONS="$_st" psql -d "$_odb" -v odb="$_odb" -tAF',' -c "select :'odb',n.nspname,c.relname,age(c.relfrozenxid64),c.relpages,c.reltuples,coalesce(pg_stat_get_tuples_changed(c.oid),0),coalesce(pg_stat_get_live_tuples(c.oid),0),coalesce(pg_stat_get_dead_tuples(c.oid),0) from pg_class c left join pg_namespace n on n.oid=c.relnamespace where c.relkind in ('r','t','m') and (:'odb' = 'postgres' or not c.relisshared)" 2>/dev/null
       done; } > "$dbd/object_dead.csv"
     # ---- object buffer I/O across all databases (2026-10-15; source =
     # dbe_perf.statio_all_tables, system catalogs included, user 2026-10-15).
@@ -30084,7 +30085,7 @@ PSQL4
     # under every dbname and Top-N/%Total sums count it N times (2026-10-26). ----
     { echo "dbname,schema,object,heap_blks_read,heap_blks_hit,idx_blks_read,idx_blks_hit,toast_blks_read,toast_blks_hit,tidx_blks_read,tidx_blks_hit"
       for _odb in $_odbs; do
-          PGCONNECT_TIMEOUT=$_ct PGOPTIONS="$_st" psql -d "$_odb" -tAF',' -c "select '$_odb',schemaname,relname,coalesce(heap_blks_read,0),coalesce(heap_blks_hit,0),coalesce(idx_blks_read,0),coalesce(idx_blks_hit,0),coalesce(toast_blks_read,0),coalesce(toast_blks_hit,0),coalesce(tidx_blks_read,0),coalesce(tidx_blks_hit,0) from dbe_perf.statio_all_tables where schemaname <> 'pg_toast' and ('$_odb' = 'postgres' or not exists (select 1 from pg_class c where c.oid = relid and c.relisshared))" 2>/dev/null
+          PGCONNECT_TIMEOUT=$_ct PGOPTIONS="$_st" psql -d "$_odb" -v odb="$_odb" -tAF',' -c "select :'odb',schemaname,relname,coalesce(heap_blks_read,0),coalesce(heap_blks_hit,0),coalesce(idx_blks_read,0),coalesce(idx_blks_hit,0),coalesce(toast_blks_read,0),coalesce(toast_blks_hit,0),coalesce(tidx_blks_read,0),coalesce(tidx_blks_hit,0) from dbe_perf.statio_all_tables where schemaname <> 'pg_toast' and (:'odb' = 'postgres' or not exists (select 1 from pg_class c where c.oid = relid and c.relisshared))" 2>/dev/null
       done; } > "$dbd/object_iostat.csv"
     # ---- per-index buffer I/O across all databases (2026-10-15; source =
     # dbe_perf.statio_all_indexes; feeds the Top-Tables First/Second/Third
@@ -30098,7 +30099,7 @@ PSQL4
     # (2026-10-26). ----
     { echo "dbname,schema,object,index,idx_blks_read,idx_blks_hit"
       for _odb in $_odbs; do
-          PGCONNECT_TIMEOUT=$_ct PGOPTIONS="$_st" psql -d "$_odb" -tAF',' -c "select '$_odb',schemaname,relname,indexrelname,coalesce(idx_blks_read,0),coalesce(idx_blks_hit,0) from dbe_perf.statio_all_indexes where schemaname <> 'pg_toast' and ('$_odb' = 'postgres' or not exists (select 1 from pg_class c where c.oid = relid and c.relisshared))" 2>/dev/null
+          PGCONNECT_TIMEOUT=$_ct PGOPTIONS="$_st" psql -d "$_odb" -v odb="$_odb" -tAF',' -c "select :'odb',schemaname,relname,indexrelname,coalesce(idx_blks_read,0),coalesce(idx_blks_hit,0) from dbe_perf.statio_all_indexes where schemaname <> 'pg_toast' and (:'odb' = 'postgres' or not exists (select 1 from pg_class c where c.oid = relid and c.relisshared))" 2>/dev/null
       done; } > "$dbd/object_index_iostat.csv"
     # ---- instance-wide physical I/O totals (2026-09-16; replaces the per-file
     # gs_file_stat capture AND the Top-10 file-IO report tables). Source =
@@ -32047,7 +32048,7 @@ def _osmin_note(samples):
         return '<div class="note">no per-minute OS samples in this period (sampler runs while awr is enabled)</div>'
     return '<div class="note">no usable per-minute samples in this period</div>'
 
-def dbproc_minute_table(samples):
+def dbproc_minute_table(samples, begin_ts=""):
     """DB Process 'Per-minute detail' body (user 2026-10-30): the former
     standalone TCP Sockets section's per-minute table, now folded under DB
     Process like CPU utilization's, plus the sampler's dbfd columns --
@@ -32059,21 +32060,29 @@ def dbproc_minute_table(samples):
     backlog capacity), Recv-Q relabeled 'LISTEN Recv-Q'. Conntrack merged in
     too (was its own section): Used / Limit columns after the TCP states
     (Fill % dropped, user: Used+Limit suffice), present only when the window
-    has conntrack samples (module not loaded -> no columns)."""
+    has conntrack samples (module not loaded -> no columns).
+    begin_ts: drop the loader's pre-begin warmup minute (audit 2026-10-30) --
+    gauges need no diff baseline, so rows before the window must not show."""
     if samples is None or not (samples.get("lstn") or samples.get("lstnsock")
                                or samples.get("conntrack") or samples.get("dbfd")):
         return _osmin_note({"files": (samples or {}).get("files", [])})
-    _lq = {ts: p.split(",")[0] for ts, p in samples.get("lstn", [])}
+    _bts = str(begin_ts or "")
+    _lq = {ts: p.split(",")[0] for ts, p in samples.get("lstn", [])
+           if not _bts or ts >= _bts}
     _ls = {}
     for _ts, _p in samples.get("lstnsock", []):
+        if _bts and _ts < _bts:
+            continue
         _f = _p.split(",")
         if len(_f) == 2 and _f[1].strip().isdecimal():
             _ls.setdefault(_ts, {})[_f[0]] = int(_f[1])
-    _fd = dict(samples.get("dbfd", []))
+    _fd = {ts: p for ts, p in samples.get("dbfd", []) if not _bts or ts >= _bts}
     # conntrack per minute: (count, limit) -- validated again here even though
     # the loader checked, same defensive style as lstnsock above
     _ct = {}
     for _ts, _p in (samples.get("conntrack") or []):
+        if _bts and _ts < _bts:
+            continue
         _f = _p.split(",")
         if len(_f) == 2 and _f[0].strip().isdecimal() and _f[1].strip().isdecimal():
             _ct[_ts] = (int(_f[0]), int(_f[1]))
@@ -34536,7 +34545,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         # Sockets section now lives here, folded by default exactly like CPU
         # utilization's per-minute detail, and carries the dbfd columns --
         # see dbproc_minute_table.
-        parts.append(_fold("Per-minute detail", dbproc_minute_table(os_smp)))
+        parts.append(_fold("Per-minute detail", dbproc_minute_table(os_smp, m.get("begin_ts", ""))))
     sub("OS Memory Usage")
     _bm = parse_meminfo(win["os"].get(("begin", "meminfo"), ""))
     _em = parse_meminfo(win["os"].get(("end", "meminfo"), ""))
@@ -36197,30 +36206,36 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         parts.append('</table>')
     sub("System Activity")
     _t1, _t2 = osd1.get("tcp") or {}, osd2.get("tcp") or {}
+    # one-sided presence shows the column with '-' on the missing side (audit
+    # 2026-10-30): the old and/or asymmetry hid TCP when one side was an old
+    # snap while rendering forks as fake 0.0
     _has_f = osd1.get("forks_per_sec") is not None or osd2.get("forks_per_sec") is not None
-    _has_t = _t1.get("opens_per_sec") is not None and _t2.get("opens_per_sec") is not None
+    _has_t = _t1.get("opens_per_sec") is not None or _t2.get("opens_per_sec") is not None
     _hdr = '<th class="n">Context Switches</th><th class="n">Interrupts</th>'
     if _has_f: _hdr += '<th class="n">Forks</th>'
     if _has_t: _hdr += '<th class="n">TCP Opens</th><th class="n">TCP Retrans</th>'
     _c1 = [(osd1.get("ctxt_per_sec", 0) or 0), (osd1.get("intr_per_sec", 0) or 0)]
     _c2 = [(osd2.get("ctxt_per_sec", 0) or 0), (osd2.get("intr_per_sec", 0) or 0)]
     if _has_f:
-        _c1.append(osd1.get("forks_per_sec") or 0.0)
-        _c2.append(osd2.get("forks_per_sec") or 0.0)
+        _c1.append(osd1.get("forks_per_sec"))
+        _c2.append(osd2.get("forks_per_sec"))
     if _has_t:
-        _c1 += [(_t1.get("opens_per_sec") or 0.0), (_t1.get("retrans_per_sec") or 0.0)]
-        _c2 += [(_t2.get("opens_per_sec") or 0.0), (_t2.get("retrans_per_sec") or 0.0)]
+        _c1 += [_t1.get("opens_per_sec"), _t1.get("retrans_per_sec")]
+        _c2 += [_t2.get("opens_per_sec"), _t2.get("retrans_per_sec")]
     def _row(label, vals, plus):
         _f1, _f2 = ("%+.0f", "%.1f") if plus else ("%.0f", "%.1f")
+        def _fmt(f, v):
+            return "-" if v is None else f % v
         # first two cols integer, extras one/two decimals
-        cells = ['<td class="n">%s</td>' % (_f1 % vals[0]), '<td class="n">%s</td>' % (_f1 % vals[1])]
+        cells = ['<td class="n">%s</td>' % _fmt(_f1, vals[0]), '<td class="n">%s</td>' % _fmt(_f1, vals[1])]
         for i, v in enumerate(vals[2:]):
-            cells.append('<td class="n">%s</td>' % ((_f2 if i < 1 else "%.2f" if not plus else "%+.2f") % v))
+            cells.append('<td class="n">%s</td>' % _fmt((_f2 if i < 1 else "%.2f" if not plus else "%+.2f"), v))
         return '<tr><td class="k">%s</td>%s</tr>' % (label, "".join(cells))
     parts.append('<table class="t"><tr><th></th>%s</tr>' % _hdr)
     parts.append(_row("P1", _c1, False))
     parts.append(_row("P2", _c2, False))
-    parts.append(_row("delta", [b - a for a, b in zip(_c1, _c2)], True))
+    parts.append(_row("delta", [(b - a) if (a is not None and b is not None) else None
+                                for a, b in zip(_c1, _c2)], True))
     parts.append('</table>')
     sub("OS Memory - period-end snapshot, MB")
     _m1 = parse_meminfo(win1["os"].get(("end", "meminfo"), ""))
@@ -36431,9 +36446,10 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
              - sum(to_num(r.get("n_calls", 0) or 0) for r in win1["db"].get(("begin", "statement"), [])))
     _scd2 = (sum(to_num(r.get("n_calls", 0) or 0) for r in win2["db"].get(("end", "statement"), []))
              - sum(to_num(r.get("n_calls", 0) or 0) for r in win2["db"].get(("begin", "statement"), [])))
-    parts.append('<tr><td>SQL calls</td><td class="n">%s</td><td class="n">%s</td><td class="n">%s</td>'
+    _scd_neg = " <span class='note'>(counter reset?)</span>" if (_scd1 < 0 or _scd2 < 0) else ""
+    parts.append('<tr><td>SQL calls%s</td><td class="n">%s</td><td class="n">%s</td><td class="n">%s</td>'
                  '<td class="n">%s</td><td class="n">%s</td></tr>'
-                 % (fmt_int(_scd1), fmt_int(_scd2), fmt_int(_scd2 - _scd1),
+                 % (_scd_neg, fmt_int(_scd1), fmt_int(_scd2), fmt_int(_scd2 - _scd1),
                     ("%.2f" % (_scd1 / dur1)) if dur1 else "-",
                     ("%.2f" % (_scd2 / dur2)) if dur2 else "-"))
     for lbl, col in [("deadlocks", "deadlocks"),
@@ -37142,7 +37158,9 @@ def _event_rows(win, event_filter):
     rows = []
     for ev, etype, t, waits in entries:
         avg = t / 1000.0 / waits if (waits is not None and waits > 0) else None
-        pct = 100.0 * t / db_time if (db_time and db_time > 0) else 0.0
+        # None when DB_TIME is unusable (negative delta / missing) so the row
+        # renders '-' instead of a misleading 0.0% (audit 2026-10-30)
+        pct = 100.0 * t / db_time if (db_time and db_time > 0) else None
         rows.append(["%.1f" % (db_time / 1e6) if db_time is not None else "-",
                      ev, etype,
                      "%.1f" % (t / 1e6),
@@ -37493,22 +37511,35 @@ def text_tcp(win, repl_dir=None):
         lines.append("(no per-minute OS samples in this period -- the sampler runs")
         lines.append(" while 'awr enable' is on; manual snapshots alone carry no series)")
         return 0, "\n".join(lines)
-    lq = {ts: p.split(",") for ts, p in samples.get("lstn", [])}
+    # window filter + dynamic rare-state columns (audit 2026-10-30): gauges
+    # need no pre-begin warmup row, and TCP Total jumps with flat common
+    # states must be attributable HERE the same way the html fold does it
+    bts = str(m.get("begin_ts", ""))
+    lq = {ts: p.split(",") for ts, p in samples.get("lstn", [])
+          if not bts or ts >= bts}
     ls = {}
     for ts, p in samples.get("lstnsock", []):
+        if bts and ts < bts:
+            continue
         f = p.split(",")
         if len(f) == 2 and f[1].strip().isdecimal():
             ls.setdefault(ts, {})[f[0]] = int(f[1])
     ct = {}
     for ts, p in (samples.get("conntrack") or []):
+        if bts and ts < bts:
+            continue
         f = p.split(",")
         if len(f) == 2 and f[0].strip().isdecimal() and f[1].strip().isdecimal():
             ct[ts] = (int(f[0]), int(f[1]))
     if not (lq or ls or ct):
         lines.append("(no usable per-minute samples in this period)")
         return 0, "\n".join(lines)
+    _std = ("ESTAB", "SYN-RECV", "TIME-WAIT", "CLOSE-WAIT")
+    extra = sorted(s for d in ls.values() for s in d
+                   if s not in _std and s != "LISTEN" and d.get(s)
+                   and s not in ("FIN-WAIT-1", "FIN-WAIT-2"))
     headers = ["time", "LISTEN Recv-Q", "LISTEN Send-Q", "TCP Total", "ESTAB",
-               "SYN-RECV", "TIME-WAIT", "CLOSE-WAIT", "FW-1/2"]
+               "SYN-RECV", "TIME-WAIT", "CLOSE-WAIT", "FW-1/2"] + extra
     if ct:
         headers += ["Conntrack Used", "Conntrack Limit"]
     rows = []
@@ -37521,6 +37552,7 @@ def text_tcp(win, repl_dir=None):
              str(sum(row.values())) if row else "-",
              row.get("ESTAB", "-"), row.get("SYN-RECV", "-"),
              row.get("TIME-WAIT", "-"), row.get("CLOSE-WAIT", "-"), fw]
+        r += [row.get(s, "-") for s in extra]
         if ct:
             c = ct.get(ts)
             r += ([str(c[0]), str(c[1])] if c else ["-", "-"])
@@ -37541,7 +37573,10 @@ def text_fd(win, repl_dir=None):
         lines.append("(no per-minute OS samples in this period -- the sampler runs")
         lines.append(" while 'awr enable' is on; manual snapshots alone carry no series)")
         return 0, "\n".join(lines)
-    fd = dict(samples.get("dbfd", []))
+    # window filter (audit 2026-10-30): drop the loader's pre-begin warmup
+    # minute -- gauges need no diff baseline, same as text_tcp/text_mem
+    _bts = str(m.get("begin_ts", ""))
+    fd = {ts: p for ts, p in samples.get("dbfd", []) if not _bts or ts >= _bts}
     if not fd:
         lines.append("(no usable per-minute samples in this period)")
         return 0, "\n".join(lines)
@@ -38183,10 +38218,17 @@ def main():
                               "rel_iostat", "file_redo_iostat"}),
         "tabstat": frozenset({"object_tables"}),
         "sqlhist": frozenset({"statement"}),
-        # cpu/io/page/replstat/replslot/replay/ltx: render whole window only
-        # (no detail_wins), so load_snap is called exactly 2x — slim path adds
-        # no win, keep the default full load (also reads repl/lt sampler logs
-        # outside this mechanism).
+        # OS/sampler-log-only commands load ZERO db CSVs (audit 2026-10-30):
+        # cpu/io/page/mem/net/tcp/tcpstat/fd read os_*.log, replstat/replslot/
+        # replay read repl_/slot_/walrcv_*.log, ltx/pagew read lt_/pw_*.log --
+        # all via load_os_samples, which never goes through db_tables. The old
+        # default full load (19 CSVs x2 snaps, statement.csv is MB-scale) made
+        # these CLI calls several times slower for nothing.
+        "cpu": frozenset(), "io": frozenset(), "page": frozenset(),
+        "mem": frozenset(), "net": frozenset(), "tcp": frozenset(),
+        "tcpstat": frozenset(), "fd": frozenset(),
+        "replstat": frozenset(), "replslot": frozenset(), "replay": frozenset(),
+        "ltx": frozenset(), "pagew": frozenset(),
     }
     text_db_tables = TEXT_DB_TABLES.get(text_section)
 
@@ -38198,7 +38240,8 @@ def main():
                                 "replstat", "replslot",
                                 "replay", "ltx", "pagew", "sqlhist"):
             sys.stderr.write("Error: --text expects topsql|event|summary|tabstat"
-                             "|cpu|io|page|replstat|replslot|replay|ltx|pagew|sqlhist\n"); return 2
+                             "|cpu|io|page|mem|net|tcp|tcpstat|fd"
+                             "|replstat|replslot|replay|ltx|pagew|sqlhist\n"); return 2
         # ★选项归属校验 (2026-10-11, user: 给错子命令的选项要报错, 不再静默吞):
         #   text 模式下 -m/-n 只属于 topsql, -E 只属于 event, -d/-s/-t 只属于
         #   tabstat, --sql-id 只属于 sqlhist; 其余 8 个 section 不吃任何选项。
@@ -38703,7 +38746,11 @@ _awr_repl_sample() {
     # role probe falls through to the primary branch (which writes its own
     # error rows). The OS sample below runs for BOTH roles either way.
     wrf="$root/walrcv_$(date +%Y%m%d).log"
-    if PGCONNECT_TIMEOUT=15 psql -d postgres -tAc "select pg_is_in_recovery()" 2>/dev/null | grep -qx 't'; then
+    # statement_timeout here too (audit 2026-10-30): without it a hung DB
+    # (connects fine, queries never return) parks this psql forever, holding
+    # repl.lock so every later minute's flock -n skips -- the OS /proc series
+    # would stop exactly when a hang needs it most
+    if PGCONNECT_TIMEOUT=15 PGOPTIONS='-c statement_timeout=15000' psql -d postgres -tAc "select pg_is_in_recovery()" 2>/dev/null | grep -qx 't'; then
         out=$(PGCONNECT_TIMEOUT=15 PGOPTIONS='-c statement_timeout=15000' \
               psql -d postgres -tAF',' -c "select receiver_pid,local_role,peer_role,peer_state,state,sender_sent_location,sender_write_location,sender_flush_location,sender_replay_location,receiver_received_location,receiver_write_location,receiver_flush_location,receiver_replay_location,sync_percent,channel from pg_stat_get_wal_receiver()" 2>/dev/null)
         if [ "$?" -ne 0 ]; then
@@ -39042,6 +39089,14 @@ _awr_snap() {
     local sid ts ts_ep dir
     sid=$(_awr_next_id) || return 1
     dir="$root/snap_$sid"
+    # refuse to overwrite a COMPLETE snapshot (audit 2026-10-30): a corrupted/
+    # truncated sequence file resets the id to 1 and would silently rm -rf the
+    # existing snap_1, snap_2 ... one per create. In-flight leftovers carry no
+    # meta.json (written only after a successful collect) and stay clearable.
+    if [ -f "$dir/meta.json" ]; then
+        echo "Error: snap_$sid already exists -- refusing to overwrite (sequence corrupt? inspect $root/sequence)" >&2
+        return 1
+    fi
     rm -rf "$dir" 2>/dev/null
     mkdir -p "$dir" 2>/dev/null || { echo "Error: cannot create $dir" >&2; return 1; }
     ts=$(date '+%F %T'); ts_ep=$(date +%s)
@@ -39211,7 +39266,10 @@ PYBL
     fi
     local _cpfail=0
     for day in $days; do
-        for f in os_ repl_ slot_ walrcv_ lt_ stack_ sessmem_; do
+        # pw_ too (audit 2026-10-30): pagewriter's 5-min log is a first-class
+        # series (awr pagew / Pagewriter Status) -- a baseline copy without it
+        # breaks the self-contained promise for exactly that section
+        for f in os_ repl_ slot_ walrcv_ lt_ pw_ stack_ sessmem_; do
             # design rule: a failed copy = incomplete self-contained baseline
             # -> roll the whole registration back (never half-register)
             [ -f "$root/${f}${day}.log" ] && { cp -p "$root/${f}${day}.log" "$broot/" 2>/dev/null || _cpfail=1; }
@@ -39416,13 +39474,18 @@ _awr_awrrpt() {
 # awr awrdiff begin <x> end <y> baseline <id>
 #   period1 = the registered baseline (reference), period2 = snap x->y.
 _awr_awrdiff() {
-    local ids=() base_ref=""
+    local ids=() base_ref="" _expect="begin"
     while [ $# -gt 0 ]; do
         case "$1" in
             begin)     [ $# -lt 2 ] && { echo "Error: 'begin' requires a snap_id" >&2; return 2; }
-                       ids+=("$2"); shift 2;;
+                       # strict begin/end alternation (audit 2026-10-30):
+                       # 'begin 1 begin 2 end 3 end 4' used to pair positionally
+                       # into P1=1->2 / P2=3->4 silently
+                       [ "$_expect" = "begin" ] || { echo "Error: expected 'end' before this 'begin' (begin/end must strictly alternate)" >&2; return 2; }
+                       ids+=("$2"); _expect="end"; shift 2;;
             end)       [ $# -lt 2 ] && { echo "Error: 'end' requires a snap_id" >&2; return 2; }
-                       ids+=("$2"); shift 2;;
+                       [ "$_expect" = "end" ] || { echo "Error: expected 'begin' before this 'end' (begin/end must strictly alternate)" >&2; return 2; }
+                       ids+=("$2"); _expect="begin"; shift 2;;
             baseline)  [ $# -lt 2 ] && { echo "Error: 'baseline' requires a baseline id" >&2; return 2; }
                        [ -n "$base_ref" ] && { echo "Error: only one 'baseline <id>' reference allowed" >&2; return 2; }
                        base_ref="$2"; shift 2;;
@@ -39468,7 +39531,10 @@ _awr_awrdiff() {
         echo "Error: period2 begin ($p2b) must be LOWER than end ($p2e) -- 1-snap windows have no delta to render" >&2
         return 1
     fi
-    [ "$p1e" -gt "$p2b" ] 2>/dev/null && echo "  [WARN] period1 end ($p1e) > period2 begin ($p2b); periods overlap" >&2
+    # id-space comparison is meaningless for the baseline form (P1 ids are from
+    # registration time and can be anywhere vs current ids) -- WARN only when
+    # both periods are current-window ids
+    [ -z "$base_ref" ] && [ "$p1e" -gt "$p2b" ] 2>/dev/null && echo "  [WARN] period1 end ($p1e) > period2 begin ($p2b); periods overlap" >&2
     # restart guard PER PERIOD (each period's begin/end must be same uptime;
     # cross-period restart is allowed -- each period's delta is self-contained).
     _awr_check_uptime "$d1b" "$d1e" || return 1
@@ -39555,7 +39621,7 @@ _awr_enable() {
     #   不了 >60/不整除 60 的间隔; 改每分钟唤醒 + epoch 分钟模 interval 文件值 ——
     #   任意 N(1-1440) 精确; interval 改动只写文件下一边界即生效, 与 crontab 解耦。
     local gateroot; gateroot=$(_awr_root)   # ★enable 作用域没有现成 $root(实测踩坑: 空路径生成 cat /interval)
-    local entry="* * * * * /bin/bash -lc 'R=\$(cat $gateroot/interval 2>/dev/null); case \"\$R\" in \"\"|*[!0-9]*) R=60;; esac; [ \$(( \$(date +\%s) / 60 \% \$R )) -eq 0 ] && PGPORT=$port $self awr create >/dev/null 2>&1'  $marker"
+    local entry="* * * * * /bin/bash -lc 'R=\$(cat $gateroot/interval 2>/dev/null); case \"\$R\" in \"\"|0|*[!0-9]*) R=60;; esac; [ \$(( \$(date +\%s) / 60 \% \$R )) -eq 0 ] && PGPORT=$port $self awr create >/dev/null 2>&1'  $marker"
     local rentry="* * * * * /bin/bash -lc 'PGPORT=$port $self awr _repl-sample >/dev/null 2>&1'  $rmarker"
     if ! ( crontab -l 2>/dev/null | grep -vF "$rmarker" | grep -vF "$marker"; echo "$rentry"; echo "$entry" ) | crontab -; then
         echo "Error: failed to install crontab entries (check cron.allow/cron.deny, permissions or disk) -- periodic capture NOT started" >&2
@@ -39885,7 +39951,11 @@ PY
         esac
     done
     local hcount=0 f mep
+    # *.tar too (audit 2026-10-30): since v2.5.16 the tar IS the only artifact
+    # that stays (html members are deleted on successful pack) -- without this
+    # glob retention never touches the reports dir's real contents
     for f in "${VB_TOOL_HOME:-$HOME/.vb_tool}"/awr_reports/awr_*.html \
+             "${VB_TOOL_HOME:-$HOME/.vb_tool}"/awr_reports/awr_*.tar \
              "${VB_TOOL_HOME:-$HOME/.vb_tool}"/awr_reports/awrdiff_*.html \
              "${VB_TOOL_HOME:-$HOME/.vb_tool}"/awr_reports/baseline_*.html; do
         [ -f "$f" ] || continue
@@ -39910,7 +39980,7 @@ _awr_delete_until() {
     local counts
     counts=$(_awr_purge_core "$until_ep")
     set -- $counts
-    echo "deleted $1 snap(s) (by ts), $2 sampler log(s) (by day), and $3 html report(s) (by mtime) older than $until_time"
+    echo "deleted $1 snap(s) (by ts), $2 sampler log(s) (by day), and $3 report file(s) (by mtime) older than $until_time"
     return 0
 }
 
@@ -39940,7 +40010,7 @@ _awr_purge_expired() {
     counts=$(_awr_purge_core "$cutoff_ep" 2>/dev/null)
     set -- $counts
     [ "$1" -eq 0 ] && [ "$2" -eq 0 ] && [ "$3" -eq 0 ] && return 0
-    echo "awr auto-purge (retention ${days}d): removed $1 snap(s), $2 sampler log(s), $3 html report(s) older than $(date -d "@$cutoff_ep" '+%F %T' 2>/dev/null)"
+    echo "awr auto-purge (retention ${days}d): removed $1 snap(s), $2 sampler log(s), $3 report file(s) older than $(date -d "@$cutoff_ep" '+%F %T' 2>/dev/null)"
     return 0
 }
 
@@ -40016,7 +40086,7 @@ _awr_config() {
                crontab -l 2>/dev/null | grep -qE '# vb_tool_awr(_repl)? *$'; then
                 local self; self=$(readlink -f "$0" 2>/dev/null || echo "$0")
                 local gateroot; gateroot=$(_awr_root)
-                local entry="* * * * * /bin/bash -lc 'R=\$(cat $gateroot/interval 2>/dev/null); case \"\$R\" in \"\"|*[!0-9]*) R=60;; esac; [ \$(( \$(date +\%s) / 60 \% \$R )) -eq 0 ] && PGPORT=$cport $self awr create >/dev/null 2>&1'  # vb_tool_awr_p$cport"
+                local entry="* * * * * /bin/bash -lc 'R=\$(cat $gateroot/interval 2>/dev/null); case \"\$R\" in \"\"|0|*[!0-9]*) R=60;; esac; [ \$(( \$(date +\%s) / 60 \% \$R )) -eq 0 ] && PGPORT=$cport $self awr create >/dev/null 2>&1'  # vb_tool_awr_p$cport"
                 local rentry="* * * * * /bin/bash -lc 'PGPORT=$cport $self awr _repl-sample >/dev/null 2>&1'  # vb_tool_awr_repl_p$cport"
                 if ! ( crontab -l 2>/dev/null | grep -vE "# vb_tool_awr_repl_p${cport}\$" | grep -vE "# vb_tool_awr_p${cport}\$" | grep -vE '# vb_tool_awr(_repl)? *$'; echo "$rentry"; echo "$entry" ) | crontab -; then
                     echo "Error: failed to rewrite crontab entry (check cron.allow/cron.deny, permissions or disk) -- interval NOT changed" >&2
@@ -40108,7 +40178,7 @@ _awr_text_report() {
         return 1
     fi
     case "$section" in
-        cpu|io|page|mem|net|tcp|tcpstat|fd) ;;   # OS-only: per-minute instantaneous /proc samples, no DB cumulative counters
+        cpu|io|page|mem|net|tcp|tcpstat|fd) ;;   # OS-only: per-minute instantaneous /proc samples, no DB cumulative counters (8 cmds, keep in sync with the usage line)
         *) _awr_check_uptime "$bdir" "$edir" || return 1;;
     esac
     _awr_render --begin "$bdir" --end "$edir" --text "$section" --repl-dir "$root" --sqltext-root "$(_awr_root)" "${pass[@]}"
