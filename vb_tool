@@ -32091,8 +32091,9 @@ def dbproc_minute_table(samples):
     # window. LISTEN stays excluded (begin/end rows carry it).
     _std = ["ESTAB", "SYN-RECV", "TIME-WAIT", "CLOSE-WAIT"]
     _extra = sorted(s for d in _ls.values() for s in d
-                    if s not in _std and s != "LISTEN" and d.get(s))
-    _states = _std + _extra
+                    if s not in _std and s != "LISTEN" and d.get(s)
+                    # FIN-WAIT-1/2 live in their own merged fixed column
+                    and s not in ("FIN-WAIT-1", "FIN-WAIT-2"))
     def _fdcell(v, a, b):
         # "live(deleted)" from the 6-int dbfd payload; '-' when that minute
         # has no dbfd row (old logs)
@@ -32102,8 +32103,18 @@ def dbproc_minute_table(samples):
         if len(_x) == 6 and _x[a].strip().isdecimal() and _x[b].strip().isdecimal():
             return "%d(%d deleted)" % (int(_x[a]), int(_x[b]))
         return "-"
-    _h = ['<table class="t"><tr><th>Time</th><th class="n">LISTEN Recv-Q</th>']
-    _h += ['<th class="n">%s</th>' % esc(_s) for _s in _states]
+    # column order: Time, LISTEN Recv-Q, TCP Total (user 2026-10-30: one
+    # number for "how many sockets on the port", incl. the listeners -- if
+    # it jumps while the four common states stay flat, a rare state piled
+    # up and its dynamic column will show), the four common states,
+    # FIN-WAIT-1/2 as ONE merged column (user: 写在一个栏位里面 -- the two
+    # active-closer waits; accumulated FW-2 = peer hung without closing),
+    # then dynamic extras, conntrack, fd buckets.
+    _h = ['<table class="t"><tr><th>Time</th><th class="n">LISTEN Recv-Q</th>'
+          '<th class="n">TCP Total</th>']
+    _h += ['<th class="n">%s</th>' % esc(_s) for _s in _std]
+    _h += ['<th class="n">FIN-WAIT-1/2</th>']
+    _h += ['<th class="n">%s</th>' % esc(_s) for _s in _extra]
     if _ct:
         _h += ['<th class="n">Conntrack Used</th><th class="n">Conntrack Limit</th>']
     _h += ['<th class="n">DBFile FDs</th><th class="n">TempFile FDs</th>'
@@ -32113,6 +32124,9 @@ def dbproc_minute_table(samples):
         _row = _ls.get(_ts, {})
         _v = _fd.get(_ts)
         _c = _ct.get(_ts)
+        # no lstnsock row for this minute -> states/total/FW are '-' (not 0)
+        _tot = sum(_row.values()) if _row else None
+        _fw = (_row.get("FIN-WAIT-1", 0) + _row.get("FIN-WAIT-2", 0)) if _row else None
         if not _ct:
             _cc = ""
         elif _c:
@@ -32120,11 +32134,16 @@ def dbproc_minute_table(samples):
                    % (fmt_int(_c[0]), fmt_int(_c[1])))
         else:
             _cc = '<td class="n">-</td><td class="n">-</td>'
-        _h.append('<tr><td>%s</td><td class="n">%s</td>%s%s'
+        _h.append('<tr><td>%s</td><td class="n">%s</td><td class="n">%s</td>%s'
+                  '<td class="n">%s</td>%s%s'
                   '<td class="n">%s</td><td class="n">%s</td><td class="n">%s</td></tr>'
                   % (esc(_ts), esc(_q),
+                     "-" if _tot is None else "%d" % _tot,
                      "".join('<td class="n">%s</td>' % _row.get(_s, "-")
-                             for _s in _states),
+                             for _s in _std),
+                     "-" if _fw is None else "%d" % _fw,
+                     "".join('<td class="n">%s</td>' % _row.get(_s, "-")
+                             for _s in _extra),
                      _cc,
                      _fdcell(_v, 0, 1), _fdcell(_v, 2, 3), _fdcell(_v, 4, 5)))
     _h.append('</table>')
@@ -34673,6 +34692,10 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         parts.append('<table class="t"><tr><th>Bond</th><th>Mode</th>'
                      '<th>Active Slave</th><th>Slave Interfaces</th></tr>'
                      + "".join(_brows) + '</table>')
+    else:
+        # explicit, not silent: heading without a body reads as "not sampled"
+        # (user 2026-10-30) -- say it: this host has no bond devices
+        parts.append('<div class="note">no bond devices on this host</div>')
     sub("Network per interface")
     dur_os = osd.get("dur", 1.0) or 1.0
     def nrate(it, key):
