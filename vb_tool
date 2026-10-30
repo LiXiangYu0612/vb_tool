@@ -29154,7 +29154,7 @@ _se_kb_dump() {
 
 awr_help() {
     cat <<'EOF'
-Usage: vb_tool awr <create|enable|disable|awrrpt|awrdiff|baseline|topsql|event|summary|tabstat|cpu|io|page|replstat|replslot|replay|ltx|pagew|sqlhist|list|show|delete|config> [options]
+Usage: vb_tool awr <create|enable|disable|awrrpt|awrdiff|baseline|topsql|event|summary|tabstat|cpu|io|page|mem|net|tcp|fd|replstat|replslot|replay|ltx|pagew|sqlhist|list|show|delete|config> [options]
 
   create  [--root <dir>]   one snapshot now, no html
   enable | disable         start/stop the crontab sampler (snapshot every
@@ -29176,6 +29176,9 @@ Usage: vb_tool awr <create|enable|disable|awrrpt|awrdiff|baseline|topsql|event|s
   tabstat begin <id> end <id> -d <db> -s <schema> -t <table>
                            one table's window deltas (any database)
   cpu | io | page          begin <id> end <id> -- per-minute CPU / disk IO / paging
+  mem | net                begin <id> end <id> -- per-minute memory level / per-NIC traffic
+  tcp                      begin <id> end <id> -- per-minute TCP counters + RTT + accept queue
+  fd                       begin <id> end <id> -- per-minute postmaster fd buckets + DB-port TCP states
   replstat | replslot | replay
                            begin <id> end <id> -- per-minute replication / slots /
                            walreceiver samples
@@ -37342,6 +37345,170 @@ def text_page(win, repl_dir=None):
     lines.append(_text_table(headers, rows, align="l" + "r" * (len(headers) - 1)))
     return 0, "\n".join(lines)
 
+def text_mem(win, repl_dir=None):
+    """awr mem: per-minute memory level gauges (MemUsed / MemAvail plus the
+    summed-zone watermarks Free/Min/Low/High) -- complements 'awr page'
+    (paging ACTIVITY counters); no overlap."""
+    lines = _text_banner("awr mem detail", win)
+    m = win["meta"]
+    samples = (load_os_samples(repl_dir, m.get("begin_ts", ""), m.get("end_ts", ""))
+               if repl_dir else {"files": []})
+    if not samples.get("files"):
+        lines.append("(no per-minute OS samples in this period -- the sampler runs")
+        lines.append(" while 'awr enable' is on; manual snapshots alone carry no series)")
+        return 0, "\n".join(lines)
+    bts = str(m.get("begin_ts", ""))
+    gauges = {ts: g for ts, g in os_minute_mem_gauges(samples).items()
+              if not bts or ts >= bts}
+    if not gauges:
+        lines.append("(no usable per-minute samples in this period)")
+        return 0, "\n".join(lines)
+    has_wm = any(g[2] is not None for g in gauges.values())
+    headers = ["time", "MemUsed (MB)", "MemAvail (MB)"]
+    if has_wm:
+        headers += ["WM Free (MB)", "WM Min (MB)", "WM Low (MB)", "WM High (MB)"]
+    rows = []
+    for ts in sorted(gauges):
+        used, avail, wm = gauges[ts]
+        r = [ts, "%.0f" % used, "%.0f" % avail]
+        if has_wm:
+            r += (["%.0f" % x for x in wm] if wm else ["-"] * 4)
+        rows.append(r)
+    lines.append(_text_table(headers, rows, align="l" + "r" * (len(headers) - 1)))
+    return 0, "\n".join(lines)
+
+def text_net(win, repl_dir=None):
+    """awr net: per-minute per-interface traffic (B/s, pkt/s, errs/drop
+    deltas) -- same source and columns as the html Network fold."""
+    lines = _text_banner("awr net detail", win)
+    m = win["meta"]
+    samples = (load_os_samples(repl_dir, m.get("begin_ts", ""), m.get("end_ts", ""))
+               if repl_dir else {"files": []})
+    if not samples.get("files"):
+        lines.append("(no per-minute OS samples in this period -- the sampler runs")
+        lines.append(" while 'awr enable' is on; manual snapshots alone carry no series)")
+        return 0, "\n".join(lines)
+    bts = str(m.get("begin_ts", ""))
+    per = os_minute_net_series(samples)
+    rows = sorted((ts, ifc, d, dt)
+                  for ifc, lst in per.items() for ts, d, dt in lst
+                  if not bts or ts >= bts)
+    if not rows:
+        lines.append("(no usable per-minute samples in this period)")
+        return 0, "\n".join(lines)
+    headers = ["time", "iface", "RX B/s", "TX B/s", "RX pkt/s", "TX pkt/s",
+               "rx/tx errs (Delta)", "rx/tx drop (Delta)"]
+    trows = [[ts, ifc, fmt_bytes(d["rx_bytes"] / dt), fmt_bytes(d["tx_bytes"] / dt),
+              "%.1f" % (d["rx_packets"] / dt), "%.1f" % (d["tx_packets"] / dt),
+              "%.0f/%.0f" % (d["rx_errs"], d["tx_errs"]),
+              "%.0f/%.0f" % (d["rx_drop"], d["tx_drop"])]
+             for ts, ifc, d, dt in rows]
+    lines.append(_text_table(headers, trows, align="ll" + "r" * 6))
+    return 0, "\n".join(lines)
+
+def text_tcp(win, repl_dir=None):
+    """awr tcp: the TCP Statistics section as a screen table -- host L4
+    counters (tcp) + per-minute RTT gauges (ssrtt) + accept-queue counters
+    (tcpext) on one minute axis; RTT/tcpext columns appear only when the
+    sampler logged them."""
+    lines = _text_banner("awr tcp detail", win)
+    m = win["meta"]
+    samples = (load_os_samples(repl_dir, m.get("begin_ts", ""), m.get("end_ts", ""))
+               if repl_dir else {"files": []})
+    if not samples.get("files"):
+        lines.append("(no per-minute OS samples in this period -- the sampler runs")
+        lines.append(" while 'awr enable' is on; manual snapshots alone carry no series)")
+        return 0, "\n".join(lines)
+    bts = str(m.get("begin_ts", ""))
+    tser = [r for r in os_minute_tcp_series(samples) if not bts or r[0] >= bts]
+    if not tser:
+        lines.append("(no usable per-minute samples in this period)")
+        return 0, "\n".join(lines)
+    xser = {ts: d for ts, d in os_minute_tcpext_series(samples)
+            if not bts or ts >= bts}
+    rser = {ts: d for ts, d in os_minute_rtt_series(samples)
+            if not bts or ts >= bts}
+    headers = ["time", "Opens/s", "Retrans/s", "Retrans%", "CurrEstab"]
+    if rser:
+        headers += ["RTT Conns", "RTT avg (ms)", "RTT p95 (ms)", "Worst Peer"]
+    if xser:
+        headers += ["ListenDrops/s", "ListenOverflows/s", "Timeouts/s", "SynRetrans/s"]
+    rows = []
+    for ts, d, ce in tser:
+        r = [ts, "%.1f" % d["opens_s"], "%.2f" % d["retrans_s"],
+             ("%.3f" % d["retrans_pct"]) if d["retrans_pct"] is not None else "-",
+             "%.0f" % ce]
+        if rser:
+            x = rser.get(ts)
+            r += (["%.0f" % x["conns"], "%.3f" % x["rtt_avg"],
+                   "%.3f" % x["rtt_p95"], x["worst_peer"]] if x else ["-", "-", "-", "-"])
+        if xser:
+            y = xser.get(ts)
+            r += (["%.2f" % y["listen_drops_s"], "%.2f" % y["listen_overflows_s"],
+                   "%.2f" % y["timeouts_s"], "%.2f" % y["syn_retrans_s"]] if y else ["-"] * 4)
+        rows.append(r)
+    lines.append(_text_table(headers, rows, align="l" + "r" * (len(headers) - 1)))
+    return 0, "\n".join(lines)
+
+def text_fd(win, repl_dir=None):
+    """awr fd: the DB Process per-minute detail as a screen table --
+    postmaster reg-fd buckets under $PGDATA (dbfile/tempfile/xlog,
+    live(deleted)), the DB-port TCP states (total + common four + FIN-WAIT
+    1/2 as FW1/FW2), LISTEN Recv-Q and conntrack Used/Limit. Columns follow
+    the html fold; '-' = not sampled that minute (old logs / crash gap)."""
+    lines = _text_banner("awr fd detail", win)
+    m = win["meta"]
+    samples = (load_os_samples(repl_dir, m.get("begin_ts", ""), m.get("end_ts", ""))
+               if repl_dir else {"files": []})
+    if not samples.get("files"):
+        lines.append("(no per-minute OS samples in this period -- the sampler runs")
+        lines.append(" while 'awr enable' is on; manual snapshots alone carry no series)")
+        return 0, "\n".join(lines)
+    lq = {ts: p.split(",")[0] for ts, p in samples.get("lstn", [])}
+    ls = {}
+    for ts, p in samples.get("lstnsock", []):
+        f = p.split(",")
+        if len(f) == 2 and f[1].strip().isdecimal():
+            ls.setdefault(ts, {})[f[0]] = int(f[1])
+    fd = dict(samples.get("dbfd", []))
+    ct = {}
+    for ts, p in (samples.get("conntrack") or []):
+        f = p.split(",")
+        if len(f) == 2 and f[0].strip().isdecimal() and f[1].strip().isdecimal():
+            ct[ts] = (int(f[0]), int(f[1]))
+    if not (lq or ls or fd or ct):
+        lines.append("(no usable per-minute samples in this period)")
+        return 0, "\n".join(lines)
+    headers = ["time", "LISTEN Recv-Q", "TCP Total", "ESTAB", "SYN-RECV",
+               "TIME-WAIT", "CLOSE-WAIT", "FW-1/2"]
+    if ct:
+        headers += ["Conntrack Used", "Conntrack Limit"]
+    headers += ["DBFile FDs", "TempFile FDs", "XLog FDs"]
+    def _fdc(v, a, b):
+        if v is None:
+            return "-"
+        x = v.split(",")
+        if len(x) == 6 and x[a].strip().isdecimal() and x[b].strip().isdecimal():
+            return "%d(%d del)" % (int(x[a]), int(x[b]))
+        return "-"
+    rows = []
+    for ts in sorted(set(lq) | set(ls) | set(fd) | set(ct)):
+        row = ls.get(ts, {})
+        fw = ("%d/%d" % (row.get("FIN-WAIT-1", 0), row.get("FIN-WAIT-2", 0))
+              if row else "-")
+        r = [ts, lq.get(ts, "-"),
+             str(sum(row.values())) if row else "-",
+             row.get("ESTAB", "-"), row.get("SYN-RECV", "-"),
+             row.get("TIME-WAIT", "-"), row.get("CLOSE-WAIT", "-"), fw]
+        if ct:
+            c = ct.get(ts)
+            r += ([str(c[0]), str(c[1])] if c else ["-", "-"])
+        v = fd.get(ts)
+        r += [_fdc(v, 0, 1), _fdc(v, 2, 3), _fdc(v, 4, 5)]
+        rows.append(r)
+    lines.append(_text_table(headers, rows, align="l" + "r" * (len(headers) - 1)))
+    return 0, "\n".join(lines)
+
 def text_replstat(win, repl_dir=None):
     """awrrpt 'Replication Stat' table as a screen report: per-minute
     pg_stat_replication samples with computed byte lags -- same source,
@@ -37978,7 +38145,8 @@ def main():
         if not (begin_dir and end_dir):
             sys.stderr.write("Error: --text needs --begin DIR and --end DIR\n"); return 2
         if text_section not in ("topsql", "event", "summary", "tabstat",
-                                "cpu", "io", "page", "replstat", "replslot",
+                                "cpu", "io", "page", "mem", "net", "tcp", "fd",
+                                "replstat", "replslot",
                                 "replay", "ltx", "pagew", "sqlhist"):
             sys.stderr.write("Error: --text expects topsql|event|summary|tabstat"
                              "|cpu|io|page|replstat|replslot|replay|ltx|pagew|sqlhist\n"); return 2
@@ -38027,6 +38195,14 @@ def main():
                 return text_io(w, repl_dir)
             elif text_section == "page":
                 return text_page(w, repl_dir)
+            elif text_section == "mem":
+                return text_mem(w, repl_dir)
+            elif text_section == "net":
+                return text_net(w, repl_dir)
+            elif text_section == "tcp":
+                return text_tcp(w, repl_dir)
+            elif text_section == "fd":
+                return text_fd(w, repl_dir)
             elif text_section == "replstat":
                 return text_replstat(w, repl_dir)
             elif text_section == "replslot":
@@ -39881,7 +40057,7 @@ _awr_text_report() {
         return 1
     fi
     case "$section" in
-        cpu|io|page) ;;    # OS-only: per-minute /proc samples, no DB counters
+        cpu|io|page|mem|net|tcp|fd) ;;   # OS-only: per-minute instantaneous /proc samples, no DB cumulative counters
         *) _awr_check_uptime "$bdir" "$edir" || return 1;;
     esac
     _awr_render --begin "$bdir" --end "$edir" --text "$section" --repl-dir "$root" --sqltext-root "$(_awr_root)" "${pass[@]}"
@@ -39899,6 +40075,10 @@ _awr_replslot() { _awr_text_report replslot "$@"; }
 _awr_replay()   { _awr_text_report replay   "$@"; }
 _awr_ltx()     { _awr_text_report ltx     "$@"; }
 _awr_pagew()   { _awr_text_report pagew   "$@"; }
+_awr_mem()     { _awr_text_report mem     "$@"; }
+_awr_net()     { _awr_text_report net     "$@"; }
+_awr_tcp()     { _awr_text_report tcp     "$@"; }
+_awr_fd()      { _awr_text_report fd      "$@"; }
 _awr_sqlhist() {
     local sid="$1"; shift   # run_awr already consumed 'sqlhist'
     if [ -z "$sid" ] || [ "$sid" = "begin" ] || [ "$sid" = "end" ]; then
@@ -39932,6 +40112,10 @@ run_awr() {
         cpu)            _awr_cpu "$@";;
         io)             _awr_io "$@";;
         page)           _awr_page "$@";;
+        mem)            _awr_mem "$@";;
+        net)            _awr_net "$@";;
+        tcp)            _awr_tcp "$@";;
+        fd)             _awr_fd "$@";;
         replstat)       _awr_replstat "$@";;
         replslot)       _awr_replslot "$@";;
         replay)         _awr_replay "$@";;
