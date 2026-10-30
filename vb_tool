@@ -18253,7 +18253,9 @@ class ReportGenerator:
                 <strong>分析时间范围：</strong>{overall_min_time.strftime('%Y-%m-%d %H:%M:%S') if hasattr(overall_min_time, 'strftime') else str(overall_min_time)} 至 {overall_max_time.strftime('%Y-%m-%d %H:%M:%S') if hasattr(overall_max_time, 'strftime') else str(overall_max_time)} ｜
                 <strong>总文件大小：</strong>{total_size_mb_all:.2f} MB ｜
                 <strong>总记录数：</strong>{len(all_total_list)} 条 ｜
-                <strong>总耗时：</strong>{total_elapsed_seconds_all} 秒
+                <strong>总耗时：</strong>{total_elapsed_seconds_all} 秒 ｜
+                <strong>生成时间：</strong>{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ｜
+                <strong>工具版本：</strong>{os.environ.get('VB_TOOL_VERSION', '-')}
             </div>
         </div>
         """
