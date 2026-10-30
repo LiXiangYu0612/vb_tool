@@ -34351,8 +34351,19 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     # affinity / multi-queue argument a summed total hides). Both tables are
     # window-delta matrices: rows = top entries by total delta, columns =
     # cpu0..N, plus a Max column naming the hottest core and its share.
-    _sq = osd.get("softirqs") or {}     # {cat: [per-cpu delta]}
     _dur = to_num(m.get("duration")) or 1.0
+    # parse BOTH ends here (user 2026-10-30: list ALL categories including
+    # zero-delta ones -- the osd path drops them) so every /proc/softirqs
+    # category shows, zeros included
+    _sb = proc_softirqs(win["os"].get(("begin", "softirqs"), ""))
+    _se = proc_softirqs(win["os"].get(("end", "softirqs"), ""))
+    _sq = {}
+    for _c in set(_sb) | set(_se):
+        _vb, _ve = _sb.get(_c, []), _se.get(_c, [])
+        _n = max(len(_vb), len(_ve))
+        if _n:
+            _sq[_c] = [max(0, (_ve[i] if i < len(_ve) else 0) - (_vb[i] if i < len(_vb) else 0))
+                       for i in range(_n)]
     def _active_cols(rows_vecs, ncpu):
         """Column selection for wide machines (user 2026-10-30: 256-core
         boxes must still show the FULL distribution, not Top-3): a cpu column
@@ -34400,9 +34411,9 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             _hot, len(vec))
     if _sq:
         _ncpu = max(len(v) for v in _sq.values())
-        _rows = sorted(_sq.items(), key=lambda kv: abs(sum(kv[1])), reverse=True)[:10]
+        _rows = sorted(_sq.items(), key=lambda kv: abs(sum(kv[1])), reverse=True)
         _act, _rest = _active_cols([v for _, v in _rows], _ncpu)
-        h = [_matrix_hdr(_ncpu, '<th>Softirq (window delta)</th>', _act, _rest)]
+        h = [_matrix_hdr(_ncpu, '<th>Softirq (Delta)</th>', _act, _rest)]
         for k, vec in _rows:
             h.append('<tr><td>%s</td>%s%s<td class="n">%s</td>%s</tr>'
                      % (esc(k),
@@ -34426,12 +34437,12 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         _n = max(len(_vb), len(_ve))
         _dv = [max(0, (_ve[i] if i < len(_ve) else 0) - (_vb[i] if i < len(_vb) else 0))
                for i in range(_n)]
-        if any(_dv):
-            _desc = (_ie.get(_k) or _ib.get(_k) or ([0], ""))[1]
-            _idelta.append((_k, _desc, _dv))
+        # zero-delta rows stay listed too (user 2026-10-30: a silent IRQ is
+        # information -- dead queue / affinity pinned to an offline core)
+        _desc = (_ie.get(_k) or _ib.get(_k) or ([0], ""))[1]
+        _idelta.append((_k, _desc, _dv))
     if _idelta:
         _idelta.sort(key=lambda t: -sum(t[2]))
-        _idelta = _idelta[:10]
         _ncpu = max(len(t[2]) for t in _idelta)
         _act, _rest = _active_cols([t[2] for t in _idelta], _ncpu)
         # affinity config (2026-10-30): distribution shows WHERE load lands,
