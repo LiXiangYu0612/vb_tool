@@ -33199,7 +33199,9 @@ def proc_vmstat(txt):
     return out
 
 def proc_interrupts(txt):
-    """/proc/interrupts -> {irq_label: (count_summed_over_cpus, desc)}.
+    """/proc/interrupts -> {irq_label: (per_cpu_counts, desc)} (user
+    2026-10-30: the per-CPU DISTRIBUTION is the signal -- which core serves
+    the NIC/disk IRQ decides the affinity story a summed total hides).
     First line holds the CPU column headers -- its width is the per-IRQ cpu
     count. Rows: '<label>: <cnt per cpu>... <type...> <device...>'. Counts are
     cumulative since boot; consumers take end-begin deltas."""
@@ -33219,14 +33221,19 @@ def proc_interrupts(txt):
         if len(rest) < ncpu:
             continue
         try:
-            cnt = sum(int(x) for x in rest[:ncpu] if x.isdigit())
+            cnts = [int(x) for x in rest[:ncpu] if x.isdigit()]
         except Exception:
             continue
-        out[label] = (cnt, " ".join(rest[ncpu:]))
+        if len(cnts) != ncpu:
+            continue
+        out[label] = (cnts, " ".join(rest[ncpu:]))
     return out
 
 def proc_softirqs(txt):
-    """Per-category softirq totals summed across CPUs. /proc/softirqs lines: '<CAT>:'."""
+    """Per-category softirq PER-CPU counts (user 2026-10-30: which CPU runs
+    the softirq is the signal -- a single hot NET_RX core is the RPS/multi-
+    queue argument a summed total hides). /proc/softirqs lines: '<CAT>: c0 c1..'.
+    Returns {cat: [per_cpu counts]}. Callers that want totals sum() it."""
     out = {}
     for line in (txt or "").splitlines():
         f = line.split()
@@ -33234,7 +33241,7 @@ def proc_softirqs(txt):
             continue
         cat = f[0][:-1]
         try:
-            out[cat] = sum(to_num(x) for x in f[1:])
+            out[cat] = [to_num(x) for x in f[1:]]
         except Exception:
             pass
     return out
@@ -33348,9 +33355,15 @@ def os_window_deltas(win):
     es = proc_softirqs(win["os"].get(("end", "softirqs"), ""))
     softirqs = {}
     for cat in set(bs) | set(es):
-        d = es.get(cat, 0) - bs.get(cat, 0)
-        if d != 0:
-            softirqs[cat] = d
+        # per-CPU vectors -> per-CPU delta; keep the full vector for the
+        # renderer (which-CPU distribution), sum is derived where needed
+        vb, ve = bs.get(cat, []), es.get(cat, [])
+        n = max(len(vb), len(ve))
+        if n:
+            d = [max(0, (ve[i] if i < len(ve) else 0) - (vb[i] if i < len(vb) else 0))
+                 for i in range(n)]
+            if any(d):
+                softirqs[cat] = d
 
     return {
         # legacy fields (kept for summary cards)
@@ -34305,16 +34318,50 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     # Softirq breakdown (audit 2026-10-30): window delta was parsed into osd
     # but only the dead legacy renderer ever showed it -- TIMER/NET_RX direction
     # is a standard IRQ/softirq triage need
-    _sq = osd.get("softirqs") or {}
+    # Softirq + IRQ per-CPU distribution (user 2026-10-30: WHICH CPU runs the
+    # irq/softirq is the signal -- a single hot NET_RX/IRQ core is the RPS /
+    # affinity / multi-queue argument a summed total hides). Both tables are
+    # window-delta matrices: rows = top entries by total delta, columns =
+    # cpu0..N, plus a Max column naming the hottest core and its share.
+    _sq = osd.get("softirqs") or {}     # {cat: [per-cpu delta]}
     _dur = to_num(m.get("duration")) or 1.0
+    def _matrix_hdr(ncol_cpu, first_cols):
+        # >16 cores: skip the per-cpu columns (unreadably wide) -- Total+Max
+        # still name the hottest core and its share
+        _cols = ''.join('<th class="n">cpu%d</th>' % i for i in range(ncol_cpu)) \
+                if ncol_cpu <= 16 else ''
+        return ('<table class="t"><tr>' + first_cols + _cols +
+                '<th class="n">Total</th><th class="n">Max</th></tr>')
+    def _maxcell(vec):
+        # small machines: the single hottest core says it all. >16-core
+        # machines (user 2026-10-30): "which cores carry it" needs Top-3 +
+        # an activity count -- one Max would hide the multi-queue vs
+        # single-stuck-core distinction (192 cores, top3 ~33% each = queue
+        # spread working; cpu0 98% = affinity stuck)
+        if not vec or not any(vec):
+            return '<td class="n">-</td>'
+        _tot = sum(vec)
+        if not _tot:
+            return '<td class="n">-</td>'
+        _idx = sorted(range(len(vec)), key=lambda i: -vec[i])
+        if len(vec) <= 16:
+            return '<td class="n">cpu%d %.0f%%</td>' % (_idx[0], 100.0 * vec[_idx[0]] / _tot)
+        _top = [i for i in _idx if vec[i] > 0][:3]
+        _hot = sum(1 for v in vec if v and v >= 0.05 * vec[_idx[0]])
+        return '<td class="n">%s (%d/%d cores ≥5%% of max)</td>' % (
+            ' · '.join('cpu%d %.0f%%' % (i, 100.0 * vec[i] / _tot) for i in _top),
+            _hot, len(vec))
     if _sq:
-        _rows = sorted(_sq.items(), key=lambda kv: abs(kv[1]), reverse=True)
-        _srows = "".join('<tr><td>%s</td><td class="n">%s</td>'
-                         '<td class="n">%.1f</td></tr>'
-                         % (esc(k), fmt_int(d), d / _dur) for k, d in _rows[:10])
-        parts.append('<table class="t"><tr><th>Softirq (window delta, '
-                     'summed across CPUs)</th><th class="n">Delta</th>'
-                     '<th class="n">Per Sec</th></tr>%s</table>' % _srows)
+        _ncpu = max(len(v) for v in _sq.values())
+        _rows = sorted(_sq.items(), key=lambda kv: abs(sum(kv[1])), reverse=True)[:10]
+        h = [_matrix_hdr(_ncpu, '<th>Softirq (window delta)</th>')]
+        for k, vec in _rows:
+            _cells = (''.join('<td class="n">%s</td>' % fmt_int(vec[i] if i < len(vec) else 0)
+                              for i in range(_ncpu))) if _ncpu <= 16 else ''
+            h.append('<tr><td>%s</td>%s<td class="n">%s</td>%s</tr>'
+                     % (esc(k), _cells, fmt_int(sum(vec)), _maxcell(vec)))
+        h.append('</table>')
+        parts.append(''.join(h))
     # IRQ breakdown top10 (audit 2026-10-30): the interrupts snapshot file was
     # collected since day one with NO consumer at all -- which NIC/disk IRQ is
     # hot was unanswerable from the report
@@ -34322,20 +34369,26 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     _ie = proc_interrupts(win["os"].get(("end", "interrupts"), ""))
     _idelta = []
     for _k in set(_ib) | set(_ie):
-        _b = _ib.get(_k, (0, ""))[0]
-        _e = _ie.get(_k, (0, ""))[0]
-        if _e != _b:
-            _desc = (_ie.get(_k) or _ib.get(_k) or (0, ""))[1]
-            _idelta.append((_k, _desc, _e - _b))
+        _vb = (_ib.get(_k) or ([0], ""))[0]
+        _ve = (_ie.get(_k) or ([0], ""))[0]
+        _n = max(len(_vb), len(_ve))
+        _dv = [max(0, (_ve[i] if i < len(_ve) else 0) - (_vb[i] if i < len(_vb) else 0))
+               for i in range(_n)]
+        if any(_dv):
+            _desc = (_ie.get(_k) or _ib.get(_k) or ([0], ""))[1]
+            _idelta.append((_k, _desc, _dv))
     if _idelta:
-        _idelta.sort(key=lambda t: -abs(t[2]))
-        _irows = "".join('<tr><td>%s</td><td>%s</td><td class="n">%s</td>'
-                         '<td class="n">%.1f</td></tr>'
-                         % (esc(k), esc(dv), fmt_int(d), d / _dur)
-                         for k, dv, d in _idelta[:10])
-        parts.append('<table class="t"><tr><th>IRQ (top 10 by window delta)</th>'
-                     '<th>Device</th><th class="n">Delta</th>'
-                     '<th class="n">Per Sec</th></tr>%s</table>' % _irows)
+        _idelta.sort(key=lambda t: -sum(t[2]))
+        _idelta = _idelta[:10]
+        _ncpu = max(len(t[2]) for t in _idelta)
+        h = [_matrix_hdr(_ncpu, '<th>IRQ</th><th>Device</th>')]
+        for k, dv, vec in _idelta:
+            _cells = (''.join('<td class="n">%s</td>' % fmt_int(vec[i] if i < len(vec) else 0)
+                              for i in range(_ncpu))) if _ncpu <= 16 else ''
+            h.append('<tr><td>%s</td><td>%s</td>%s<td class="n">%s</td>%s</tr>'
+                     % (esc(k), esc(dv), _cells, fmt_int(sum(vec)), _maxcell(vec)))
+        h.append('</table>')
+        parts.append(''.join(h))
     parts.append('<table class="t"><tr>%s</tr><tr>%s</tr></table>'
                  % ("".join(_th), "".join(_td)))
     # DB Process: the postmaster listening on THIS awr's port (multi-instance
