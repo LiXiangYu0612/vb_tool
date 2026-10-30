@@ -33198,15 +33198,31 @@ def proc_vmstat(txt):
                 pass
     return out
 
-def proc_loadavg(txt):
-    """/proc/loadavg -> 1/5/15-min load average. Gauge (EWMA), not cumulative."""
-    out = {"load_1": 0.0, "load_5": 0.0, "load_15": 0.0}
-    f = (txt or "").split()
-    if len(f) >= 3:
+def proc_interrupts(txt):
+    """/proc/interrupts -> {irq_label: (count_summed_over_cpus, desc)}.
+    First line holds the CPU column headers -- its width is the per-IRQ cpu
+    count. Rows: '<label>: <cnt per cpu>... <type...> <device...>'. Counts are
+    cumulative since boot; consumers take end-begin deltas."""
+    out = {}
+    lines = (txt or "").splitlines()
+    if not lines:
+        return out
+    ncpu = len(lines[0].split())
+    if ncpu <= 0:
+        return out
+    for ln in lines[1:]:
+        f = ln.split(None, 1)
+        if not f or not f[0].endswith(":"):
+            continue
+        label = f[0][:-1]
+        rest = (f[1] or "").split()
+        if len(rest) < ncpu:
+            continue
         try:
-            out["load_1"], out["load_5"], out["load_15"] = to_num(f[0]), to_num(f[1]), to_num(f[2])
+            cnt = sum(int(x) for x in rest[:ncpu] if x.isdigit())
         except Exception:
-            pass
+            continue
+        out[label] = (cnt, " ".join(rest[ncpu:]))
     return out
 
 def proc_softirqs(txt):
@@ -33263,8 +33279,6 @@ def os_window_deltas(win):
     ex = proc_stat_extras(win["os"].get(("end", "stat"), ""))
     bvm = proc_vmstat(win["os"].get(("begin", "vmstat"), ""))
     evm = proc_vmstat(win["os"].get(("end", "vmstat"), ""))
-    bld = proc_loadavg(win["os"].get(("begin", "loadavg"), ""))
-    eld = proc_loadavg(win["os"].get(("end", "loadavg"), ""))
 
     # ---- network per-iface ----
     bn = {i["name"]: i for i in proc_net_ifaces(win["os"].get(("begin", "net_dev"), ""))}
@@ -33360,8 +33374,9 @@ def os_window_deltas(win):
             win["os"].get(("end", "net_snmp"), ""), dur),
         "runq_begin": bx["runq"],
         "runq_end": ex["runq"],
-        "load_begin": bld,
-        "load_end": eld,
+        # no loadavg here (user 2026-10-30): r/b IS the load signal --
+        # loadavg is only its EWMA smoothing, zero incremental information;
+        # the loadavg snapshot file stays collected for on-site use only
         "vm": {k: (max(0.0, evm[k] - bvm[k]) / dur) for k in bvm},
         "softnet": (lambda bs, es: None if (bs == (0, 0, 0) and es == (0, 0, 0)) else {
             "packets": max(0, es[0] - bs[0]),
@@ -34287,6 +34302,40 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
              "TCP Retrans/s = RetransSegs per second; TCP Retrans% = RetransSegs/OutSegs "
              "(bold >3%, red >5%: loss caps single-stream throughput).\n"
              "TCP CurrEstab = established connections at the begin/end snap.")
+    # Softirq breakdown (audit 2026-10-30): window delta was parsed into osd
+    # but only the dead legacy renderer ever showed it -- TIMER/NET_RX direction
+    # is a standard IRQ/softirq triage need
+    _sq = osd.get("softirqs") or {}
+    _dur = to_num(m.get("duration")) or 1.0
+    if _sq:
+        _rows = sorted(_sq.items(), key=lambda kv: abs(kv[1]), reverse=True)
+        _srows = "".join('<tr><td>%s</td><td class="n">%s</td>'
+                         '<td class="n">%.1f</td></tr>'
+                         % (esc(k), fmt_int(d), d / _dur) for k, d in _rows[:10])
+        parts.append('<table class="t"><tr><th>Softirq (window delta, '
+                     'summed across CPUs)</th><th class="n">Delta</th>'
+                     '<th class="n">Per Sec</th></tr>%s</table>' % _srows)
+    # IRQ breakdown top10 (audit 2026-10-30): the interrupts snapshot file was
+    # collected since day one with NO consumer at all -- which NIC/disk IRQ is
+    # hot was unanswerable from the report
+    _ib = proc_interrupts(win["os"].get(("begin", "interrupts"), ""))
+    _ie = proc_interrupts(win["os"].get(("end", "interrupts"), ""))
+    _idelta = []
+    for _k in set(_ib) | set(_ie):
+        _b = _ib.get(_k, (0, ""))[0]
+        _e = _ie.get(_k, (0, ""))[0]
+        if _e != _b:
+            _desc = (_ie.get(_k) or _ib.get(_k) or (0, ""))[1]
+            _idelta.append((_k, _desc, _e - _b))
+    if _idelta:
+        _idelta.sort(key=lambda t: -abs(t[2]))
+        _irows = "".join('<tr><td>%s</td><td>%s</td><td class="n">%s</td>'
+                         '<td class="n">%.1f</td></tr>'
+                         % (esc(k), esc(dv), fmt_int(d), d / _dur)
+                         for k, dv, d in _idelta[:10])
+        parts.append('<table class="t"><tr><th>IRQ (top 10 by window delta)</th>'
+                     '<th>Device</th><th class="n">Delta</th>'
+                     '<th class="n">Per Sec</th></tr>%s</table>' % _irows)
     parts.append('<table class="t"><tr>%s</tr><tr>%s</tr></table>'
                  % ("".join(_th), "".join(_td)))
     # DB Process: the postmaster listening on THIS awr's port (multi-instance
