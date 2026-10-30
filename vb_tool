@@ -34327,11 +34327,30 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     # cpu0..N, plus a Max column naming the hottest core and its share.
     _sq = osd.get("softirqs") or {}     # {cat: [per-cpu delta]}
     _dur = to_num(m.get("duration")) or 1.0
-    def _matrix_hdr(ncol_cpu, first_cols):
-        # >16 cores: skip the per-cpu columns (unreadably wide) -- Total+Max
-        # still name the hottest core and its share
-        _cols = ''.join('<th class="n">cpu%d</th>' % i for i in range(ncol_cpu)) \
-                if ncol_cpu <= 16 else ''
+    def _active_cols(rows_vecs, ncpu):
+        """Column selection for wide machines (user 2026-10-30: 256-core
+        boxes must still show the FULL distribution, not Top-3): a cpu column
+        is shown when it carries >=5% of the busiest column's total across
+        the table; all remaining columns collapse into one 'other' column.
+        Result: a stuck-affinity box shows 1-2 columns, a 64-queue NIC spread
+        shows those 64 -- width self-adapts to real activity, hard cap 24
+        shown columns."""
+        col_tot = [sum(v[i] if i < len(v) else 0 for v in rows_vecs) for i in range(ncpu)]
+        if not col_tot or max(col_tot) == 0:
+            # all-zero table: no distribution to show -- first 16 cols only,
+            # no 'other' (nothing to collapse)
+            return list(range(min(ncpu, 16))), []
+        hot = max(col_tot)
+        act = [i for i in range(ncpu) if col_tot[i] >= 0.05 * hot]
+        rest = [i for i in range(ncpu) if col_tot[i] < 0.05 * hot]
+        if len(act) > 24:                      # cap: keep the 24 heaviest
+            act = sorted(act, key=lambda i: -col_tot[i])[:24]
+            rest = [i for i in range(ncpu) if i not in set(act)]
+        return act, rest
+    def _matrix_hdr(ncol_cpu, first_cols, act, rest):
+        _cols = ''.join('<th class="n">cpu%d</th>' % i for i in act)
+        if rest:
+            _cols += '<th class="n">other (%d cpus)</th>' % len(rest)
         return ('<table class="t"><tr>' + first_cols + _cols +
                 '<th class="n">Total</th><th class="n">Max</th></tr>')
     def _maxcell(vec):
@@ -34356,12 +34375,17 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     if _sq:
         _ncpu = max(len(v) for v in _sq.values())
         _rows = sorted(_sq.items(), key=lambda kv: abs(sum(kv[1])), reverse=True)[:10]
-        h = [_matrix_hdr(_ncpu, '<th>Softirq (window delta)</th>')]
+        _act, _rest = _active_cols([v for _, v in _rows], _ncpu)
+        h = [_matrix_hdr(_ncpu, '<th>Softirq (window delta)</th>', _act, _rest)]
         for k, vec in _rows:
-            _cells = (''.join('<td class="n">%s</td>' % fmt_int(vec[i] if i < len(vec) else 0)
-                              for i in range(_ncpu))) if _ncpu <= 16 else ''
-            h.append('<tr><td>%s</td>%s<td class="n">%s</td>%s</tr>'
-                     % (esc(k), _cells, fmt_int(sum(vec)), _maxcell(vec)))
+            h.append('<tr><td>%s</td>%s%s<td class="n">%s</td>%s</tr>'
+                     % (esc(k),
+                        ''.join('<td class="n">%s</td>' % fmt_int(vec[i] if i < len(vec) else 0)
+                                for i in _act),
+                        ('<td class="n">%s</td>' % fmt_int(sum(vec[i] for i in _rest
+                                                                if i < len(vec))))
+                        if _rest else '',
+                        fmt_int(sum(vec)), _maxcell(vec)))
         h.append('</table>')
         parts.append(''.join(h))
     # IRQ breakdown top10 (audit 2026-10-30): the interrupts snapshot file was
@@ -34383,12 +34407,17 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         _idelta.sort(key=lambda t: -sum(t[2]))
         _idelta = _idelta[:10]
         _ncpu = max(len(t[2]) for t in _idelta)
-        h = [_matrix_hdr(_ncpu, '<th>IRQ</th><th>Device</th>')]
+        _act, _rest = _active_cols([t[2] for t in _idelta], _ncpu)
+        h = [_matrix_hdr(_ncpu, '<th>IRQ</th><th>Device</th>', _act, _rest)]
         for k, dv, vec in _idelta:
-            _cells = (''.join('<td class="n">%s</td>' % fmt_int(vec[i] if i < len(vec) else 0)
-                              for i in range(_ncpu))) if _ncpu <= 16 else ''
-            h.append('<tr><td>%s</td><td>%s</td>%s<td class="n">%s</td>%s</tr>'
-                     % (esc(k), esc(dv), _cells, fmt_int(sum(vec)), _maxcell(vec)))
+            h.append('<tr><td>%s</td><td>%s</td>%s%s<td class="n">%s</td>%s</tr>'
+                     % (esc(k), esc(dv),
+                        ''.join('<td class="n">%s</td>' % fmt_int(vec[i] if i < len(vec) else 0)
+                                for i in _act),
+                        ('<td class="n">%s</td>' % fmt_int(sum(vec[i] for i in _rest
+                                                                if i < len(vec))))
+                        if _rest else '',
+                        fmt_int(sum(vec)), _maxcell(vec)))
         h.append('</table>')
         parts.append(''.join(h))
     # DB Process: the postmaster listening on THIS awr's port (multi-instance
