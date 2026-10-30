@@ -39594,6 +39594,16 @@ _awr_enable() {
     local port="${PGPORT:-5432}"
     local marker="# vb_tool_awr_p$port"
     local rmarker="# vb_tool_awr_repl_p$port"
+    # cross-port crontab lock (audit 2026-10-30): enable/disable do a
+    # read-check-write on the WHOLE crontab (crontab - is a full replace) --
+    # two concurrent enables for different ports both read the pre-write
+    # snapshot and the later write silently drops the other port's entries.
+    # One shared lock file (NOT under the per-port awr root) serializes the
+    # whole check+install section; -w 30 so a stuck holder cannot hang us.
+    local _ctlock="${VB_TOOL_HOME:-$HOME/.vb_tool}/awr_crontab.lock"
+    mkdir -p "${VB_TOOL_HOME:-$HOME/.vb_tool}" 2>/dev/null
+    (
+    flock -w 30 9 || { echo "Error: cannot acquire $_ctlock (another vb_tool crontab edit in progress?)" >&2; exit 1; }
     # Refuse to double-enable THIS port (other ports may run awr in parallel);
     # also refuse while legacy port-less entries from an older vb_tool are
     # still installed -- they follow the login profile's PGPORT and cannot be
@@ -39605,12 +39615,12 @@ _awr_enable() {
         # state conflict, NOT a usage error (user 2026-10-20: rc=2 makes the
         # dispatcher dump the full awr help -- the 3 lines above already say
         # everything); rc=1 keeps it to the error block only
-        return 1
+        exit 1
     fi
     if crontab -l 2>/dev/null | grep -Eq '# vb_tool_awr(_repl)? *$'; then
         echo "Error: legacy awr crontab entries (older vb_tool, no port pinning) found --" >&2
         echo "       run 'awr disable' once to remove them, then re-enable" >&2
-        return 1
+        exit 1
     fi
     local mins; mins=$(_awr_interval_read)
     local self; self=$(readlink -f "$0" 2>/dev/null || echo "$0")
@@ -39625,12 +39635,15 @@ _awr_enable() {
     local rentry="* * * * * /bin/bash -lc 'PGPORT=$port $self awr _repl-sample >/dev/null 2>&1'  $rmarker"
     if ! ( crontab -l 2>/dev/null | grep -vF "$rmarker" | grep -vF "$marker"; echo "$rentry"; echo "$entry" ) | crontab -; then
         echo "Error: failed to install crontab entries (check cron.allow/cron.deny, permissions or disk) -- periodic capture NOT started" >&2
-        return 1
+        exit 1
     fi
     echo "awr enable: port $port, capturing a snapshot every ${mins}min (see 'awr config interval') + replication/slot/OS sample every 1min + long-txn/callstack/pagewriter sample every 5min via crontab"
     echo "  $entry"
     echo "  $rentry"
     echo "  (run 'awr disable' to stop both; other ports keep their own entries)"
+    ) 9>"$_ctlock"
+    local rc=$?
+    [ "$rc" -eq 0 ] || return "$rc"
     _awr_purge_expired
     return 0
 }
@@ -39646,6 +39659,13 @@ _awr_disable() {
     esac
     local port="${PGPORT:-5432}"
     local removed=0
+    # same cross-port crontab lock as enable (audit 2026-10-30): the
+    # check+strip+rewrite below must not interleave with another port's
+    # enable/disable or the later full-replace drops the other's entries
+    local _ctlock="${VB_TOOL_HOME:-$HOME/.vb_tool}/awr_crontab.lock"
+    mkdir -p "${VB_TOOL_HOME:-$HOME/.vb_tool}" 2>/dev/null
+    (
+    flock -w 30 9 || { echo "Error: cannot acquire $_ctlock (another vb_tool crontab edit in progress?)" >&2; exit 1; }
     if crontab -l 2>/dev/null | { grep -qE "# vb_tool_awr_p${port}\$" || grep -qE "# vb_tool_awr_repl_p${port}\$" || grep -Eq '# vb_tool_awr(_repl)? *$'; }; then
         crontab -l 2>/dev/null | grep -vE "# vb_tool_awr_repl_p${port}\$" | grep -vE "# vb_tool_awr_p${port}\$" \
             | grep -vE '# vb_tool_awr(_repl)? *$' | crontab -
@@ -39656,7 +39676,8 @@ _awr_disable() {
     else
         echo "awr disable: no periodic snapshot / sampler entries found for port $port (nothing to remove)"
     fi
-    return 0
+    ) 9>"$_ctlock"
+    return $?
 }
 
 _awr_list() {
