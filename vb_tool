@@ -32060,8 +32060,12 @@ def dbproc_minute_table(samples):
     '-' = the sampler did not log that column that minute (pre-2026-10-30
     logs carry no dbfd rows). User same day: LISTEN column dropped (it lives
     in the begin/end 'TCP Listen' rows above), Send-Q dropped (static
-    backlog capacity), Recv-Q relabeled 'LISTEN Recv-Q'."""
-    if samples is None or not (samples.get("lstn") or samples.get("lstnsock")):
+    backlog capacity), Recv-Q relabeled 'LISTEN Recv-Q'. Conntrack merged in
+    too (was its own section): Used / Limit / Fill % columns after the TCP
+    states, present only when the window has conntrack samples (module not
+    loaded -> no columns)."""
+    if samples is None or not (samples.get("lstn") or samples.get("lstnsock")
+                               or samples.get("conntrack") or samples.get("dbfd")):
         return _osmin_note({"files": (samples or {}).get("files", [])})
     _lq = {ts: p.split(",")[0] for ts, p in samples.get("lstn", [])}
     _ls = {}
@@ -32070,6 +32074,13 @@ def dbproc_minute_table(samples):
         if len(_f) == 2 and _f[1].strip().isdecimal():
             _ls.setdefault(_ts, {})[_f[0]] = int(_f[1])
     _fd = dict(samples.get("dbfd", []))
+    # conntrack per minute: (count, limit) -- validated again here even though
+    # the loader checked, same defensive style as lstnsock above
+    _ct = {}
+    for _ts, _p in (samples.get("conntrack") or []):
+        _f = _p.split(",")
+        if len(_f) == 2 and _f[0].strip().isdecimal() and _f[1].strip().isdecimal():
+            _ct[_ts] = (int(_f[0]), int(_f[1]))
     _std = ["ESTAB", "SYN-SENT", "SYN-RECV", "FIN-WAIT-1", "FIN-WAIT-2",
             "TIME-WAIT", "CLOSE-WAIT", "CLOSING", "LAST-ACK", "CLOSED"]
     _extra = sorted(s for d in _ls.values() for s in d
@@ -32086,19 +32097,36 @@ def dbproc_minute_table(samples):
         return "-"
     _h = ['<table class="t"><tr><th>Time</th><th class="n">LISTEN Recv-Q</th>']
     _h += ['<th class="n">%s</th>' % esc(_s) for _s in _states]
+    if _ct:
+        _h += ['<th class="n">Conntrack Used</th><th class="n">Conntrack Limit</th>'
+               '<th class="n">Conntrack Fill %</th>']
     _h += ['<th class="n">DBFile FDs</th><th class="n">TempFile FDs</th>'
            '<th class="n">XLog FDs</th></tr>']
-    for _ts in sorted(set(_lq) | set(_ls)):
+    for _ts in sorted(set(_lq) | set(_ls) | set(_fd) | set(_ct)):
         _q = _lq.get(_ts, "-")
         _row = _ls.get(_ts, {})
         _v = _fd.get(_ts)
-        _h.append('<tr><td>%s</td><td class="n">%s</td>%s'
+        _c = _ct.get(_ts)
+        if not _ct:
+            _cc = ""
+        elif _c:
+            _cc = ('<td class="n">%s</td><td class="n">%s</td><td class="n">%s</td>'
+                   % (fmt_int(_c[0]), fmt_int(_c[1]),
+                      ("%.2f%%" % (100.0 * _c[0] / _c[1])) if _c[1] else "-"))
+        else:
+            _cc = '<td class="n">-</td><td class="n">-</td><td class="n">-</td>'
+        _h.append('<tr><td>%s</td><td class="n">%s</td>%s%s'
                   '<td class="n">%s</td><td class="n">%s</td><td class="n">%s</td></tr>'
                   % (esc(_ts), esc(_q),
                      "".join('<td class="n">%s</td>' % _row.get(_s, "-")
                              for _s in _states),
+                     _cc,
                      _fdcell(_v, 0, 1), _fdcell(_v, 2, 3), _fdcell(_v, 4, 5)))
     _h.append('</table>')
+    if _ct:
+        _h.append('<div class="note">Conntrack Used = nf_conntrack entries in use, '
+                  'Limit = nf_conntrack_max. Near 100% fill the table is full: new '
+                  'flows go to early_drop, then packets get dropped.</div>')
     return "".join(_h)
 
 def os_minute_tcp_series(samples):
@@ -34902,31 +34930,6 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             parts.append('<tr><td>%s</td><td>%s</td><td%s>%+.0f</td><td%s>%.3f</td></tr>'
                          % (esc(r["proto"]), esc(r["name"]), _m, r["delta"], _m, r["per_sec"]))
         parts.append('</table>')
-
-    # conntrack (nf_conntrack), per minute: count vs limit gauge; near 100%
-    # fill = table full -> early_drop then packet drop. The heading is always
-    # emitted (so the TOC has it); with no rows (module not loaded) it stays
-    # empty rather than disappearing.
-    sub("Conntrack")
-    if os_smp is not None and os_smp.get("conntrack"):
-        _ch = ['<table class="t"><tr><th>Time</th><th class="n">count</th>'
-               '<th class="n">limit</th><th class="n">fill</th></tr>']
-        for _ts, _p in os_smp["conntrack"]:
-            _f = _p.split(",")
-            if len(_f) != 2:
-                continue
-            if not (_f[0].strip().isdecimal() and _f[1].strip().isdecimal()):
-                continue
-            _c, _l = int(_f[0]), int(_f[1])
-            _ch.append('<tr><td>%s</td><td class="n">%s</td><td class="n">%s</td>'
-                       '<td class="n">%s</td></tr>'
-                       % (esc(_ts), fmt_int(_c), fmt_int(_l),
-                          ("%.2f%%" % (100.0 * _c / _l)) if _l else "-"))
-        _ch.append('</table>')
-        parts.append("".join(_ch))
-        note("count = nf_conntrack entries in use, limit = nf_conntrack_max. "
-             "Near 100% fill the table is full: new flows go to early_drop, "
-             "then packets get dropped.")
 
     # ================= Kernel Messages (dmesg) =================
     # LAST SUB of OS Statistics (user 2026-09-17: not a standalone section).
