@@ -29277,8 +29277,10 @@ _awr_collect() {
             echo "${_bn}|${_mode}|${_act}|${_slv}" >> "$osd/bonding" 2>/dev/null
         done
     fi
-    # file-nr: "<allocated> <unused> <max>" handle gauge -> System Activity
-    # Begin/End column; absent on odd systems -> no file -> renderer hides it
+    # file-nr: "<allocated> <unused> <max>" system-wide handle gauge. Kept in
+    # the snapshot for on-site OS-level checks; NOT rendered -- System
+    # Activity's File Handles is process-scoped since 2026-10-30 (postmaster
+    # fd count vs its /proc/<pid>/limits Max open files).
     if [ -r /proc/sys/fs/file-nr ]; then cp /proc/sys/fs/file-nr "$osd/file_nr" 2>/dev/null; fi
     # db_proc: identity of THIS instance's postmaster. The awr context
     # already guarantees the right port ($PGPORT: -P export / cron pin; the
@@ -30399,18 +30401,6 @@ def fetch_meminfo():
     except Exception:
         pass
     return fields
-
-def parse_file_nr(txt):
-    """/proc/sys/fs/file-nr = "<allocated> <unused> <max>" (one line).
-    Returns (used, max) or None when absent/unparseable (old snaps)."""
-    for ln in (txt or "").splitlines():
-        f = ln.split()
-        if len(f) >= 3:
-            try:
-                return int(f[0]), int(f[2])
-            except ValueError:
-                return None
-    return None
 
 def parse_meminfo(txt):
     """Parse /proc/meminfo text into {field: kB_int}."""
@@ -34246,13 +34236,42 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         if _t.get("currestab_begin") is not None:
             _th.append('<th class="n">TCP CurrEstab (Begin/End)</th>')
             _td.append('<td class="n">%d / %d</td>' % (_t["currestab_begin"], _t["currestab_end"]))
-    _fnb = parse_file_nr(win["os"].get(("begin", "file_nr"), ""))
-    _fne = parse_file_nr(win["os"].get(("end", "file_nr"), ""))
-    if _fnb and _fne:
-        _th.append('<th class="n">File Handles (used, max) Begin/End</th>')
-        _td.append('<td class="n">(%s, %s) / (%s, %s)</td>'
-                   % (fmt_int(_fnb[0]), fmt_int(_fnb[1]),
-                      fmt_int(_fne[0]), fmt_int(_fne[1])))
+    # File Handles: PROCESS-scoped (user 2026-10-30): used = the postmaster's
+    # open fd count (sum of db_fd_types buckets, live+deleted -- deleted fds
+    # are still open); max = the postmaster's EFFECTIVE rlimit from
+    # /proc/<pid>/limits "Max open files" (soft/hard; soft is the ceiling
+    # alloc_fd enforces). The old pair was system-wide /proc/sys/fs/file-nr
+    # (OS allocated vs fs.file-max) -- an OS-level max that says nothing
+    # about this process's ceiling, and not what `ulimit -n` in a shell
+    # shows either (user: "我只要 prlimit 限制的作为 max").
+    def _nofile(phase):
+        for ln in win["os"].get((phase, "limits"), "").splitlines():
+            if ln.startswith("Max open files"):
+                f = ln.split()
+                if len(f) >= 4:
+                    return f[3], (f[4] if len(f) >= 5 else "-")
+        return None
+    def _fdcnt(phase):
+        tot, seen = 0, False
+        for ln in win["os"].get((phase, "db_fd_types"), "").splitlines():
+            f = ln.split("|")
+            if len(f) == 3:
+                try:
+                    tot += int(f[1]) + int(f[2]); seen = True
+                except ValueError:
+                    pass
+        return tot if seen else None
+    def _nnum(v):
+        return fmt_int(int(v)) if str(v).isdigit() else esc(str(v))
+    _nb, _ne = _nofile("begin"), _nofile("end")
+    if _nb and _ne:
+        _cb, _ce = _fdcnt("begin"), _fdcnt("end")
+        _th.append('<th class="n">File Handles (used, Max open files soft/hard) Begin/End</th>')
+        _td.append('<td class="n">(%s, %s/%s) / (%s, %s/%s)</td>'
+                   % (fmt_int(_cb) if _cb is not None else "-",
+                      _nnum(_nb[0]), _nnum(_nb[1]),
+                      fmt_int(_ce) if _ce is not None else "-",
+                      _nnum(_ne[0]), _nnum(_ne[1])))
     if _t.get("opens_per_sec") is not None:
         note("TCP Opens/s = active+passive connections opened (host-aggregate "
              "/proc/net/snmp window delta).\n"
