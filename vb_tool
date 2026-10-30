@@ -39855,12 +39855,20 @@ _awr_text_report() {
     pass=("${_qfixed[@]}")
     local root; root=$(_awr_snap_root "$begin_id" "$end_id") || return 1
     local bdir="$root/snap_$begin_id" edir="$root/snap_$end_id"
+    # OS-only sections (cpu/io/page) render per-minute /proc samples between
+    # the window edges -- those counters do NOT reset on a DB restart, so a
+    # crash gap between the snaps is still a valid window for them (user
+    # 2026-10-30: crash 取证时 OS 侧必须可出). DB-backed sections keep the
+    # restart guard (cumulative counters reset => deltas would lie).
     if [ "$begin_id" -ge "$end_id" ] 2>/dev/null; then
         echo "Error: begin snap ($begin_id) must be LOWER than end snap ($end_id) -- 1-snap windows (begin==end) have no delta to render" >&2
         # rc=1 (data error): caller already gave clear guidance; awr_help would be noise
         return 1
     fi
-    _awr_check_uptime "$bdir" "$edir" || return 1
+    case "$section" in
+        cpu|io|page) ;;    # OS-only: per-minute /proc samples, no DB counters
+        *) _awr_check_uptime "$bdir" "$edir" || return 1;;
+    esac
     _awr_render --begin "$bdir" --end "$edir" --text "$section" --repl-dir "$root" --sqltext-root "$(_awr_root)" "${pass[@]}"
 }
 
