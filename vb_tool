@@ -37466,7 +37466,7 @@ def text_tcp(win, repl_dir=None):
         lines.append("(no per-minute OS samples in this period -- the sampler runs")
         lines.append(" while 'awr enable' is on; manual snapshots alone carry no series)")
         return 0, "\n".join(lines)
-    lq = {ts: p.split(",")[0] for ts, p in samples.get("lstn", [])}
+    lq = {ts: p.split(",") for ts, p in samples.get("lstn", [])}
     ls = {}
     for ts, p in samples.get("lstnsock", []):
         f = p.split(",")
@@ -37480,8 +37480,8 @@ def text_tcp(win, repl_dir=None):
     if not (lq or ls or ct):
         lines.append("(no usable per-minute samples in this period)")
         return 0, "\n".join(lines)
-    headers = ["time", "LISTEN Recv-Q", "TCP Total", "ESTAB", "SYN-RECV",
-               "TIME-WAIT", "CLOSE-WAIT", "FW-1/2"]
+    headers = ["time", "LISTEN Recv-Q", "LISTEN Send-Q", "TCP Total", "ESTAB",
+               "SYN-RECV", "TIME-WAIT", "CLOSE-WAIT", "FW-1/2"]
     if ct:
         headers += ["Conntrack Used", "Conntrack Limit"]
     rows = []
@@ -37489,7 +37489,8 @@ def text_tcp(win, repl_dir=None):
         row = ls.get(ts, {})
         fw = ("%d/%d" % (row.get("FIN-WAIT-1", 0), row.get("FIN-WAIT-2", 0))
               if row else "-")
-        r = [ts, lq.get(ts, "-"),
+        q = lq.get(ts) or []
+        r = [ts, q[0] if len(q) > 0 else "-", q[1] if len(q) > 1 else "-",
              str(sum(row.values())) if row else "-",
              row.get("ESTAB", "-"), row.get("SYN-RECV", "-"),
              row.get("TIME-WAIT", "-"), row.get("CLOSE-WAIT", "-"), fw]
