@@ -29258,6 +29258,32 @@ _awr_collect() {
         if [ -r "/proc/$f" ]; then cp "/proc/$f" "$osd/$f" 2>/dev/null
         else echo "  [WARN] /proc/$f not readable" >&2; fi
     done
+    # irq affinity + irqbalance (2026-10-30): the per-CPU distribution matrix
+    # answers WHERE irq load lands; this answers the CONFIG side -- which cpus
+    # each irq is pinned to, what the kernel actually enforces, and whether
+    # irqbalance is actively re-managing masks (a hand-set mask silently moves
+    # under it). Lines: "<irq>|<smp_affinity_list>|<effective_affinity_list>",
+    # "default|<mask>|-" for new-irq default, "irqbalance|active|inactive".
+    {
+        _da=$(cat /proc/irq/default_smp_affinity_list 2>/dev/null) || _da=$(cat /proc/irq/default_smp_affinity 2>/dev/null)
+        echo "default|${_da:--}|-"
+        for _iq in /proc/irq/[0-9]*; do
+            [ -d "$_iq" ] || continue
+            _in=${_iq##*/}
+            # smp_affinity_list/effective_*_list are 4.10+; older kernels
+            # (e.g. CentOS 3.10 on test hosts) only carry the hex mask --
+            # fall back and show it raw (readable while ncpu is small)
+            _al=$(cat "$_iq/smp_affinity_list" 2>/dev/null)
+            [ -n "$_al" ] || _al=$(cat "$_iq/smp_affinity" 2>/dev/null)
+            _af=$(cat "$_iq/effective_affinity_list" 2>/dev/null)
+            echo "$_in|${_al:--}|${_af:--}"
+        done
+        if pgrep -x irqbalance >/dev/null 2>&1; then
+            echo "irqbalance|active|-"
+        else
+            echo "irqbalance|inactive|-"
+        fi
+    } > "$osd/irq_affinity" 2>/dev/null
     if [ -r /proc/net/dev ]; then cp /proc/net/dev "$osd/net_dev" 2>/dev/null
     else echo "  [WARN] /proc/net/dev not readable" >&2; fi
     if [ -r /proc/net/snmp ]; then cp /proc/net/snmp "$osd/net_snmp" 2>/dev/null; fi
@@ -30456,7 +30482,7 @@ def load_window(d):
         except Exception:
             w["meta"] = {}
     for phase in ("begin", "end"):
-        for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi", "softnet_stat", "buddyinfo", "bonding", "net_rtt", "df_fs", "file_nr", "db_proc", "limits", "db_fd_types", "db_tcp_states", "sysctl", "dmesg"):
+        for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi", "softnet_stat", "buddyinfo", "bonding", "net_rtt", "df_fs", "file_nr", "db_proc", "limits", "db_fd_types", "db_tcp_states", "sysctl", "dmesg", "irq_affinity"):
             p = os.path.join(d, "os", phase, f)
             w["os"][(phase, f)] = _read_os_text(p) if os.path.isfile(p) else ""
         for t in ("statement", "statement_mem", "wait_events", "instance_time", "database", "pagewriter",
@@ -30487,7 +30513,7 @@ def load_snap(d, tables=None):
             s["meta"] = json.load(open(mp))
         except Exception:
             s["meta"] = {}
-    for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi", "softnet_stat", "buddyinfo", "bonding", "net_rtt", "df_fs", "file_nr", "db_proc", "limits", "db_fd_types", "db_tcp_states", "sysctl", "dmesg"):
+    for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi", "softnet_stat", "buddyinfo", "bonding", "net_rtt", "df_fs", "file_nr", "db_proc", "limits", "db_fd_types", "db_tcp_states", "sysctl", "dmesg", "irq_affinity"):
         p = os.path.join(d, "os", f)
         s["os"][f] = _read_os_text(p) if os.path.isfile(p) else ""
     _DB_TABLES = ("statement", "statement_mem", "wait_events", "instance_time", "database", "pagewriter",
@@ -30590,7 +30616,7 @@ def build_window_from_snaps(begin_dir, end_dir, sqltext_root=None, load_sqltext=
     b = load_snap(begin_dir, db_tables)
     e = load_snap(end_dir, db_tables)
     win = {"meta": {}, "os": {}, "db": {}}
-    for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi", "softnet_stat", "buddyinfo", "bonding", "net_rtt", "df_fs", "file_nr", "db_proc", "limits", "db_fd_types", "db_tcp_states", "sysctl", "dmesg"):
+    for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi", "softnet_stat", "buddyinfo", "bonding", "net_rtt", "df_fs", "file_nr", "db_proc", "limits", "db_fd_types", "db_tcp_states", "sysctl", "dmesg", "irq_affinity"):
         win["os"][("begin", f)] = b["os"].get(f, "")
         win["os"][("end", f)] = e["os"].get(f, "")
     for t in ("statement", "statement_mem", "wait_events", "instance_time", "database", "pagewriter",
@@ -34408,16 +34434,44 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         _idelta = _idelta[:10]
         _ncpu = max(len(t[2]) for t in _idelta)
         _act, _rest = _active_cols([t[2] for t in _idelta], _ncpu)
-        h = [_matrix_hdr(_ncpu, '<th>IRQ</th><th>Device</th>', _act, _rest)]
+        # affinity config (2026-10-30): distribution shows WHERE load lands,
+        # the mask shows what was PINNED; irqbalance active = masks move under
+        # it (a hand-set mask is not the last word)
+        _iaff = {}
+        _ibq = ""
+        for _ln in win["os"].get(("end", "irq_affinity"), "").splitlines():
+            _f = _ln.split("|")
+            if len(_f) >= 3:
+                if _f[0] == "irqbalance":
+                    _ibq = _f[1]
+                else:
+                    _iaff[_f[0]] = (_f[1], _f[2])
+        def _affcell(k):
+            # request != effective (e.g. mask 0-15 but kernel delivers to cpu0
+            # only) is itself a finding -- show both when they diverge
+            _t = _iaff.get(k)
+            if _t is None or _t[0] == "-":
+                return '<td>-</td>'
+            _a, _e = _t
+            if _e and _e not in ("-", "", _a):
+                return '<td class="n">%s → %s</td>' % (esc(_a), esc(_e))
+            return '<td class="n">%s</td>' % esc(_a)
+        _bqnote = (' <span class="note">(irqbalance %s -- masks dynamically '
+                   'managed)</span>' % esc(_ibq)) if _ibq == "active" else ''
+        h = ['<table class="t"><tr><th>IRQ</th><th>Device</th>'
+             + ''.join('<th class="n">cpu%d</th>' % i for i in _act)
+             + ('<th class="n">other (%d cpus)</th>' % len(_rest) if _rest else '')
+             + '<th class="n">Total</th><th class="n">Max</th>'
+               '<th>Affinity%s</th></tr>' % _bqnote]
         for k, dv, vec in _idelta:
-            h.append('<tr><td>%s</td><td>%s</td>%s%s<td class="n">%s</td>%s</tr>'
+            h.append('<tr><td>%s</td><td>%s</td>%s%s<td class="n">%s</td>%s%s</tr>'
                      % (esc(k), esc(dv),
                         ''.join('<td class="n">%s</td>' % fmt_int(vec[i] if i < len(vec) else 0)
                                 for i in _act),
                         ('<td class="n">%s</td>' % fmt_int(sum(vec[i] for i in _rest
                                                                 if i < len(vec))))
                         if _rest else '',
-                        fmt_int(sum(vec)), _maxcell(vec)))
+                        fmt_int(sum(vec)), _maxcell(vec), _affcell(k)))
         h.append('</table>')
         parts.append(''.join(h))
     # DB Process: the postmaster listening on THIS awr's port (multi-instance
