@@ -32126,7 +32126,9 @@ def dbproc_minute_table(samples):
         _c = _ct.get(_ts)
         # no lstnsock row for this minute -> states/total/FW are '-' (not 0)
         _tot = sum(_row.values()) if _row else None
-        _fw = (_row.get("FIN-WAIT-1", 0) + _row.get("FIN-WAIT-2", 0)) if _row else None
+        # user 2026-10-30: FW shown as "1/2" (FW1/FW2), not merged into one sum
+        _fw = ("%d/%d" % (_row.get("FIN-WAIT-1", 0), _row.get("FIN-WAIT-2", 0))
+               if _row else None)
         if not _ct:
             _cc = ""
         elif _c:
@@ -32141,7 +32143,7 @@ def dbproc_minute_table(samples):
                      "-" if _tot is None else "%d" % _tot,
                      "".join('<td class="n">%s</td>' % _row.get(_s, "-")
                              for _s in _std),
-                     "-" if _fw is None else "%d" % _fw,
+                     "-" if _fw is None else _fw,
                      "".join('<td class="n">%s</td>' % _row.get(_s, "-")
                              for _s in _extra),
                      _cc,
