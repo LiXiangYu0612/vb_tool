@@ -29971,6 +29971,110 @@ _awr_collect() {
             | sort -t'|' -k1,1r -k2,2rn > "$osd/db_numa_maps" 2>/dev/null
         [ -s "$osd/db_numa_maps" ] || rm -f "$osd/db_numa_maps"
     fi
+    # db_cgroup (2026-10-31): the postmaster's cgroup resource envelope --
+    # CPU quota / actual usage / throttle counters, memory limit+usage+failcnt
+    # (+swap accounting), blkio throttle+service bytes, pids limit, cpuset
+    # (cpus AND mems -- the NUMA-node pinning that explains DB Memory
+    # Placement), hugetlb. All files are world-readable (0644 root-owned) --
+    # verified non-root on 204 (openEuler cgroup v1) and WSL (v2).
+    # Format: "raw|<line of /proc/<pid>/cgroup>" xN, "mode|v1|v2",
+    # "<ctrl>|<hierarchy path>" then "<key>|<value>" lines per controller.
+    # v1 mountpoint map comes from /proc/self/mountinfo (super-options are a
+    # single comma string -- comma-split them; hierarchy paths may contain
+    # ':' themselves (Gaussdb:vastbase), so paths are extracted by stripping
+    # the first TWO colon fields, never by -F: field count.
+    if [ -n "$_dpid" ] && [ -r "/proc/$_dpid/cgroup" ]; then
+        {
+            while IFS= read -r _cl; do echo "raw|$_cl"; done < "/proc/$_dpid/cgroup"
+            _cg_rd() { [ -r "$1" ] && timeout -k 2 10 cat "$1" 2>/dev/null; }
+            _cg_rel() {
+                awk -F: -v c="$1" 'index(","$2",", ","c","){sub(/^[^:]*:[^:]*:/,""); print; exit}' "/proc/$_dpid/cgroup"
+            }
+            if [ -r /sys/fs/cgroup/cgroup.controllers ]; then
+                echo "mode|v2"
+                _REL=$(awk -F: '$1=="0"{sub(/^[^:]*:[^:]*:/,""); print; exit}' "/proc/$_dpid/cgroup")
+                _D="/sys/fs/cgroup$_REL"
+                echo "cpu|$_REL"
+                _v=$(_cg_rd "$_D/cpu.max"); [ -n "$_v" ] && echo "cpu.max|$_v"
+                _v=$(_cg_rd "$_D/cpu.stat" | awk '{printf "%s=%s;",$1,$2}'); [ -n "$_v" ] && echo "cpu.stat|$_v"
+                echo "memory|$_REL"
+                _v=$(_cg_rd "$_D/memory.max"); [ -n "$_v" ] && echo "memory.limit|$_v"
+                _v=$(_cg_rd "$_D/memory.current"); [ -n "$_v" ] && echo "memory.usage|$_v"
+                _v=$(_cg_rd "$_D/memory.events" | awk '{printf "%s=%s;",$1,$2}'); [ -n "$_v" ] && echo "memory.events|$_v"
+                echo "io|$_REL"
+                _v=$(_cg_rd "$_D/io.max"); [ -n "$_v" ] && echo "io.max|$_v"
+                _v=$(_cg_rd "$_D/io.stat"); [ -n "$_v" ] && echo "io.stat|$_v"
+                echo "pids|$_REL"
+                _v=$(_cg_rd "$_D/pids.max"); [ -n "$_v" ] && echo "pids.max|$_v"
+                _v=$(_cg_rd "$_D/pids.current"); [ -n "$_v" ] && echo "pids.current|$_v"
+                echo "cpuset|$_REL"
+                _v=$(_cg_rd "$_D/cpuset.cpus"); [ -n "$_v" ] && echo "cpuset.cpus|$_v"
+                _v=$(_cg_rd "$_D/cpuset.cpus.effective"); [ -n "$_v" ] && echo "cpuset.effective|$_v"
+                _v=$(_cg_rd "$_D/cpuset.mems"); [ -n "$_v" ] && echo "cpuset.mems|$_v"
+            else
+                echo "mode|v1"
+                declare -A _CG_MP
+                while read -r _ml; do
+                    rt="${_ml#* - }"
+                    [ "${rt%% *}" = "cgroup" ] || continue
+                    lt="${_ml%% - *}"
+                    _mp=$(printf '%s\n' "$lt" | awk '{print $5}')
+                    _so=$(printf '%s\n' "$rt" | awk '{o="";for(i=3;i<=NF;i++)o=o" "$i;print o}')
+                    for _o in ${_so//,/ }; do
+                        case "$_o" in
+                            cpu|cpuacct|memory|blkio|pids|cpuset|hugetlb) _CG_MP[$_o]="$_mp" ;;
+                        esac
+                    done
+                done < /proc/self/mountinfo
+                for _c in cpu cpuacct memory blkio pids cpuset hugetlb; do
+                    _mp=${_CG_MP[$_c]:-}
+                    [ -n "$_mp" ] || continue
+                    _rel=$(_cg_rel "$_c")
+                    [ -n "$_rel" ] || continue
+                    _cd="$_mp$_rel"
+                    case "$_c" in
+                        cpu)
+                            echo "cpu|$_rel"
+                            _v=$(_cg_rd "$_cd/cpu.cfs_quota_us"); [ -n "$_v" ] && echo "cpu.quota|$_v"
+                            _v=$(_cg_rd "$_cd/cpu.cfs_period_us"); [ -n "$_v" ] && echo "cpu.period|$_v"
+                            _v=$(_cg_rd "$_cd/cpu.stat" | awk '{printf "%s=%s;",$1,$2}'); [ -n "$_v" ] && echo "cpu.stat|$_v" ;;
+                        cpuacct)
+                            echo "cpuacct|$_rel"
+                            _v=$(_cg_rd "$_cd/cpuacct.usage"); [ -n "$_v" ] && echo "cpuacct.usage|$_v" ;;
+                        memory)
+                            echo "memory|$_rel"
+                            _v=$(_cg_rd "$_cd/memory.limit_in_bytes"); [ -n "$_v" ] && echo "memory.limit|$_v"
+                            _v=$(_cg_rd "$_cd/memory.usage_in_bytes"); [ -n "$_v" ] && echo "memory.usage|$_v"
+                            _v=$(_cg_rd "$_cd/memory.failcnt"); [ -n "$_v" ] && echo "memory.failcnt|$_v"
+                            _v=$(_cg_rd "$_cd/memory.memsw.limit_in_bytes"); [ -n "$_v" ] && echo "memsw.limit|$_v" ;;
+                        blkio)
+                            echo "blkio|$_rel"
+                            _v=$(_cg_rd "$_cd/blkio.throttle.read_bps_device"); [ -n "$_v" ] && echo "io.throttle.r|$_v"
+                            _v=$(_cg_rd "$_cd/blkio.throttle.write_bps_device"); [ -n "$_v" ] && echo "io.throttle.w|$_v"
+                            _v=$(_cg_rd "$_cd/blkio.io_service_bytes" | tr '\n' ';'); [ -n "$_v" ] && echo "io.service|$_v" ;;
+                        pids)
+                            echo "pids|$_rel"
+                            _v=$(_cg_rd "$_cd/pids.max"); [ -n "$_v" ] && echo "pids.max|$_v"
+                            _v=$(_cg_rd "$_cd/pids.current"); [ -n "$_v" ] && echo "pids.current|$_v" ;;
+                        cpuset)
+                            echo "cpuset|$_rel"
+                            _v=$(_cg_rd "$_cd/cpuset.cpus"); [ -n "$_v" ] && echo "cpuset.cpus|$_v"
+                            _v=$(_cg_rd "$_cd/cpuset.effective_cpus"); [ -n "$_v" ] && echo "cpuset.effective|$_v"
+                            _v=$(_cg_rd "$_cd/cpuset.mems"); [ -n "$_v" ] && echo "cpuset.mems|$_v" ;;
+                        hugetlb)
+                            echo "hugetlb|$_rel"
+                            for _hf in "$_cd"/hugetlb.*.limit_in_bytes; do
+                                [ -r "$_hf" ] || continue
+                                _sz=${_hf##*/hugetlb.}; _sz=${_sz%.limit_in_bytes}
+                                printf 'hugetlb.%s.limit|%s\n' "$_sz" "$(_cg_rd "$_hf")"
+                                printf 'hugetlb.%s.usage|%s\n' "$_sz" "$(_cg_rd "${_hf/limit_in_bytes/usage_in_bytes}")"
+                            done ;;
+                    esac
+                done
+            fi
+        } > "$osd/db_cgroup" 2>/dev/null
+        [ -s "$osd/db_cgroup" ] || rm -f "$osd/db_cgroup"
+    fi
     # open fd classification: SAME postmaster, SAME instant as status/limits
     # above. VB is single-process multi-thread -- every backend's fd lives on
     # the postmaster, so ONE /proc/<pid>/fd walk covers the whole instance.
@@ -31120,7 +31224,7 @@ def load_window(d):
         except Exception:
             w["meta"] = {}
     for phase in ("begin", "end"):
-        for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi", "softnet_stat", "buddyinfo", "bonding", "net_rtt", "df_fs", "file_nr", "db_proc", "limits", "db_fd_types", "db_tcp_states", "sysctl", "dmesg", "irq_affinity", "irq_node", "db_numa_maps"):
+        for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi", "softnet_stat", "buddyinfo", "bonding", "net_rtt", "df_fs", "file_nr", "db_proc", "limits", "db_fd_types", "db_tcp_states", "sysctl", "dmesg", "irq_affinity", "irq_node", "db_numa_maps", "db_cgroup"):
             p = os.path.join(d, "os", phase, f)
             w["os"][(phase, f)] = _read_os_text(p) if os.path.isfile(p) else ""
         for t in ("statement", "statement_mem", "wait_events", "instance_time", "database", "pagewriter",
@@ -31151,7 +31255,7 @@ def load_snap(d, tables=None):
             s["meta"] = json.load(open(mp))
         except Exception:
             s["meta"] = {}
-    for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi", "softnet_stat", "buddyinfo", "bonding", "net_rtt", "df_fs", "file_nr", "db_proc", "limits", "db_fd_types", "db_tcp_states", "sysctl", "dmesg", "irq_affinity", "irq_node", "db_numa_maps"):
+    for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi", "softnet_stat", "buddyinfo", "bonding", "net_rtt", "df_fs", "file_nr", "db_proc", "limits", "db_fd_types", "db_tcp_states", "sysctl", "dmesg", "irq_affinity", "irq_node", "db_numa_maps", "db_cgroup"):
         p = os.path.join(d, "os", f)
         s["os"][f] = _read_os_text(p) if os.path.isfile(p) else ""
     _DB_TABLES = ("statement", "statement_mem", "wait_events", "instance_time", "database", "pagewriter",
@@ -31254,7 +31358,7 @@ def build_window_from_snaps(begin_dir, end_dir, sqltext_root=None, load_sqltext=
     b = load_snap(begin_dir, db_tables)
     e = load_snap(end_dir, db_tables)
     win = {"meta": {}, "os": {}, "db": {}}
-    for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi", "softnet_stat", "buddyinfo", "bonding", "net_rtt", "df_fs", "file_nr", "db_proc", "limits", "db_fd_types", "db_tcp_states", "sysctl", "dmesg", "irq_affinity", "irq_node", "db_numa_maps"):
+    for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi", "softnet_stat", "buddyinfo", "bonding", "net_rtt", "df_fs", "file_nr", "db_proc", "limits", "db_fd_types", "db_tcp_states", "sysctl", "dmesg", "irq_affinity", "irq_node", "db_numa_maps", "db_cgroup"):
         win["os"][("begin", f)] = b["os"].get(f, "")
         win["os"][("end", f)] = e["os"].get(f, "")
     for t in ("statement", "statement_mem", "wait_events", "instance_time", "database", "pagewriter",
@@ -33322,6 +33426,33 @@ def numa_html_table(topology, stats_delta_factory, placement=None):
     parts.append('</table>')
     return "".join(parts)
 
+def parse_db_cgroup(txt):
+    """Parse the db_cgroup snapshot (format in _awr_collect): "raw|..." lines,
+    "mode|v1|v2", "<ctrl>|<path>" section headers and "<key>|<value>" pairs.
+    Returns {"mode","raw","paths":{ctrl:path},"kv":{key:value}}; {} when the
+    file is absent (pre-2026-10-31 snaps degrade silently)."""
+    out = {"mode": "", "raw": [], "paths": {}, "kv": {}}
+    seen = False
+    for line in (txt or "").splitlines():
+        f = line.split("|", 1)
+        if len(f) < 2:
+            continue
+        k, v = f[0], f[1]
+        if k == "raw":
+            out["raw"].append(v)
+            seen = True
+        elif k == "mode":
+            out["mode"] = v
+            seen = True
+        elif k in ("cpu", "cpuacct", "memory", "blkio", "pids", "cpuset",
+                   "hugetlb", "io"):
+            out["paths"][k] = v
+            seen = True
+        else:
+            out["kv"][k] = v
+            seen = True
+    return out if seen else {}
+
 def _vmstat_keys(txt, keys):
     """Pull raw /proc/vmstat counters by name -- the kernel auto-NUMA
     balancing family (numa_hint_faults etc.) is not in proc_vmstat's
@@ -35371,6 +35502,73 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             parts.append('<tr><td>Cpuset</td><td class="n">%s</td><td class="n">%s</td>'
                          '<td class="n">-</td></tr>'
                          % (esc(_csb_ or "-"), esc(_cse_ or "-")))
+        # cgroup envelope (2026-10-31): CPU quota / memory limit / cpuset
+        # mems of the SAME postmaster -- "unlimited" is written explicitly
+        # (a confirmed absence, not a blank); group name from the hierarchy
+        # path (e.g. Gaussdb:vastbase)
+        _cgb = parse_db_cgroup(win["os"].get(("begin", "db_cgroup"), ""))
+        _cge = parse_db_cgroup(win["os"].get(("end", "db_cgroup"), ""))
+        if _cge:
+            _grp = _cge["paths"].get("cpu") or ""
+            _q = _cge["kv"].get("cpu.quota")
+            _p = to_num(_cge["kv"].get("cpu.period", 100000)) or 100000
+            _qtxt = "unlimited"
+            if _q is not None and to_num(_q) and to_num(_q) > 0:
+                _qtxt = "%.2f cores" % (to_num(_q) / (_p or 1))
+            elif _cge["kv"].get("cpu.max") and _cge["kv"]["cpu.max"].split()[0] not in ("max", "unlimited"):
+                _qtxt = "%.2f cores" % (to_num(_cge["kv"]["cpu.max"].split()[0])
+                                        / (to_num(_cge["kv"]["cpu.max"].split()[1]) or 100000))
+            parts.append('<tr><td>CPU Cgroup Quota%s</td><td class="n">%s</td>'
+                         '<td class="n">%s</td><td class="n">-</td></tr>'
+                         % ((' (' + esc(_grp) + ')') if _grp else '', esc(_qtxt), esc(_qtxt)))
+            _ml = _cge["kv"].get("memory.limit")
+            _mtxt = "unlimited"
+            if _ml is not None and 0 < to_num(_ml) < 9e18:
+                _mtxt = fmt_bytes(to_num(_ml))
+            _mu = _cge["kv"].get("memory.usage")
+            parts.append('<tr><td>Memory Cgroup%s</td><td class="n">%s%s</td>'
+                         '<td class="n">%s%s</td><td class="n">-</td></tr>'
+                         % ((' (' + esc(_cge["paths"].get("memory") or "") + ')') if _cge["paths"].get("memory") else '',
+                            esc(_mtxt),
+                            (' / ' + fmt_bytes(to_num(_mu))) if _mu is not None and to_num(_mu) else '',
+                            esc(_mtxt),
+                            (' / ' + fmt_bytes(to_num(_mu))) if _mu is not None and to_num(_mu) else ''))
+            _cm = _cge["kv"].get("cpuset.mems")
+            if _cm is not None:
+                parts.append('<tr><td>Cpuset Mems (NUMA nodes)</td><td class="n">%s</td>'
+                             '<td class="n">%s</td><td class="n">-</td></tr>'
+                             % (esc(_cm), esc(_cm)))
+            # full inventory folded: config rows static, cumulative counters
+            # (cpuacct.usage / throttle / failcnt / pids) as window deltas
+            _CFG = ("cpu.quota", "cpu.period", "cpu.max", "memory.limit", "memsw.limit",
+                    "pids.max", "cpuset.cpus", "cpuset.effective", "cpuset.mems")
+            _CUM = ("cpuacct.usage", "memory.usage", "pids.current", "memory.failcnt")
+            h = ['<h3 class="sub">Cgroup</h3>',
+                 '<table class="t"><tr><th>Metric</th><th class="n">Begin</th>'
+                 '<th class="n">End</th><th class="n">Delta</th></tr>']
+            for k in _CFG:
+                if k in _cge.get("kv", {}) or k in _cgb.get("kv", {}):
+                    v = _cge.get("kv", {}).get(k) or _cgb.get("kv", {}).get(k) or "-"
+                    h.append('<tr><td>%s</td><td class="n">%s</td><td class="n">%s</td>'
+                             '<td class="n">-</td></tr>' % (esc(k), esc(trunc(str(v), 40)), esc(trunc(str(v), 40))))
+            for k in _CUM:
+                vb_, ve_ = _cgb.get("kv", {}).get(k), _cge.get("kv", {}).get(k)
+                if vb_ is None and ve_ is None:
+                    continue
+                fb = fmt_int(to_num(vb_)) if vb_ is not None else "-"
+                fe = fmt_int(to_num(ve_)) if ve_ is not None else "-"
+                fd = ("%+s" % fmt_int(max(0, to_num(ve_) - to_num(vb_)))) \
+                    if (vb_ is not None and ve_ is not None) else "-"
+                h.append('<tr><td>%s</td><td class="n">%s</td><td class="n">%s</td>'
+                         '<td class="n">%s</td></tr>' % (esc(k), fb, fe, fd))
+            for k in ("cpu.stat", "io.service", "io.throttle.r", "io.throttle.w",
+                      "hugetlb.2MB.limit", "hugetlb.2MB.usage"):
+                ve_ = _cge["kv"].get(k)
+                if ve_:
+                    h.append('<tr><td>%s</td><td colspan="3" class="n">%s</td></tr>'
+                             % (esc(k), esc(trunc(str(ve_), 90))))
+            h.append('</table>')
+            parts.append(_fold('Cgroup Detail', ''.join(h)))
         _nvb, _nve = _dbnvc("begin"), _dbnvc("end")
         if _nvb is not None or _nve is not None:
             _bv = fmt_int(_nvb[0]) if _nvb is not None else "-"
