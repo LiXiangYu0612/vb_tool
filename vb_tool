@@ -26083,7 +26083,7 @@ _vtop_cpustat() {
 _vtop_sockstat() {
     local out=""
     if command -v ss >/dev/null 2>&1; then
-        out=$(timeout 3 ss -tanH "sport = :${PGPORT:-5432}" 2>/dev/null | awk '
+        out=$(timeout 3 timeout -k 2 10 ss -tanH "sport = :${PGPORT:-5432}" 2>/dev/null | awk '
             { s = tolower($1); if (s == "estab") s = "established"; cnt[s]++ }
             END { n = split("listen|established|syn-recv|syn-sent|fin-wait-1|fin-wait-2|time-wait|close-wait|last-ack|closing|other", ord, "|")
                   for (i = 1; i <= n; i++) printf "%s%d", (i > 1 ? " " : ""), cnt[ord[i]] + 0
@@ -29878,23 +29878,23 @@ _awr_collect() {
             echo "irqbalance|inactive|-"
         fi
     } > "$osd/irq_affinity" 2>/dev/null
-    if [ -r /proc/net/dev ]; then cp /proc/net/dev "$osd/net_dev" 2>/dev/null
+    if [ -r /proc/net/dev ]; then timeout -k 2 10 cp /proc/net/dev "$osd/net_dev" 2>/dev/null
     else echo "  [WARN] /proc/net/dev not readable" >&2; fi
-    if [ -r /proc/net/snmp ]; then cp /proc/net/snmp "$osd/net_snmp" 2>/dev/null; fi
-    if [ -r /proc/net/netstat ]; then cp /proc/net/netstat "$osd/net_netstat" 2>/dev/null; fi
-    if [ -r /proc/net/softnet_stat ]; then cp /proc/net/softnet_stat "$osd/softnet_stat" 2>/dev/null; fi
+    if [ -r /proc/net/snmp ]; then timeout -k 2 10 cp /proc/net/snmp "$osd/net_snmp" 2>/dev/null; fi
+    if [ -r /proc/net/netstat ]; then timeout -k 2 10 cp /proc/net/netstat "$osd/net_netstat" 2>/dev/null; fi
+    if [ -r /proc/net/softnet_stat ]; then timeout -k 2 10 cp /proc/net/softnet_stat "$osd/softnet_stat" 2>/dev/null; fi
     # buddyinfo: free pages per zone per order -> snapshot-level fragmentation
     # (2MB+ contiguous availability), rendered as Begin/End in the report
-    if [ -r /proc/buddyinfo ]; then cp /proc/buddyinfo "$osd/buddyinfo" 2>/dev/null; fi
+    if [ -r /proc/buddyinfo ]; then timeout -k 2 10 cp /proc/buddyinfo "$osd/buddyinfo" 2>/dev/null; fi
     # bond 三态 (mode / active slave / slave list); /proc/net/bonding absent = no bond
     if [ -d /proc/net/bonding ]; then
         : > "$osd/bonding" 2>/dev/null
         for _b in /proc/net/bonding/*; do
             [ -f "$_b" ] || continue
             _bn=$(basename "$_b")
-            _mode=$(awk -F: '/^Bonding Mode:/{gsub(/^ +/,"",$2); print $2}' "$_b" 2>/dev/null)
-            _act=$(awk -F: '/^Currently Active Slave:/{gsub(/^ +/,"",$2); print $2}' "$_b" 2>/dev/null)
-            _slv=$(awk -F: '/^Slave Interface:/{gsub(/^ +/,"",$2); print $2}' "$_b" 2>/dev/null | tr '\n' ',' | sed 's/,$//')
+            _mode=$(timeout -k 2 10 awk -F: '/^Bonding Mode:/{gsub(/^ +/,"",$2); print $2}' "$_b" 2>/dev/null)
+            _act=$(timeout -k 2 10 awk -F: '/^Currently Active Slave:/{gsub(/^ +/,"",$2); print $2}' "$_b" 2>/dev/null)
+            _slv=$(timeout -k 2 10 awk -F: '/^Slave Interface:/{gsub(/^ +/,"",$2); print $2}' "$_b" 2>/dev/null | tr '\n' ',' | sed 's/,$//')
             echo "${_bn}|${_mode}|${_act}|${_slv}" >> "$osd/bonding" 2>/dev/null
         done
     fi
@@ -29902,14 +29902,14 @@ _awr_collect() {
     # the snapshot for on-site OS-level checks; NOT rendered -- System
     # Activity's File Handles is process-scoped since 2026-10-30 (postmaster
     # fd count vs its /proc/<pid>/limits Max open files).
-    if [ -r /proc/sys/fs/file-nr ]; then cp /proc/sys/fs/file-nr "$osd/file_nr" 2>/dev/null; fi
+    if [ -r /proc/sys/fs/file-nr ]; then timeout -k 2 10 cp /proc/sys/fs/file-nr "$osd/file_nr" 2>/dev/null; fi
     # irq -> node (2026-10-31): /proc/irq/N/node IS world-readable (unlike
     # the affinity masks) -- which node each IRQ is steered to; the renderer
     # adds a Node column to the IRQ legend. -1 = no node binding.
     : > "$osd/irq_node" 2>/dev/null
     for _iq in /proc/irq/[0-9]*; do
         [ -d "$_iq" ] || continue
-        _iv=$(cat "$_iq/node" 2>/dev/null) || continue
+        _iv=$(timeout -k 2 10 cat "$_iq/node" 2>/dev/null) || continue
         [ -n "$_iv" ] && echo "${_iq##*/}|$_iv" >> "$osd/irq_node" 2>/dev/null
     done
     # db_proc: identity of THIS instance's postmaster. The awr context
@@ -29919,7 +29919,7 @@ _awr_collect() {
     # same-user /proc visibility). pid|VmSize(kB)|VmRSS(kB)|Threads plus the
     # kernel's EFFECTIVE affinity (Cpus_allowed_list: cpuset cgroup + any
     # taskset pinning, already merged) from the same status file.
-    _dpid=$(ss -lntp 2>/dev/null | grep -oP ":${PGPORT:-5432}\b.*pid=\K[0-9]+" | head -1)
+    _dpid=$(timeout -k 2 10 ss -lntp 2>/dev/null | grep -oP ":${PGPORT:-5432}\b.*pid=\K[0-9]+" | head -1)
     if [ -n "$_dpid" ] && [ -r "/proc/$_dpid/status" ]; then
         awk -v p="$_dpid" '/^VmSize:/{v=$2} /^VmRSS:/{r=$2} /^Threads:/{t=$2} \
                 /^Cpus_allowed_list:/{c=$2} \
@@ -30221,7 +30221,7 @@ _awr_collect() {
     # match dport instead and stay out. No -p: the port filter alone runs
     # fine as the DB user, root is not needed. Fixed state order, zeros
     # included, same always-display rule as the fd classes.
-    ss -tanH "sport = :${PGPORT:-5432}" 2>/dev/null | awk '
+    timeout -k 2 10 ss -tanH "sport = :${PGPORT:-5432}" 2>/dev/null | awk '
         { s = tolower($1)
           if (s == "estab") s = "established"
           cnt[s]++ }
@@ -30234,7 +30234,7 @@ _awr_collect() {
     # IS the permission filter. Split at the FIRST " = " so values may
     # themselves contain " = ". "key|value" lines; renderer hides old snaps.
     if command -v sysctl >/dev/null 2>&1; then
-        LC_ALL=C sysctl -a 2>/dev/null | sed -E 's/^([^=]+) = (.*)$/\1|\2/' > "$osd/sysctl"
+        LC_ALL=C timeout -k 2 10 sysctl -a 2>/dev/null | sed -E 's/^([^=]+) = (.*)$/\1|\2/' > "$osd/sysctl"
         [ -s "$osd/sysctl" ] || rm -f "$osd/sysctl"
     fi
     # THP is a sysfs knob, not a sysctl: only whether it is on/off matters here
@@ -30303,7 +30303,7 @@ _awr_collect() {
     # -> no file -> the renderer hides the RTT sections (old snaps unaffected).
     sscmd=$(command -v ss 2>/dev/null || echo /usr/sbin/ss)
     if [ -x "$sscmd" ]; then
-        "$sscmd" -tin state established 2>/dev/null | head -c 524288 > "$osd/net_rtt"
+        timeout -k 2 10 "$sscmd" -tin state established 2>/dev/null | head -c 524288 > "$osd/net_rtt"
         [ -s "$osd/net_rtt" ] || rm -f "$osd/net_rtt"
     fi
     # df_fs: filesystem inventory at snap time -- space (df -TPk, 1K blocks,
@@ -39949,7 +39949,7 @@ _awr_repl_sample() {
     # is written whenever the postmaster and its fd dir are readable --
     # 0 included; no pid / unreadable fd dir -> NO rows (missing row = not
     # sampled, never "none").
-    _dpid=$(ss -lntp 2>/dev/null | grep -oP ":${PGPORT:-5432}\b.*pid=\K[0-9]+" | head -1)
+    _dpid=$(timeout -k 2 10 ss -lntp 2>/dev/null | grep -oP ":${PGPORT:-5432}\b.*pid=\K[0-9]+" | head -1)
     if [ -n "$_dpid" ] && [ -d "/proc/$_dpid/fd" ]; then
         _pdd=$(readlink "/proc/$_dpid/cwd" 2>/dev/null)
         if [ -n "$_pdd" ]; then
