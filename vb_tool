@@ -41011,7 +41011,7 @@ _awr_enable() {
             -h|--help) awr_help; return 0;;
             -d) [ $# -lt 2 ] || [ -z "$2" ] && { echo "Error: -d expects retention days (0 = never purge, default 8)" >&2; return 2; }
                 dflag="$2"; shift 2;;
-            -i) [ $# -lt 2 ] || [ -z "$2" ] && { echo "Error: -i expects the snapshot interval in minutes (1-1440, default 60)" >&2; return 2; }
+            -i) [ $# -lt 2 ] || [ -z "$2" ] && { echo "Error: -i expects the snapshot interval in minutes (10-1440, default 60)" >&2; return 2; }
                 iflag="$2"; shift 2;;
             -D) [ $# -lt 2 ] || [ -z "$2" ] && { echo "Error: -D expects the data root directory (absolute path)" >&2; return 2; }
                 Dflag="$2"; shift 2;;
@@ -41021,7 +41021,7 @@ _awr_enable() {
     # double-enable fails FIRST, before any -D/-d/-i side effect (user
     # 2026-10-31: repeated enable must error regardless of flags; changes on
     # an already-enabled instance belong to 'awr config', not 'enable')
-    if crontab -l 2>/dev/null | grep -qE "# vb_tool_awr(_repl)?_p?${PGPORT:-5432} *\$" 2>/dev/null \
+    if crontab -l 2>/dev/null | grep -qE "# vb_tool_awr(_repl)?_p${PGPORT:-5432} *\$" 2>/dev/null \
        || crontab -l 2>/dev/null | grep -qE '# vb_tool_awr(_repl)? *$' 2>/dev/null; then
         echo "Error: awr periodic capture is already ENABLED for port ${PGPORT:-5432} -- run 'awr disable' first; to change settings use 'awr config interval|retention|datadir'" >&2
         crontab -l 2>/dev/null | grep -F '# vb_tool_awr' >&2
@@ -41032,8 +41032,8 @@ _awr_enable() {
     case "$dflag" in ''|*[!0-9]*) [ -n "$dflag" ] && { echo "Error: -d expects a non-negative integer number of days" >&2; return 2; };; esac
     [ -n "$dflag" ] && [ "$dflag" -gt 3650 ] && { echo "Error: retention too large (max 3650 days); use 0 for keep-forever" >&2; return 2; }
     if [ -n "$iflag" ]; then
-        case "$iflag" in ''|*[!0-9]*) echo "Error: -i expects a positive integer number of minutes (1-1440)" >&2; return 2;; esac
-        { [ "$iflag" -lt 1 ] || [ "$iflag" -gt 1440 ]; } && { echo "Error: interval must be 1-1440 minutes" >&2; return 2; }
+        case "$iflag" in ''|*[!0-9]*) echo "Error: -i expects a positive integer number of minutes (10-1440)" >&2; return 2;; esac
+        { [ "$iflag" -lt 10 ] || [ "$iflag" -gt 1440 ]; } && { echo "Error: interval must be 10-1440 minutes" >&2; return 2; }
     fi
     # application order (user 2026-10-31): datadir FIRST -- a failed
     # migration must abort before anything else changes; then retention and
@@ -41517,7 +41517,7 @@ _awr_config() {
         if [ -n "$dd" ]; then echo "  datadir   : $dd (root: $(_awr_root))"
         else echo "  datadir   : default (\$HOME)"; fi
         echo "usage: vb_tool awr config retention <days>   (0 = never purge, max 3650)"
-        echo "       vb_tool awr config interval <min>     (1-1440)"
+        echo "       vb_tool awr config interval <min>     (10-1440)"
         echo "       vb_tool awr config datadir <dir>|default  (moves existing data; fails hard on error)"
         return 0
     fi
@@ -41545,9 +41545,9 @@ _awr_config() {
             return 0
             ;;
         interval)
-            case "$val" in ''|*[!0-9]*) echo "Error: interval expects a positive integer number of minutes (1-1440)" >&2; return 2;; esac
-            if [ "$val" -lt 1 ] || [ "$val" -gt 1440 ]; then
-                echo "Error: interval must be 1-1440 minutes (the snapshot entry wakes every minute and gates on this value, so any cadence is exact)" >&2
+            case "$val" in ''|*[!0-9]*) echo "Error: interval expects a positive integer number of minutes (10-1440)" >&2; return 2;; esac
+            if [ "$val" -lt 10 ] || [ "$val" -gt 1440 ]; then
+                echo "Error: interval must be 10-1440 minutes (the snapshot entry wakes every minute and gates on this value, so any cadence is exact)" >&2
                 return 2
             fi
             local oldi; oldi=$(_awr_interval_read)
@@ -41560,8 +41560,11 @@ _awr_config() {
             local cport="${PGPORT:-5432}"
             # ★2026-10-11: 门控条目从 interval 文件现读节奏, 本端口正常条目不再
             #   重写; 重写只为迁移旧形(*/N 硬编码)或 legacy 无端口条目(D8)。
-            _awr_cron_ensure_gated "$cport" && \
-                echo "awr config: crontab entry ensured in gated form -- cadence follows the interval file = ${val}min exactly (legacy/old-form entries migrated)"
+            if ! _awr_cron_ensure_gated "$cport"; then
+                echo "Error: crontab rewrite failed -- interval file says ${val}min but the OLD crontab cadence may persist; re-run 'awr config interval <min>' or inspect crontab -l" >&2
+                return 1
+            fi
+            echo "awr config: crontab entry ensured in gated form -- cadence follows the interval file = ${val}min exactly (legacy/old-form entries migrated)"
             return 0
             ;;
         *)
