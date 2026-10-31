@@ -35746,12 +35746,74 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                 if (vb_ is not None and ve_ is not None) else "-"
             h.append('<tr><td>%s</td><td class="n">%s</td><td class="n">%s</td>'
                      '<td class="n">%s</td></tr>' % (esc(k), fb, fe, fd))
-        for k in ("cpu.stat", "io.service", "io.throttle.r", "io.throttle.w",
-                  "hugetlb.2MB.limit", "hugetlb.2MB.usage"):
-            ve_ = (_cge2 or {}).get("kv", {}).get(k)
-            if ve_:
-                h.append('<tr><td>%s</td><td colspan="3" class="n">%s</td></tr>'
-                         % (esc(k), esc(trunc(str(ve_), 90))))
+        # cpu.stat: split into per-counter rows (user 2026-10-31: every row
+        # Begin/End/Delta -- nr_throttled / throttled_time deltas > 0 mean
+        # the quota actually bit in this window; v2 throttled_usec likewise)
+        def _statmap(d, key):
+            out = {}
+            for part in ((d or {}).get("kv", {}).get(key) or "").split(";"):
+                if "=" in part:
+                    k2, v2 = part.split("=", 1)
+                    try:
+                        out[k2] = to_num(v2)
+                    except Exception:
+                        pass
+            return out
+        _bcs, _ecs = _statmap(_cgb2, "cpu.stat"), _statmap(_cge2, "cpu.stat")
+        for k2 in ("nr_periods", "nr_throttled", "throttled_time", "throttled_usec", "usage_usec"):
+            if k2 in _bcs or k2 in _ecs:
+                _fb = fmt_int(_bcs[k2]) if k2 in _bcs else "-"
+                _fe = fmt_int(_ecs[k2]) if k2 in _ecs else "-"
+                _fd = ("%+s" % fmt_int(max(0, _ecs[k2] - _bcs[k2]))) if (k2 in _bcs and k2 in _ecs) else "-"
+                h.append('<tr><td>cpu.%s</td><td class="n">%s</td><td class="n">%s</td>'
+                         '<td class="n">%s</td></tr>' % (k2, _fb, _fe, _fd))
+        # blkio service bytes: per-device Read/Write rows, window delta =
+        # the group's IO throughput ("Total N" line -> io.total row)
+        def _iomap(d):
+            out = {}
+            for item in ((d or {}).get("kv", {}).get("io.service") or "").split(";"):
+                f = item.split()
+                if len(f) >= 5 and f[0] != "Total":
+                    try:
+                        out[(f[0], "read")] = to_num(f[2])
+                        out[(f[0], "write")] = to_num(f[4])
+                    except Exception:
+                        pass
+                elif len(f) == 2 and f[0] == "Total":
+                    try:
+                        out[("total", "")] = to_num(f[1])
+                    except Exception:
+                        pass
+            return out
+        _bio, _eio = _iomap(_cgb2), _iomap(_cge2)
+        for _dk in sorted(set(_bio) | set(_eio)):
+            _fb = fmt_int(_bio[_dk]) if _dk in _bio else "-"
+            _fe = fmt_int(_eio[_dk]) if _dk in _eio else "-"
+            _fd = ("%+s" % fmt_int(max(0, _eio[_dk] - _bio[_dk]))) if (_dk in _bio and _dk in _eio) else "-"
+            h.append('<tr><td>io %s %s</td><td class="n">%s</td><td class="n">%s</td>'
+                     '<td class="n">%s</td></tr>' % (esc(_dk[0]), esc(_dk[1]), _fb, _fe, _fd))
+        # io throttle config (v1): static config rows when present
+        for k in ("io.throttle.r", "io.throttle.w"):
+            _ve = _cge2.get("kv", {}).get(k) if _cge2 else None
+            if _ve:
+                h.append('<tr><td>%s</td><td class="n">%s</td><td class="n">%s</td>'
+                         '<td class="n">-</td></tr>' % (esc(k), esc(trunc(_ve, 40)), esc(trunc(_ve, 40))))
+        # hugetlb: limit = static config, usage = cumulative row
+        for k in sorted(set(_cgb2.get("kv", {})) | set(_cge2.get("kv", {}))):
+            if not k.startswith("hugetlb."):
+                continue
+            vb_ = _cgb2.get("kv", {}).get(k)
+            ve_ = _cge2.get("kv", {}).get(k)
+            if k.endswith(".limit"):
+                _v = "unlimited" if to_num(ve_ or vb_) >= 9e18 else str(ve_ or vb_)
+                h.append('<tr><td>%s</td><td class="n">%s</td><td class="n">%s</td>'
+                         '<td class="n">-</td></tr>' % (esc(k), esc(_v), esc(_v)))
+            elif k.endswith(".usage"):
+                _fb = fmt_int(to_num(vb_)) if vb_ is not None else "-"
+                _fe = fmt_int(to_num(ve_)) if ve_ is not None else "-"
+                _fd = ("%+s" % fmt_int(max(0, to_num(ve_) - to_num(vb_)))) if (vb_ is not None and ve_ is not None) else "-"
+                h.append('<tr><td>%s</td><td class="n">%s</td><td class="n">%s</td>'
+                         '<td class="n">%s</td></tr>' % (esc(k), _fb, _fe, _fd))
         h.append('</table>')
         parts.append(''.join(h))
     sub("OS Memory Usage")
