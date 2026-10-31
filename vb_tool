@@ -29258,26 +29258,15 @@ _awr_collect() {
         if [ -r "/proc/$f" ]; then cp "/proc/$f" "$osd/$f" 2>/dev/null
         else echo "  [WARN] /proc/$f not readable" >&2; fi
     done
-    # irq affinity + irqbalance (2026-10-30): the per-CPU distribution matrix
-    # answers WHERE irq load lands; this answers the CONFIG side -- which cpus
-    # each irq is pinned to, what the kernel actually enforces, and whether
-    # irqbalance is actively re-managing masks (a hand-set mask silently moves
-    # under it). Lines: "<irq>|<smp_affinity_list>|<effective_affinity_list>",
-    # "default|<mask>|-" for new-irq default, "irqbalance|active|inactive".
+    # irqbalance only (2026-10-30; affinity mask collection DROPPED, user
+    # order 2026-10-31: /proc/irq/*/[smp_]affinity* are root-only on this OS
+    # family (204 openEuler verified 0600, plain smp_affinity included) and
+    # the awr collector always runs as the non-root DB user -- confirmed
+    # unreadable, so don't collect. File keeps its historical name for old
+    # snaps; content is a single line "irqbalance|active|inactive" (pgrep
+    # works non-root). The per-CPU distribution matrix in the report already
+    # shows where the kernel actually delivers.
     {
-        _da=$(cat /proc/irq/default_smp_affinity_list 2>/dev/null) || _da=$(cat /proc/irq/default_smp_affinity 2>/dev/null)
-        echo "default|${_da:--}|-"
-        for _iq in /proc/irq/[0-9]*; do
-            [ -d "$_iq" ] || continue
-            _in=${_iq##*/}
-            # smp_affinity_list/effective_*_list are 4.10+; older kernels
-            # (e.g. CentOS 3.10 on test hosts) only carry the hex mask --
-            # fall back and show it raw (readable while ncpu is small)
-            _al=$(cat "$_iq/smp_affinity_list" 2>/dev/null)
-            [ -n "$_al" ] || _al=$(cat "$_iq/smp_affinity" 2>/dev/null)
-            _af=$(cat "$_iq/effective_affinity_list" 2>/dev/null)
-            echo "$_in|${_al:--}|${_af:--}"
-        done
         if pgrep -x irqbalance >/dev/null 2>&1; then
             echo "irqbalance|active|-"
         else
@@ -34421,12 +34410,39 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     _ncpu = max([len(_irqpct)] + [len(v) for v in _sq.values()] +
                 [len(t[2]) for t in _idelta] + [0])
     if _ncpu and _sq:
-        # ---- Softirq: cpu rows x category columns ----
+        # ---- Softirq: legend first, then cpu rows x NUMBERED category
+        # columns (user 2026-10-31: names live in the legend, the matrix
+        # headers carry only the column number -- columns stay narrow no
+        # matter how long the kernel names get) ----
         _cats = list(_sq)
+        # meanings follow the kernel's softirq enum (include/linux/interrupt.h)
+        # -- the NAME-to-semantics map is stable everywhere; rows are driven
+        # by whatever categories THIS system reports, unknowns render blank
+        _smean = {
+            "HI":            "high-prio tasklets (legacy)",
+            "TIMER":         "timer ticks (background)",
+            "NET_TX":        "NIC transmit",
+            "NET_RX":        "NIC receive -- the single-core saturation suspect",
+            "BLOCK":         "block I/O completion",
+            "BLOCK_IOPOLL":  "block I/O polling (older kernels)",
+            "IRQ_POLL":      "block I/O polling (newer name)",
+            "TASKLET":       "tasklets (legacy)",
+            "SCHED":         "scheduler load balancing (background)",
+            "HRTIMER":       "high-res timers (background)",
+            "RCU":           "call_rcu deferred reclaim -- churn thermometer",
+        }
+        h = ['<h3 class="sub">Softirq Category Legend</h3>',
+             '<table class="t"><tr><th class="n">No.</th><th>Category</th>'
+             '<th>Meaning</th></tr>']
+        for _j, _c in enumerate(_cats, 1):
+            h.append('<tr><td class="n">%d</td><td>%s</td><td>%s</td></tr>'
+                     % (_j, esc(_c), esc(_smean.get(_c, ""))))
+        h.append('</table>')
+        parts.append(''.join(h))
         _hdr = (['<th>CPU</th>', '<th class="n">%irq</th>', '<th class="n">%sirq</th>']
-                + ['<th class="n">%s</th>' % esc(c) for c in _cats]
+                + ['<th class="n">%d</th>' % _j for _j in range(1, len(_cats) + 1)]
                 + ['<th class="n">Total</th>', '<th class="n">Top Cat</th>'])
-        h = ['<h3 class="sub">Softirq per CPU (window Delta)</h3>',
+        h = ['<h3 class="sub">Softirq per CPU</h3>',
              '<table class="t"><tr>' + ''.join(_hdr) + '</tr>']
         for i in range(_ncpu):
             row = ['<td>cpu%d</td>' % i]
@@ -34463,46 +34479,50 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
              "interrupts/softinterrupts in the window (/proc/stat per-cpu lines; "
              "bold >20%, red >50%: the core is being eaten while the machine-wide "
              "average in the Total row stays deceptively low).\n"
-             "Counts are window deltas (not /s); Top Cat = hottest category on "
-             "that core; all /proc/softirqs categories listed, zero-delta included.")
+             "Counts are window deltas (not /s); numbered columns map to the "
+             "legend above; Top Cat = hottest category on that core; all "
+             "/proc/softirqs categories listed, zero-delta included.\n"
+             "Reading guide: NET_RX/NET_TX follow NIC throughput, BLOCK* follow "
+             "disk IOPS, RCU tracks object churn (short-lived connections / file "
+             "churn); in the IRQ legend, LOC/RES/CAL/TLB-class rows are per-core "
+             "system/IPI noise (huge counts, cheap events) -- look for your NIC "
+             "and disk device names there.")
     # ---- IRQ: cpu rows x active-IRQ columns (user 2026-10-31) ----
     _idelta.sort(key=lambda t: -sum(t[2]))
     _actirq = [t for t in _idelta if sum(t[2]) > 0]
-    _silent = [t for t in _idelta if sum(t[2]) == 0]
     _CAP = 48
     _otherirq = _actirq[_CAP:]
     _actirq = _actirq[:_CAP]
     if _actirq and _ncpu:
-        # affinity config (2026-10-30): distribution shows WHERE load lands,
-        # the mask shows what was PINNED; irqbalance active = masks move under
-        # it (a hand-set mask is not the last word)
-        _iaff = {}
+        # irqbalance flag from the collector file (mask lines in OLD snaps are
+        # ignored: affinity is dropped -- root-only files, user order 2026-10-31)
         _ibq = ""
         for _ln in win["os"].get(("end", "irq_affinity"), "").splitlines():
             _f = _ln.split("|")
-            if len(_f) >= 3:
-                if _f[0] == "irqbalance":
-                    _ibq = _f[1]
-                else:
-                    _iaff[_f[0]] = (_f[1], _f[2])
-        def _affshort(k):
-            # request != effective (e.g. mask 0-15 but kernel delivers to cpu0
-            # only) is itself a finding -- show both when they diverge
-            _t = _iaff.get(k)
-            if _t is None or _t[0] == "-":
-                return ""
-            _a, _e = _t
-            if _e and _e not in ("-", "", _a):
-                return '<br>%s → %s' % (esc(_a), esc(_e))
-            return '<br>%s' % esc(_a)
+            if len(_f) >= 3 and _f[0] == "irqbalance":
+                _ibq = _f[1]
+        # IRQ legend (user 2026-10-31): full inventory -- every IRQ incl
+        # zero-delta, kernel's own device text verbatim (system-adaptive, no
+        # hardcoded name classification), total. Matrix headers below carry
+        # ONLY the IRQ number. No affinity column (root-only unreadable under
+        # the DB user); the distribution matrix itself shows where the kernel
+        # actually delivers.
+        h = ['<h3 class="sub">IRQ Legend (all %d, zero-delta included)</h3>'
+             % len(_idelta),
+             '<table class="t"><tr><th class="n">IRQ</th><th>Device</th>'
+             '<th class="n">Total (Delta)</th></tr>']
+        for k, dv, vec in _idelta:
+            h.append('<tr><td class="n">%s</td><td>%s</td><td class="n">%s</td></tr>'
+                     % (esc(k), esc(trunc(dv, 44)), _km(sum(vec))))
+        h.append('</table>')
+        parts.append(''.join(h))
         _hdr = ['<th>CPU</th>']
         for k, dv, vec in _actirq:
-            _hdr.append('<th class="n">%s<br>%s%s</th>'
-                        % (esc(k), esc(trunc(dv, 18)), _affshort(k)))
+            _hdr.append('<th class="n">%s</th>' % esc(k))
         if _otherirq:
             _hdr.append('<th class="n">other (%d irq)</th>' % len(_otherirq))
         _hdr += ['<th class="n">Total</th>', '<th class="n">Top IRQ</th>']
-        h = ['<h3 class="sub">IRQ per CPU (window Delta)</h3>',
+        h = ['<h3 class="sub">IRQ per CPU</h3>',
              '<table class="t"><tr>' + ''.join(_hdr) + '</tr>']
         for i in range(_ncpu):
             row = ['<td>cpu%d</td>' % i]
@@ -34528,21 +34548,13 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         h.append(''.join(ftr) + '</tr>')
         h.append('</table>')
         parts.append(''.join(h))
-        _nl = []
-        if _silent:
-            _nl.append("silent IRQs (zero delta, all %d listed): %s" % (
-                len(_silent), ", ".join(
-                    "%s:%s" % (k, trunc(desc.split()[-1], 14) if desc and desc.split() else "?")
-                    for k, desc, _v in _silent)))
+        _nl = ["matrix column = IRQ number; device / total in the legend above"]
         if _otherirq:
             _nl.append("low-activity IRQs collapsed into 'other' (all %d listed): %s" % (
                 len(_otherirq), ", ".join(k for k, _d, _v in _otherirq)))
         if _ibq == "active":
             _nl.append("irqbalance active -- affinity masks are dynamically "
                        "re-managed; a hand-set mask is not the last word")
-        _nl.append("column header: IRQ number / device / requested affinity "
-                   "(→ effective when the kernel actually delivers elsewhere); "
-                   "counts are window deltas")
         note("\n".join(_nl))
     # DB Process: the postmaster listening on THIS awr's port (multi-instance
     # safe), its cpuset pinning and its EFFECTIVE rlimits (/proc/<pid>/limits,
