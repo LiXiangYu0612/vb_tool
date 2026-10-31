@@ -34398,7 +34398,8 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         # and migration churn; counters absent (feature off / kernel without
         # balancing) or SINGLE-NODE box (nothing to balance -- 204 is one,
         # counters sit at 0 forever) -> no table at all
-        _nk = ("numa_hint_faults", "numa_hint_faults_local", "numa_pages_migrated")
+        _nk = ("numa_pte_updates", "numa_huge_pte_updates",
+               "numa_hint_faults", "numa_hint_faults_local", "numa_pages_migrated")
         _vb2 = _vmstat_keys(win["os"].get(("begin", "vmstat"), ""), _nk)
         _ve2 = _vmstat_keys(win["os"].get(("end", "vmstat"), ""), _nk)
         if len(_ntop.get("nodes", {})) > 1 and any(k in _ve2 for k in _nk):
