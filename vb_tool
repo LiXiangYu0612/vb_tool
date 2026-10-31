@@ -34341,10 +34341,12 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                  % ("".join(_th), "".join(_td)))
     # Softirq + IRQ per-CPU distribution, TRANSPOSED (user 2026-10-31: cpus
     # run down the ROWS -- core count only makes the table longer, never
-    # wider; irq/softirq categories run across the columns). The leading
-    # %irq/%sirq columns come from the per-cpu lines of the already-collected
-    # /proc/stat: the counts below say WHERE interrupts land, %irq+%sirq say
-    # how much of that core's TIME they eat -- the saturation verdict (1 hot
+    # wider; irq/softirq categories run across the columns). The count
+    # matrices say WHERE interrupts land; the per-core interrupt TIME
+    # (%irq/%sirq from the already-collected /proc/stat per-cpu lines, second
+    # round 2026-10-31: NOT inside the softirq count matrix anymore -- hard
+    # irq time does not belong in a softirq table) says how much of that
+    # core they eat, and renders as its own small hot-cores-only table (1 hot
     # core in 64 averages to 1.4% machine-wide and stays invisible in every
     # aggregate table).
     def _km(v):
@@ -34409,6 +34411,23 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         _idelta.append((_k, _desc, _dv))
     _ncpu = max([len(_irqpct)] + [len(v) for v in _sq.values()] +
                 [len(t[2]) for t in _idelta] + [0])
+    # interrupt TIME, hot cores only (user 2026-10-31): %irq+%sirq >= 5% --
+    # quiet boxes render nothing here at all
+    _hot = sorted(((n, p[0], p[1]) for n, p in _irqpct.items()
+                   if p[0] + p[1] >= 5.0),
+                  key=lambda t: -(t[1] + t[2]))
+    if _hot:
+        h = ['<h3 class="sub">Interrupt Time (hot cores only)</h3>',
+             '<table class="t"><tr><th>CPU</th><th class="n">%irq</th>'
+             '<th class="n">%sirq</th><th class="n">%irq+%sirq</th></tr>']
+        for n, pi, ps in _hot:
+            h.append('<tr><td>%s</td><td class="n%s">%.1f</td>'
+                     '<td class="n%s">%.1f</td><td class="n%s">%.1f</td></tr>'
+                     % (esc(n), thr_cell_cls(pi, 20.0, 50.0), pi,
+                        thr_cell_cls(ps, 20.0, 50.0), ps,
+                        thr_cell_cls(pi + ps, 20.0, 50.0), pi + ps))
+        h.append('</table>')
+        parts.append(''.join(h))
     if _ncpu and _sq:
         # ---- Softirq: legend first, then cpu rows x NUMBERED category
         # columns (user 2026-10-31: names live in the legend, the matrix
@@ -34433,23 +34452,19 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         }
         h = ['<h3 class="sub">Softirq</h3>',
              '<table class="t"><tr><th class="n">No.</th><th>Category</th>'
-             '<th>Meaning</th></tr>']
+             '<th>Meaning</th><th class="n">Delta</th></tr>']
         for _j, _c in enumerate(_cats, 1):
-            h.append('<tr><td class="n">%d</td><td>%s</td><td>%s</td></tr>'
-                     % (_j, esc(_c), esc(_smean.get(_c, ""))))
+            h.append('<tr><td class="n">%d</td><td>%s</td><td>%s</td>'
+                     '<td class="n">%s</td></tr>'
+                     % (_j, esc(_c), esc(_smean.get(_c, "")), _km(sum(_sq[_c]))))
         h.append('</table>')
         parts.append(''.join(h))
-        _hdr = (['<th>CPU</th>', '<th class="n">%irq</th>', '<th class="n">%sirq</th>']
+        _hdr = (['<th>CPU</th>']
                 + ['<th class="n">%d</th>' % _j for _j in range(1, len(_cats) + 1)]
                 + ['<th class="n">Total</th>', '<th class="n">Top Cat</th>'])
         h = ['<table class="t"><tr>' + ''.join(_hdr) + '</tr>']
         for i in range(_ncpu):
             row = ['<td>cpu%d</td>' % i]
-            pi, ps = _irqpct.get("cpu%d" % i, (None, None))
-            row.append('<td class="n%s">%s</td>' % (thr_cell_cls(pi, 20.0, 50.0),
-                                                    '-' if pi is None else '%.1f' % pi))
-            row.append('<td class="n%s">%s</td>' % (thr_cell_cls(ps, 20.0, 50.0),
-                                                    '-' if ps is None else '%.1f' % ps))
             vec = [_sq[c][i] if i < len(_sq[c]) else 0 for c in _cats]
             row += ['<td class="n">%s</td>' % _km(v) for v in vec]
             tot = sum(vec)
@@ -34460,14 +34475,8 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             else:
                 row.append('<td class="n">-</td>')
             h.append('<tr>' + ''.join(row) + '</tr>')
-        # footer: per-category totals + the machine-wide aggregate %irq/%sirq
-        # for contrast with the per-core columns above
+        # footer: per-category totals
         ftr = ['<tr><td>Total</td>']
-        if "cpu" in _pb or "cpu" in _pe:
-            ai, asr = _pctpair("cpu")
-            ftr += ['<td class="n">%.1f</td>' % ai, '<td class="n">%.1f</td>' % asr]
-        else:
-            ftr += ['<td class="n">-</td>', '<td class="n">-</td>']
         ftr += ['<td class="n">%s</td>' % _km(sum(_sq[c])) for c in _cats]
         ftr.append('<td class="n">%s</td>' % _km(sum(sum(_sq[c]) for c in _cats)))
         ftr.append('<td class="n">-</td>')
