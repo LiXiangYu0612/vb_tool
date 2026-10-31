@@ -34467,7 +34467,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         if _mcols:
             _hdr = (['<th>CPU</th>']
                     + ['<th class="n">%d</th>' % _j for _j, _c in _mcols]
-                    + ['<th class="n">Total</th>', '<th class="n">Top Cat</th>'])
+                    + ['<th class="n">Total</th>', '<th class="n">Top Softirq</th>'])
             h = ['<table class="t"><tr>' + ''.join(_hdr) + '</tr>']
             for i in range(_ncpu):
                 row = ['<td>cpu%d</td>' % i]
