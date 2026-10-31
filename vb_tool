@@ -29253,10 +29253,19 @@ _awr_collect() {
     local osd="$target/os" dbd="$target/db"
     mkdir -p "$osd" "$dbd" || { echo "  [ERROR] cannot mkdir $osd / $dbd" >&2; return 1; }
     # ---- OS (/proc) ----
+    # seq_file reads are kernel-side iteration and CAN block on real boxes
+    # (irq_desc locks under handler storms / old-kernel O(n^2) restart on
+    # many-core+many-irq machines -- the historical 'workload 卡' root cause,
+    # user 2026-10-31): bound every /proc copy so one wedged file can never
+    # stall the whole snapshot loop. -k: TERM at 10s, KILL at +2s.
     local f
     for f in diskstats stat interrupts softirqs meminfo cpuinfo vmstat loadavg; do
-        if [ -r "/proc/$f" ]; then cp "/proc/$f" "$osd/$f" 2>/dev/null
-        else echo "  [WARN] /proc/$f not readable" >&2; fi
+        if [ -r "/proc/$f" ]; then
+            timeout -k 2 10 cp "/proc/$f" "$osd/$f" 2>/dev/null \
+                || echo "  [WARN] /proc/$f copy timed out or failed" >&2
+        else
+            echo "  [WARN] /proc/$f not readable" >&2
+        fi
     done
     # irqbalance only (2026-10-30; affinity mask collection DROPPED, user
     # order 2026-10-31: /proc/irq/*/[smp_]affinity* are root-only on this OS
