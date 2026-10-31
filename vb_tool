@@ -29344,19 +29344,28 @@ _awr_collect() {
     # node -- WHERE the DB's memory actually faulted. numactl not required:
     # numa_maps is owner-readable and the awr user owns the DB processes.
     # Output: "pages|<faulted-total>|N0=<n>|N1=<n>|...|unfaulted=<vmas with
-    # no per-node counts yet>" + top mappings by faulted pages
-    # "map|<pages>|<desc (flags minus the per-node counters)>" (counts are
-    # PAGES; kernelpagesize_kB inside desc says which page size).
+    # no per-node counts yet>" + per-mapping lines (ALL of them, sorted by
+    # faulted pages; the renderer takes the top 10):
+    #   "map|<pages>|N0=<n>|N1=<n>|...|<desc (flags minus the per-node
+    #    counters)>" -- the per-node split stays per-mapping so the report
+    #   can show WHERE each block landed (user 2026-10-31), not just totals.
+    # Counts are PAGES; kernelpagesize_kB inside desc says which page size.
     if [ -n "$_dpid" ] && [ -r "/proc/$_dpid/numa_maps" ]; then
         timeout -k 2 10 awk '{
                 tot = 0
+                split("", lnode)
                 for (i = 1; i <= NF; i++)
-                    if ($i ~ /^N[0-9]+=[0-9]+$/) { split($i, a, "="); tot += a[2]; ncnt[a[1]] += a[2] }
+                    if ($i ~ /^N[0-9]+=[0-9]+$/) {
+                        split($i, a, "="); tot += a[2]
+                        ncnt[a[1]] += a[2]; lnode[a[1]] += a[2]
+                    }
                 if ($0 !~ / N[0-9]+=/) unf++
                 gtot += tot
                 desc = $0
                 gsub(/ N[0-9]+=[0-9]+/, "", desc)
-                printf "map|%d|%s\n", tot, substr(desc, 1, 90)
+                ml = "map|" tot
+                for (n in lnode) ml = ml "|" n "=" lnode[n]
+                printf "%s|%s\n", ml, substr(desc, 1, 90)
             }
             END {
                 line = "pages|" gtot
@@ -32771,7 +32780,15 @@ def parse_db_numa_maps(txt):
         elif f[0] == "map" and len(f) >= 3:
             seen = True
             try:
-                out["maps"].append((to_num(f[1]), "|".join(f[2:])))
+                _pv = to_num(f[1])
+                _nd = {}
+                _j = 2
+                # optional per-node counters (new format): map|pages|N0=..|..|desc
+                while _j < len(f) and re.match(r"^N\d+=", f[_j]):
+                    _k, _v = f[_j].split("=", 1)
+                    _nd[_k] = to_num(_v)
+                    _j += 1
+                out["maps"].append((_pv, _nd, "|".join(f[_j:])))
             except Exception:
                 pass
     return out if seen else {}
@@ -34403,21 +34420,29 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                              % (esc(k), fmt_int(max(0.0, _ve2[k] - _vb2.get(k, _ve2[k])))))
             h.append('</table>')
             parts.append(''.join(h))
-        # DB memory placement, per-VMA part (2026-10-31): top mappings by
-        # faulted pages -- desc keeps file path + flags + kernelpagesize_kB,
-        # per-node counters were stripped at collect time (the per-node
-        # aggregate lives in the numastat table above)
+        # DB memory placement, per-VMA part (2026-10-31): top 10 mappings by
+        # faulted pages with their PER-NODE split -- WHERE each block landed
+        # (user 2026-10-31), not just what it is; desc keeps file path +
+        # flags + kernelpagesize_kB (the per-node AGGREGATE lives in the
+        # numastat table's DB Pages/DB Share columns)
         if _dnm and _dnm["total"] > 0:
+            _mn = sorted(_dnm["nodes"].keys())
             h2 = ['<h3 class="sub">DB Memory Placement (top mappings, faulted pages)</h3>',
-                  '<table class="t"><tr><th class="n">Pages</th><th>Mapping</th></tr>']
-            for pv, desc in _dnm["maps"][:8]:
+                  '<table class="t"><tr><th class="n">Pages</th>'
+                  + ''.join('<th class="n">%s</th>' % esc(x) for x in _mn)
+                  + '<th>Mapping</th></tr>']
+            for pv, mnd, desc in _dnm["maps"][:10]:
                 if pv <= 0:
                     continue
-                h2.append('<tr><td class="n">%s</td><td>%s</td></tr>'
-                          % (fmt_int(pv), esc(trunc(desc, 72))))
+                h2.append('<tr><td class="n">%s</td>%s<td>%s</td></tr>'
+                          % (fmt_int(pv),
+                             ''.join('<td class="n">%s</td>' % (fmt_int(mnd[x]) if x in mnd else "-")
+                                     for x in _mn),
+                             esc(trunc(desc, 72))))
             if _dnm["unfaulted"]:
-                h2.append('<tr><td class="n">-</td><td>unfaulted VMAs: %d '
-                          '(mapped, never touched)</td></tr>' % _dnm["unfaulted"])
+                h2.append('<tr><td class="n">-</td>%s<td>unfaulted VMAs: %d '
+                          '(mapped, never touched)</td></tr>'
+                          % (''.join('<td class="n">-</td>' for _ in _mn), _dnm["unfaulted"]))
             h2.append('</table>')
             parts.append(''.join(h2))
     sub("System Activity")
