@@ -29900,6 +29900,16 @@ _awr_root() {
     echo "$root"
 }
 
+# _awr_gated_create -- crontab entry body (2026-10-31): the OLD entry baked
+# the interval file's full path into cron, so a datadir switch silently broke
+# interval changes (cron kept reading the old path, modulo fell back to 60).
+# The gate resolves the CURRENT root at runtime; cron lines carry no path.
+_awr_gated_create() {
+    local r; r=$(_awr_interval_read)
+    case "$r" in ''|0|*[!0-9]*) r=60;; esac
+    [ $(( $(date +%s) / 60 % r )) -eq 0 ] || return 0
+    _awr_create
+}
 # _awr_next_id  -- atomically allocate and return the next snap_id.
 # Maintains <root>/sequence (= next id). Concurrent-safe via flock (util-linux).
 _awr_next_id() {
@@ -40995,8 +41005,7 @@ _awr_enable() {
     # ★门控快照条目 (2026-10-11, user: 90 分钟就要真的 90 分钟): cron 分钟域表达
     #   不了 >60/不整除 60 的间隔; 改每分钟唤醒 + epoch 分钟模 interval 文件值 ——
     #   任意 N(1-1440) 精确; interval 改动只写文件下一边界即生效, 与 crontab 解耦。
-    local gateroot; gateroot=$(_awr_root)   # ★enable 作用域没有现成 $root(实测踩坑: 空路径生成 cat /interval)
-    local entry="* * * * * /bin/bash -lc 'R=\$(cat $gateroot/interval 2>/dev/null); case \"\$R\" in \"\"|0|*[!0-9]*) R=60;; esac; [ \$(( \$(date +\%s) / 60 \% \$R )) -eq 0 ] && PGPORT=$port $self awr create >/dev/null 2>&1'  $marker"
+    local entry="* * * * * /bin/bash -lc 'PGPORT=$port $self awr _gated-create >/dev/null 2>&1'  $marker"
     local rentry="* * * * * /bin/bash -lc 'PGPORT=$port $self awr _repl-sample >/dev/null 2>&1'  $rmarker"
     if ! ( crontab -l 2>/dev/null | grep -vF "$rmarker" | grep -vF "$marker"; echo "$rentry"; echo "$entry" ) | crontab -; then
         echo "Error: failed to install crontab entries (check cron.allow/cron.deny, permissions or disk) -- periodic capture NOT started" >&2
@@ -41479,14 +41488,13 @@ _awr_config() {
                crontab -l 2>/dev/null | grep -qE "# vb_tool_awr_p${cport}\$" || \
                crontab -l 2>/dev/null | grep -qE '# vb_tool_awr(_repl)? *$'; then
                 local self; self=$(readlink -f "$0" 2>/dev/null || echo "$0")
-                local gateroot; gateroot=$(_awr_root)
-                local entry="* * * * * /bin/bash -lc 'R=\$(cat $gateroot/interval 2>/dev/null); case \"\$R\" in \"\"|0|*[!0-9]*) R=60;; esac; [ \$(( \$(date +\%s) / 60 \% \$R )) -eq 0 ] && PGPORT=$cport $self awr create >/dev/null 2>&1'  # vb_tool_awr_p$cport"
+                local entry="* * * * * /bin/bash -lc 'PGPORT=$cport $self awr _gated-create >/dev/null 2>&1'  # vb_tool_awr_p$cport"
                 local rentry="* * * * * /bin/bash -lc 'PGPORT=$cport $self awr _repl-sample >/dev/null 2>&1'  # vb_tool_awr_repl_p$cport"
                 if ! ( crontab -l 2>/dev/null | grep -vE "# vb_tool_awr_repl_p${cport}\$" | grep -vE "# vb_tool_awr_p${cport}\$" | grep -vE '# vb_tool_awr(_repl)? *$'; echo "$rentry"; echo "$entry" ) | crontab -; then
                     echo "Error: failed to rewrite crontab entry (check cron.allow/cron.deny, permissions or disk) -- interval NOT changed" >&2
                     return 1
                 fi
-                echo "awr config: crontab entry ensured in gated form -- cadence follows $gateroot/interval = ${val}min exactly (legacy/old-form entries migrated)"
+                echo "awr config: crontab entry ensured in gated form -- cadence follows the interval file = ${val}min exactly (legacy/old-form entries migrated)"
                 echo "  $entry"
             fi
             return 0
@@ -41617,6 +41625,7 @@ run_awr() {
         _repl-sample)   _awr_repl_sample;;   # internal: cron per-minute sampler (not in help)
         baseline)       _awr_baseline "$@";;
         create)         _awr_create "$@";;
+        _gated-create)  _awr_gated_create "$@";;
         enable)         _awr_enable "$@";;
         disable)        _awr_disable "$@";;
         awrrpt)         _awr_awrrpt "$@";;
