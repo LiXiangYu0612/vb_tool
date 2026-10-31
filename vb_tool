@@ -34442,8 +34442,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         _hdr = (['<th>CPU</th>', '<th class="n">%irq</th>', '<th class="n">%sirq</th>']
                 + ['<th class="n">%d</th>' % _j for _j in range(1, len(_cats) + 1)]
                 + ['<th class="n">Total</th>', '<th class="n">Top Cat</th>'])
-        h = ['<h3 class="sub">Softirq per CPU</h3>',
-             '<table class="t"><tr>' + ''.join(_hdr) + '</tr>']
+        h = ['<table class="t"><tr>' + ''.join(_hdr) + '</tr>']
         for i in range(_ncpu):
             row = ['<td>cpu%d</td>' % i]
             pi, ps = _irqpct.get("cpu%d" % i, (None, None))
@@ -34474,19 +34473,9 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         ftr.append('<td class="n">-</td>')
         h.append(''.join(ftr) + '</tr>')
         h.append('</table>')
-        parts.append(''.join(h))
-        note("%irq/%sirq = share of that core's CPU TIME spent servicing "
-             "interrupts/softinterrupts in the window (/proc/stat per-cpu lines; "
-             "bold >20%, red >50%: the core is being eaten while the machine-wide "
-             "average in the Total row stays deceptively low).\n"
-             "Counts are window deltas (not /s); numbered columns map to the "
-             "legend above; Top Cat = hottest category on that core; all "
-             "/proc/softirqs categories listed, zero-delta included.\n"
-             "Reading guide: NET_RX/NET_TX follow NIC throughput, BLOCK* follow "
-             "disk IOPS, RCU tracks object churn (short-lived connections / file "
-             "churn); in the IRQ legend, LOC/RES/CAL/TLB-class rows are per-core "
-             "system/IPI noise (huge counts, cheap events) -- look for your NIC "
-             "and disk device names there.")
+        # collapsed by default (user 2026-10-31) -- same _fold handling as the
+        # per-minute detail tables; the legend above carries the reading keys
+        parts.append(_fold('Softirq per CPU', ''.join(h)))
     # ---- IRQ: cpu rows x active-IRQ columns (user 2026-10-31) ----
     _idelta.sort(key=lambda t: -sum(t[2]))
     _actirq = [t for t in _idelta if sum(t[2]) > 0]
@@ -34502,8 +34491,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         # ONLY the IRQ number. No affinity column (root-only unreadable under
         # the DB user); the distribution matrix itself shows where the kernel
         # actually delivers.
-        h = ['<h3 class="sub">IRQ Legend (all %d, zero-delta included)</h3>'
-             % len(_idelta),
+        h = ['<h3 class="sub">IRQ</h3>',
              '<table class="t"><tr><th class="n">IRQ</th><th>Device</th>'
              '<th class="n">Delta</th></tr>']
         for k, dv, vec in _idelta:
@@ -34517,8 +34505,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         if _otherirq:
             _hdr.append('<th class="n">other (%d irq)</th>' % len(_otherirq))
         _hdr += ['<th class="n">Total</th>', '<th class="n">Top IRQ</th>']
-        h = ['<h3 class="sub">IRQ per CPU</h3>',
-             '<table class="t"><tr>' + ''.join(_hdr) + '</tr>']
+        h = ['<table class="t"><tr>' + ''.join(_hdr) + '</tr>']
         for i in range(_ncpu):
             row = ['<td>cpu%d</td>' % i]
             vec = [v[i] if i < len(v) else 0 for (_, _, v) in _actirq]
@@ -34542,7 +34529,8 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         ftr.append('<td class="n">-</td>')
         h.append(''.join(ftr) + '</tr>')
         h.append('</table>')
-        parts.append(''.join(h))
+        # collapsed by default (user 2026-10-31), same _fold handling as above
+        parts.append(_fold('IRQ per CPU', ''.join(h)))
         if _otherirq:
             note("low-activity IRQs collapsed into 'other' (all %d listed): %s" % (
                 len(_otherirq), ", ".join(k for k, _d, _v in _otherirq)))
