@@ -34510,7 +34510,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         h = ['<h3 class="sub">IRQ Legend (all %d, zero-delta included)</h3>'
              % len(_idelta),
              '<table class="t"><tr><th class="n">IRQ</th><th>Device</th>'
-             '<th class="n">Total (Delta)</th></tr>']
+             '<th class="n">Delta</th></tr>']
         for k, dv, vec in _idelta:
             h.append('<tr><td class="n">%s</td><td>%s</td><td class="n">%s</td></tr>'
                      % (esc(k), esc(trunc(dv, 44)), _km(sum(vec))))
