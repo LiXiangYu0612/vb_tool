@@ -40674,6 +40674,10 @@ _awr_baseline_json_get() {
 # awrs/<port>/baselines/<id>/. The main library keeps purging normally --
 # baselines/ never matches the purge globs (top-level snap_*/repl_* etc only).
 _awr_baseline_begin() {
+    local _plock; _plock=$(_awr_port_lockfile)
+    mkdir -p "$(dirname "$_plock")" 2>/dev/null
+    exec 8>"$_plock"
+    flock -n -s 8 || { echo "  [WARN] datadir migration in progress, retry later" >&2; return 1; }
     local begin_id="" end_id=""
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -40811,6 +40815,10 @@ PYBI
 # awr baseline delete <id>  -- drop the COPY dir only; the main library never
 # knew about it.
 _awr_baseline_delete() {
+    local _plock; _plock=$(_awr_port_lockfile)
+    mkdir -p "$(dirname "$_plock")" 2>/dev/null
+    exec 8>"$_plock"
+    flock -n -s 8 || { echo "  [WARN] datadir migration in progress, retry later" >&2; return 1; }
     [ $# -eq 1 ] || { echo "Error: usage 'awr baseline delete <baseline_id>'" >&2; return 2; }
     case "$1" in ''|*[!0-9]*) echo "Error: baseline id must be an integer" >&2; return 2;; esac
     local root; root=$(_awr_root)
@@ -41421,6 +41429,10 @@ EOF
 # stderr. Shared by 'awr delete until' and the retention auto-purge so both
 # paths always delete exactly the same set of things.
 _awr_purge_core() {
+    local _plock; _plock=$(_awr_port_lockfile)
+    mkdir -p "$(dirname "$_plock")" 2>/dev/null
+    exec 8>"$_plock"
+    flock -n -s 8 || { echo "  [WARN] datadir migration in progress, retry later" >&2; return 1; }
     local until_ep="$1"
     local root; root=$(_awr_root)
     local scount=0
