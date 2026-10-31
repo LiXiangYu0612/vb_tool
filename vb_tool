@@ -34524,6 +34524,29 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         if v >= 1000:
             return '%.1fK' % (v / 1000.0)
         return '%d' % v
+    def _stat_percpu(phase):
+        # per-cpu jiffies from the stat snapshot: {name: [usr nice sys idle
+        # iowait irq softirq steal]}; name "cpu" = machine aggregate
+        out = {}
+        for ln in win["os"].get((phase, "stat"), "").splitlines():
+            f = ln.split()
+            if len(f) >= 9 and f[0].startswith("cpu") and (f[0] == "cpu" or f[0][3:].isdigit()):
+                try:
+                    out[f[0]] = [to_num(x) for x in f[1:9]]
+                except Exception:
+                    pass
+        return out
+    _pb, _pe = _stat_percpu("begin"), _stat_percpu("end")
+    def _pct(name, idx):
+        # /proc/stat fields: usr nice sys idle iowait IRQ SOFTIRQ steal --
+        # irq is index 5, softirq 6 (steal is 7); None when no data
+        b, e = _pb.get(name, [0.0] * 8), _pe.get(name, [0.0] * 8)
+        d = [max(0.0, e[i] - b[i]) for i in range(8)]
+        t = sum(d)
+        return (100.0 * d[idx] / t) if t else None
+    _cores = [n for n in set(_pb) | set(_pe) if n != "cpu" and n[3:].isdigit()]
+    _pirq = {n: _pct(n, 5) for n in _cores}
+    _psirq = {n: _pct(n, 6) for n in _cores}
     # parse BOTH ends here (user 2026-10-30: list ALL categories including
     # zero-delta ones -- the osd path drops them); category order = kernel
     # file order (HI TIMER NET_TX NET_RX BLOCK ...), stable across reports
@@ -34551,7 +34574,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                for i in range(_n)]
         _desc = (_ie.get(_k) or _ib.get(_k) or ([0], ""))[1]
         _idelta.append((_k, _desc, _dv))
-    _ncpu = max([len(v) for v in _sq.values()] +
+    _ncpu = max([len(_cores)] + [len(v) for v in _sq.values()] +
                 [len(t[2]) for t in _idelta] + [0])
     if _ncpu and _sq:
         # ---- Softirq: legend first, then cpu rows x NUMBERED category
@@ -34590,12 +34613,15 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         # legend number so the mapping stays stable (numbers may skip)
         _mcols = [(_j, _c) for _j, _c in enumerate(_cats, 1) if sum(_sq[_c]) > 0]
         if _mcols:
-            _hdr = (['<th>CPU</th>']
+            _hdr = (['<th>CPU</th>', '<th class="n">%sirq</th>']
                     + ['<th class="n">%d</th>' % _j for _j, _c in _mcols]
                     + ['<th class="n">Total</th>', '<th class="n">Top Softirq</th>'])
             h = ['<table class="t"><tr>' + ''.join(_hdr) + '</tr>']
             for i in range(_ncpu):
-                row = ['<td>cpu%d</td>' % i]
+                ps = _psirq.get("cpu%d" % i)
+                row = ['<td>cpu%d</td>' % i,
+                       '<td class="n%s">%s</td>' % (thr_cell_cls(ps, 20.0, 50.0),
+                                                    '-' if ps is None else '%.1f' % ps)]
                 vec = [_sq[c][i] if i < len(_sq[c]) else 0 for _j, c in _mcols]
                 row += ['<td class="n">%s</td>' % _km(v) for v in vec]
                 tot = sum(vec)
@@ -34607,8 +34633,10 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                 else:
                     row.append('<td class="n">-</td>')
                 h.append('<tr>' + ''.join(row) + '</tr>')
-            # footer: per-category totals
-            ftr = ['<tr><td>Total</td>']
+            # footer: machine-wide aggregate %sirq + per-category totals
+            _ag = _pct("cpu", 6)
+            ftr = ['<tr><td>Total</td>',
+                   '<td class="n">%s</td>' % ('-' if _ag is None else '%.1f' % _ag)]
             ftr += ['<td class="n">%s</td>' % _km(sum(_sq[c])) for _j, c in _mcols]
             ftr.append('<td class="n">%s</td>' % _km(sum(sum(_sq[c]) for _j, c in _mcols)))
             ftr.append('<td class="n">-</td>')
@@ -34650,7 +34678,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                         ('<td class="n">%s</td>' % esc(_inode.get(k, "-"))) if _inode else ''))
         h.append('</table>')
         parts.append(''.join(h))
-        _hdr = ['<th>CPU</th>']
+        _hdr = ['<th>CPU</th>', '<th class="n">%irq</th>']
         for k, dv, vec in _actirq:
             _hdr.append('<th class="n">%s</th>' % esc(k))
         if _otherirq:
@@ -34658,7 +34686,10 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         _hdr += ['<th class="n">Total</th>', '<th class="n">Top IRQ</th>']
         h = ['<table class="t"><tr>' + ''.join(_hdr) + '</tr>']
         for i in range(_ncpu):
-            row = ['<td>cpu%d</td>' % i]
+            pi = _pirq.get("cpu%d" % i)
+            row = ['<td>cpu%d</td>' % i,
+                   '<td class="n%s">%s</td>' % (thr_cell_cls(pi, 20.0, 50.0),
+                                                '-' if pi is None else '%.1f' % pi)]
             vec = [v[i] if i < len(v) else 0 for (_, _, v) in _actirq]
             row += ['<td class="n">%s</td>' % _km(x) for x in vec]
             oth = sum(v[i] if i < len(v) else 0 for (_, _, v) in _otherirq)
@@ -34672,7 +34703,9 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             else:
                 row.append('<td class="n">-</td>')
             h.append('<tr>' + ''.join(row) + '</tr>')
-        ftr = ['<tr><td>Total</td>']
+        _ag = _pct("cpu", 5)
+        ftr = ['<tr><td>Total</td>',
+               '<td class="n">%s</td>' % ('-' if _ag is None else '%.1f' % _ag)]
         ftr += ['<td class="n">%s</td>' % _km(sum(v)) for (_, _, v) in _actirq]
         if _otherirq:
             ftr.append('<td class="n">%s</td>' % _km(sum(sum(v) for (_, _, v) in _otherirq)))
