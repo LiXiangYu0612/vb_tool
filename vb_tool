@@ -29834,8 +29834,10 @@ _awr_datadir_set() {   # _awr_datadir_set <port> <dir>   ("" clears the entry)
 # "port|dir" table would truncate the entry and orphan the moved data); F5
 # normalize the path before comparing (trailing '/' made the same physical
 # dir look like a foreign non-empty target); F2 "default" resolves through
-# the no-override base (VB_TOOL_HOME-aware), never a raw $HOME -- and the
-# override is cleared whenever the new root EQUALS the no-override default;
+# the no-override base (VB_TOOL_HOME-aware), never a raw
+# $HOME, and CLEARS the override; an explicitly given dir equal to the
+# default root still stores an explicit override (equivalent today, keeps
+# working if VB_TOOL_HOME appears later);
 # F7 a datadir-set failure after a successful mv rolls the mv back (no
 # split-brain window); F9 relative path returns rc=1 (rc=2 dumps full help).
 _awr_default_base() {   # per-port root the resolver uses with NO override
@@ -29850,8 +29852,8 @@ _awr_datadir_migrate() {
             *)  echo "Error: datadir must be an absolute path (got '$newhome')" >&2; return 1;;
         esac
         case "$newhome" in
-            *'|'*|*$'\n'*|*$'\r'*)
-                echo "Error: datadir must not contain '|', newlines or carriage returns (config table format)" >&2; return 1;;
+            *'|'*|*$'\n'*|*$'\r'*|*'\'*)
+                echo "Error: datadir must not contain '|', newlines, carriage returns or backslashes (config table format; backslash paths break the table encoding)" >&2; return 1;;
         esac
         # F5: normalize trailing slashes so /data3 and /data3/ compare equal
         while [ "${#newhome}" -gt 1 ] && [ "${newhome: -1}" = "/" ]; do
@@ -29913,8 +29915,12 @@ _awr_datadir_migrate() {
     [ "$had_data" -eq 1 ] && note=" (existing data moved)"
     # F4: a datadir switch must not leave old-form crontab entries pointing
     # at the interval file that just moved away -- reinstall in gated form
-    # N4: a heal failure must be HEARD (warn; the switch itself succeeded)
-    _awr_cron_ensure_gated "$port" || echo "Warning: crontab entry heal failed after the datadir switch -- the old cadence may persist; run 'awr config interval <min>' to retry" >&2
+    # N4: a heal failure must be HEARD (warn; the switch itself succeeded).
+    # Three-state (round-3 F-1): rc=3 means "no entries, not enabled" -- a
+    # NORMAL state that must stay silent, never a warning
+    _awr_cron_ensure_gated "$port"
+    _hrc=$?
+    [ "$_hrc" -eq 1 ] && echo "Warning: crontab entry heal failed after the datadir switch -- the old cadence may persist; run 'awr config interval <min>' to retry" >&2
     if [ -z "$newhome" ]; then
         echo "awr: port $port datadir reset to default $new_root$note"
     else
@@ -41094,7 +41100,7 @@ _awr_enable() {
     # capturing the same database even if the profile's PGPORT later changes.
     # ★门控快照条目 (2026-10-11, user: 90 分钟就要真的 90 分钟): cron 分钟域表达
     #   不了 >60/不整除 60 的间隔; 改每分钟唤醒 + epoch 分钟模 interval 文件值 ——
-    #   任意 N(1-1440) 精确; interval 改动只写文件下一边界即生效, 与 crontab 解耦。
+    #   任意 N(10-1440) 精确; interval 改动只写文件下一边界即生效, 与 crontab 解耦。
     local entry="* * * * * /bin/bash -lc 'PGPORT=$port $self awr _gated-create >/dev/null 2>&1'  $marker"
     local rentry="* * * * * /bin/bash -lc 'PGPORT=$port $self awr _repl-sample >/dev/null 2>&1'  $rmarker"
     if ! ( crontab -l 2>/dev/null | grep -vE "# vb_tool_awr_repl_p${port}\$" | grep -vE "# vb_tool_awr_p${port}\$"; echo "$rentry"; echo "$entry" ) | crontab -; then
@@ -41512,7 +41518,7 @@ _awr_interval_read() {
 # awr config <retention|interval> <value>  -- modify awr settings:
 #   retention <days>  0 = keep forever (max 3650); purges already-expired
 #                     snaps/repl+slot logs/html reports immediately
-#   interval  <min>   1-1440, any value fires at EXACTLY that cadence (the
+#   interval  <min>   10-1440, any value fires at EXACTLY that cadence (the
 #                     snapshot entry wakes every minute and gates on this
 #                     value); takes effect at the next boundary, no crontab
 #                     rewrite needed
@@ -41580,6 +41586,7 @@ _awr_config() {
                 1) echo "Error: crontab rewrite failed -- interval file says ${val}min but the OLD crontab cadence may persist; re-run 'awr config interval <min>' or inspect crontab -l" >&2
                    return 1 ;;
                 3) : ;;   # not enabled: nothing to rewrite, stay silent
+                *) echo "Error: unexpected crontab helper rc=$?" >&2; return 1;;
             esac
             return 0
             ;;
