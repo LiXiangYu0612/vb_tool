@@ -32663,12 +32663,22 @@ def _numa_stat_delta(numa_a, numa_b, nid, key):
         return None
     return sb[key] - sa.get(key, sb[key])
 
-def numa_html_table(topology, stats_delta_factory):
+def numa_html_table(topology, stats_delta_factory, placement=None):
     """Emit the NUMA table(s) shared by awrrpt/awrdiff.
     topology: parse_numa() result (static info; any snap's copy works).
-    stats_delta_factory(nid, key) -> value or None (window delta; None = unavailable)."""
+    stats_delta_factory(nid, key) -> value or None (window delta; None = unavailable).
+    placement: optional parse_db_numa_maps() result -- the postmaster's
+    faulted pages per node merged INTO the numastat rows as DB Pages / DB
+    Share columns (user 2026-10-31: per-node data belongs in the per-node
+    table, not a separate one)."""
     parts = []
     nodes = topology.get("nodes", {})
+    _pl = {}
+    _pltot = 0.0
+    if placement:
+        for _k, _v in placement.get("nodes", {}).items():
+            _pl[_k[1:] if _k.startswith("N") else _k] = _v
+        _pltot = placement.get("total", 0.0)
     parts.append('<table class="t"><tr><th>NUMA Nodes</th><th class="n">%d</th></tr></table>'
                  % len(nodes))
     parts.append('<table class="t"><tr><th>Node</th><th>CPU List</th><th class="n">MemTotal</th>'
@@ -32683,7 +32693,9 @@ def numa_html_table(topology, stats_delta_factory):
     parts.append('</table>')
     parts.append('<table class="t"><tr><th>Node</th><th class="n">Numa Hit</th><th class="n">Numa Miss</th>'
                  '<th class="n">Interleave Hit</th><th class="n">Local Node</th><th class="n">Other Node</th>'
-                 '<th class="n">Local Ratio</th></tr>')
+                 '<th class="n">Local Ratio</th>'
+                 + ('<th class="n">DB Pages</th><th class="n">DB Share</th>' if placement else '')
+                 + '</tr>')
     any_stat = False
     for nid in sorted(nodes, key=lambda x: int(x) if x.isdigit() else 0):
         hit = stats_delta_factory(nid, "numa_hit")
@@ -32698,14 +32710,18 @@ def numa_html_table(topology, stats_delta_factory):
         ratio = "%.2f%%" % ((loc or 0) / _loc_den * 100.0) if _loc_den > 0 else "n/a"
         parts.append('<tr><td>%s</td><td class="n">%s</td><td class="n">%s</td>'
                      '<td class="n">%s</td><td class="n">%s</td><td class="n">%s</td>'
-                     '<td class="n">%s</td></tr>' % (
+                     '<td class="n">%s</td>%s</tr>' % (
                          esc(nid),
                          fmt_int(hit) if hit is not None else "?",
                          fmt_int(miss) if miss is not None else "?",
                          fmt_int(ih) if ih is not None else "?",
                          fmt_int(loc) if loc is not None else "?",
                          fmt_int(oth) if oth is not None else "?",
-                         ratio))
+                         ratio,
+                         (('<td class="n">%s</td><td class="n">%s</td>'
+                            % (fmt_int(_pl[nid]) if nid in _pl else "-",
+                               '%.1f%%' % (100.0 * _pl[nid] / _pltot) if nid in _pl and _pltot > 0 else "-"))
+                          if placement else '')))
     if not any_stat:
         parts.append('<tr><td colspan="7" class="note">no data</td></tr>')
     parts.append('</table>')
@@ -34362,9 +34378,14 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     if _ntop:
         _nbeg = parse_numa(win["os"].get(("begin", "numa"), ""))
         _nend = parse_numa(win["os"].get(("end", "numa"), ""))
+        # postmaster faulted pages per node (2026-10-31): merged INTO the
+        # numastat table as DB Pages/DB Share columns; only the per-VMA top
+        # mappings render as their own table below
+        _dnm = parse_db_numa_maps(win["os"].get(("end", "db_numa_maps"), ""))
         sub("NUMA")
         parts.append(numa_html_table(_ntop,
-                     lambda nid, key: _numa_stat_delta(_nbeg, _nend, nid, key)))
+                     lambda nid, key: _numa_stat_delta(_nbeg, _nend, nid, key),
+                     placement=(_dnm if _dnm and _dnm["total"] > 0 else None)))
         # kernel auto-NUMA balancing activity (2026-10-31): the numa_* family
         # from the ALREADY-collected /proc/vmstat, window delta -- fault-scan
         # and migration churn; counters absent (feature off / kernel without
@@ -34382,33 +34403,23 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                              % (esc(k), fmt_int(max(0.0, _ve2[k] - _vb2.get(k, _ve2[k])))))
             h.append('</table>')
             parts.append(''.join(h))
-        # DB memory placement (2026-10-31): the postmaster's faulted pages
-        # per node -- WHERE the instance's memory actually landed, the
-        # question topology + numastat alone cannot answer
-        _dnm = parse_db_numa_maps(win["os"].get(("end", "db_numa_maps"), ""))
+        # DB memory placement, per-VMA part (2026-10-31): top mappings by
+        # faulted pages -- desc keeps file path + flags + kernelpagesize_kB,
+        # per-node counters were stripped at collect time (the per-node
+        # aggregate lives in the numastat table above)
         if _dnm and _dnm["total"] > 0:
-            _nn = sorted(_dnm["nodes"].items(), key=lambda kv: -kv[1])
-            h = ['<h3 class="sub">DB Memory Placement (postmaster faulted pages)</h3>',
-                 '<table class="t"><tr><th>Node</th><th class="n">Pages</th>'
-                 '<th class="n">Share</th></tr>']
-            for n, v in _nn:
-                h.append('<tr><td>%s</td><td class="n">%s</td><td class="n">%.1f%%</td></tr>'
-                         % (esc(n[1:] if n.startswith("N") else n), fmt_int(v),
-                            100.0 * v / _dnm["total"]))
-            if _dnm["unfaulted"]:
-                h.append('<tr><td>unfaulted VMAs</td><td class="n">%d</td>'
-                         '<td class="n">-</td></tr>' % _dnm["unfaulted"])
-            h.append('</table>')
-            # top mappings by faulted pages (desc keeps file path + flags +
-            # kernelpagesize_kB, per-node counters stripped at collect time)
-            h2 = ['<table class="t"><tr><th class="n">Pages</th><th>Mapping</th></tr>']
+            h2 = ['<h3 class="sub">DB Memory Placement (top mappings, faulted pages)</h3>',
+                  '<table class="t"><tr><th class="n">Pages</th><th>Mapping</th></tr>']
             for pv, desc in _dnm["maps"][:8]:
                 if pv <= 0:
                     continue
                 h2.append('<tr><td class="n">%s</td><td>%s</td></tr>'
                           % (fmt_int(pv), esc(trunc(desc, 72))))
+            if _dnm["unfaulted"]:
+                h2.append('<tr><td class="n">-</td><td>unfaulted VMAs: %d '
+                          '(mapped, never touched)</td></tr>' % _dnm["unfaulted"])
             h2.append('</table>')
-            parts.append(''.join(h) + ''.join(h2))
+            parts.append(''.join(h2))
     sub("System Activity")
     _th = ['<th class="n">Context Switches per Sec</th>', '<th class="n">Interrupts per Sec</th>']
     _td = ['<td class="n">%.0f</td>' % osd.get("ctxt_per_sec", 0),
