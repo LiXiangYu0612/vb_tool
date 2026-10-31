@@ -29307,6 +29307,15 @@ _awr_collect() {
     # Activity's File Handles is process-scoped since 2026-10-30 (postmaster
     # fd count vs its /proc/<pid>/limits Max open files).
     if [ -r /proc/sys/fs/file-nr ]; then cp /proc/sys/fs/file-nr "$osd/file_nr" 2>/dev/null; fi
+    # irq -> node (2026-10-31): /proc/irq/N/node IS world-readable (unlike
+    # the affinity masks) -- which node each IRQ is steered to; the renderer
+    # adds a Node column to the IRQ legend. -1 = no node binding.
+    : > "$osd/irq_node" 2>/dev/null
+    for _iq in /proc/irq/[0-9]*; do
+        [ -d "$_iq" ] || continue
+        _iv=$(cat "$_iq/node" 2>/dev/null) || continue
+        [ -n "$_iv" ] && echo "${_iq##*/}|$_iv" >> "$osd/irq_node" 2>/dev/null
+    done
     # db_proc: identity of THIS instance's postmaster. The awr context
     # already guarantees the right port ($PGPORT: -P export / cron pin; the
     # storage root awrs/<port>/ and every \copy above use it) -- so map
@@ -29330,6 +29339,32 @@ _awr_collect() {
     # "user <name>" for context; the rest is the proc file verbatim.
     if [ -n "$_dpid" ] && [ -r "/proc/$_dpid/limits" ]; then
         { echo "user $(id -un 2>/dev/null)"; cat "/proc/$_dpid/limits"; } > "$osd/limits" 2>/dev/null
+    fi
+    # db_numa_maps (2026-10-31): the POSTMASTER's numa_maps aggregated per
+    # node -- WHERE the DB's memory actually faulted. numactl not required:
+    # numa_maps is owner-readable and the awr user owns the DB processes.
+    # Output: "pages|<faulted-total>|N0=<n>|N1=<n>|...|unfaulted=<vmas with
+    # no per-node counts yet>" + top mappings by faulted pages
+    # "map|<pages>|<desc (flags minus the per-node counters)>" (counts are
+    # PAGES; kernelpagesize_kB inside desc says which page size).
+    if [ -n "$_dpid" ] && [ -r "/proc/$_dpid/numa_maps" ]; then
+        timeout -k 2 10 awk '{
+                tot = 0
+                for (i = 1; i <= NF; i++)
+                    if ($i ~ /^N[0-9]+=[0-9]+$/) { split($i, a, "="); tot += a[2]; ncnt[a[1]] += a[2] }
+                if ($0 !~ / N[0-9]+=/) unf++
+                gtot += tot
+                desc = $0
+                gsub(/ N[0-9]+=[0-9]+/, "", desc)
+                printf "map|%d|%s\n", tot, substr(desc, 1, 90)
+            }
+            END {
+                line = "pages|" gtot
+                for (n in ncnt) line = line "|" n "=" ncnt[n]
+                print line "|unfaulted=" (unf + 0)
+            }' "/proc/$_dpid/numa_maps" 2>/dev/null \
+            | sort -t'|' -k1,1r -k2,2rn > "$osd/db_numa_maps" 2>/dev/null
+        [ -s "$osd/db_numa_maps" ] || rm -f "$osd/db_numa_maps"
     fi
     # open fd classification: SAME postmaster, SAME instant as status/limits
     # above. VB is single-process multi-thread -- every backend's fd lives on
@@ -30480,7 +30515,7 @@ def load_window(d):
         except Exception:
             w["meta"] = {}
     for phase in ("begin", "end"):
-        for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi", "softnet_stat", "buddyinfo", "bonding", "net_rtt", "df_fs", "file_nr", "db_proc", "limits", "db_fd_types", "db_tcp_states", "sysctl", "dmesg", "irq_affinity"):
+        for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi", "softnet_stat", "buddyinfo", "bonding", "net_rtt", "df_fs", "file_nr", "db_proc", "limits", "db_fd_types", "db_tcp_states", "sysctl", "dmesg", "irq_affinity", "irq_node", "db_numa_maps"):
             p = os.path.join(d, "os", phase, f)
             w["os"][(phase, f)] = _read_os_text(p) if os.path.isfile(p) else ""
         for t in ("statement", "statement_mem", "wait_events", "instance_time", "database", "pagewriter",
@@ -30511,7 +30546,7 @@ def load_snap(d, tables=None):
             s["meta"] = json.load(open(mp))
         except Exception:
             s["meta"] = {}
-    for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi", "softnet_stat", "buddyinfo", "bonding", "net_rtt", "df_fs", "file_nr", "db_proc", "limits", "db_fd_types", "db_tcp_states", "sysctl", "dmesg", "irq_affinity"):
+    for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi", "softnet_stat", "buddyinfo", "bonding", "net_rtt", "df_fs", "file_nr", "db_proc", "limits", "db_fd_types", "db_tcp_states", "sysctl", "dmesg", "irq_affinity", "irq_node", "db_numa_maps"):
         p = os.path.join(d, "os", f)
         s["os"][f] = _read_os_text(p) if os.path.isfile(p) else ""
     _DB_TABLES = ("statement", "statement_mem", "wait_events", "instance_time", "database", "pagewriter",
@@ -30614,7 +30649,7 @@ def build_window_from_snaps(begin_dir, end_dir, sqltext_root=None, load_sqltext=
     b = load_snap(begin_dir, db_tables)
     e = load_snap(end_dir, db_tables)
     win = {"meta": {}, "os": {}, "db": {}}
-    for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi", "softnet_stat", "buddyinfo", "bonding", "net_rtt", "df_fs", "file_nr", "db_proc", "limits", "db_fd_types", "db_tcp_states", "sysctl", "dmesg", "irq_affinity"):
+    for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi", "softnet_stat", "buddyinfo", "bonding", "net_rtt", "df_fs", "file_nr", "db_proc", "limits", "db_fd_types", "db_tcp_states", "sysctl", "dmesg", "irq_affinity", "irq_node", "db_numa_maps"):
         win["os"][("begin", f)] = b["os"].get(f, "")
         win["os"][("end", f)] = e["os"].get(f, "")
     for t in ("statement", "statement_mem", "wait_events", "instance_time", "database", "pagewriter",
@@ -32676,6 +32711,55 @@ def numa_html_table(topology, stats_delta_factory):
     parts.append('</table>')
     return "".join(parts)
 
+def _vmstat_keys(txt, keys):
+    """Pull raw /proc/vmstat counters by name -- the kernel auto-NUMA
+    balancing family (numa_hint_faults etc.) is not in proc_vmstat's
+    curated key set, so grab named counters straight from the snapshot."""
+    out = {}
+    want = set(keys)
+    for line in (txt or "").splitlines():
+        f = line.split()
+        if len(f) >= 2 and f[0] in want:
+            try:
+                out[f[0]] = to_num(f[1])
+            except Exception:
+                pass
+    return out
+
+def parse_db_numa_maps(txt):
+    """Parse the db_numa_maps snapshot (format in _awr_collect): a
+    "pages|<total>|N0=<n>|...|unfaulted=<n>" aggregate line plus
+    "map|<pages>|<desc>" rows. {"total","nodes","unfaulted","maps"} or {}
+    when the file is absent (pre-2026-10-31 snaps degrade silently)."""
+    out = {"total": 0.0, "nodes": {}, "unfaulted": 0, "maps": []}
+    seen = False
+    for line in (txt or "").splitlines():
+        f = line.split("|")
+        if f[0] == "pages" and len(f) >= 2:
+            seen = True
+            try:
+                out["total"] = to_num(f[1])
+            except Exception:
+                pass
+            for part in f[2:]:
+                if "=" not in part:
+                    continue
+                k, v = part.split("=", 1)
+                try:
+                    if k == "unfaulted":
+                        out["unfaulted"] = int(to_num(v))
+                    else:
+                        out["nodes"][k] = to_num(v)
+                except Exception:
+                    pass
+        elif f[0] == "map" and len(f) >= 3:
+            seen = True
+            try:
+                out["maps"].append((to_num(f[1]), "|".join(f[2:])))
+            except Exception:
+                pass
+    return out if seen else {}
+
 def proc_stat_extras(txt):
     """context switches (ctxt), total interrupts (intr first col), procs_running,
     cumulative forks (processes)."""
@@ -34281,6 +34365,50 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         sub("NUMA")
         parts.append(numa_html_table(_ntop,
                      lambda nid, key: _numa_stat_delta(_nbeg, _nend, nid, key)))
+        # kernel auto-NUMA balancing activity (2026-10-31): the numa_* family
+        # from the ALREADY-collected /proc/vmstat, window delta -- fault-scan
+        # and migration churn; counters absent (feature off / kernel without
+        # balancing) or SINGLE-NODE box (nothing to balance -- 204 is one,
+        # counters sit at 0 forever) -> no table at all
+        _nk = ("numa_hint_faults", "numa_hint_faults_local", "numa_pages_migrated")
+        _vb2 = _vmstat_keys(win["os"].get(("begin", "vmstat"), ""), _nk)
+        _ve2 = _vmstat_keys(win["os"].get(("end", "vmstat"), ""), _nk)
+        if len(_ntop.get("nodes", {})) > 1 and any(k in _ve2 for k in _nk):
+            h = ['<h3 class="sub">Auto NUMA Balancing</h3>',
+                 '<table class="t"><tr><th>Metric</th><th class="n">Delta</th></tr>']
+            for k in _nk:
+                if k in _ve2:
+                    h.append('<tr><td>%s</td><td class="n">%s</td></tr>'
+                             % (esc(k), fmt_int(max(0.0, _ve2[k] - _vb2.get(k, _ve2[k])))))
+            h.append('</table>')
+            parts.append(''.join(h))
+        # DB memory placement (2026-10-31): the postmaster's faulted pages
+        # per node -- WHERE the instance's memory actually landed, the
+        # question topology + numastat alone cannot answer
+        _dnm = parse_db_numa_maps(win["os"].get(("end", "db_numa_maps"), ""))
+        if _dnm and _dnm["total"] > 0:
+            _nn = sorted(_dnm["nodes"].items(), key=lambda kv: -kv[1])
+            h = ['<h3 class="sub">DB Memory Placement (postmaster faulted pages)</h3>',
+                 '<table class="t"><tr><th>Node</th><th class="n">Pages</th>'
+                 '<th class="n">Share</th></tr>']
+            for n, v in _nn:
+                h.append('<tr><td>%s</td><td class="n">%s</td><td class="n">%.1f%%</td></tr>'
+                         % (esc(n[1:] if n.startswith("N") else n), fmt_int(v),
+                            100.0 * v / _dnm["total"]))
+            if _dnm["unfaulted"]:
+                h.append('<tr><td>unfaulted VMAs</td><td class="n">%d</td>'
+                         '<td class="n">-</td></tr>' % _dnm["unfaulted"])
+            h.append('</table>')
+            # top mappings by faulted pages (desc keeps file path + flags +
+            # kernelpagesize_kB, per-node counters stripped at collect time)
+            h2 = ['<table class="t"><tr><th class="n">Pages</th><th>Mapping</th></tr>']
+            for pv, desc in _dnm["maps"][:8]:
+                if pv <= 0:
+                    continue
+                h2.append('<tr><td class="n">%s</td><td>%s</td></tr>'
+                          % (fmt_int(pv), esc(trunc(desc, 72))))
+            h2.append('</table>')
+            parts.append(''.join(h) + ''.join(h2))
     sub("System Activity")
     _th = ['<th class="n">Context Switches per Sec</th>', '<th class="n">Interrupts per Sec</th>']
     _td = ['<td class="n">%.0f</td>' % osd.get("ctxt_per_sec", 0),
@@ -34515,13 +34643,23 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         # hardcoded name classification), total. Matrix headers below carry
         # ONLY the IRQ number. No affinity column (root-only unreadable under
         # the DB user); the distribution matrix itself shows where the kernel
-        # actually delivers.
+        # actually delivers. Node column (2026-10-31, NUMA cross-check):
+        # /proc/irq/N/node is world-readable and says which node the IRQ is
+        # steered to (-1 = no binding) -- mismatch vs the DB Memory Placement
+        # node is the cross-node story.
+        _inode = {}
+        for _ln in win["os"].get(("end", "irq_node"), "").splitlines():
+            _f = _ln.split("|")
+            if len(_f) == 2:
+                _inode[_f[0]] = _f[1]
         h = ['<h3 class="sub">IRQ</h3>',
              '<table class="t"><tr><th class="n">IRQ</th><th>Device</th>'
-             '<th class="n">Delta</th></tr>']
+             '<th class="n">Delta</th>'
+             + ('<th class="n">Node</th>' if _inode else '') + '</tr>']
         for k, dv, vec in _idelta:
-            h.append('<tr><td class="n">%s</td><td>%s</td><td class="n">%s</td></tr>'
-                     % (esc(k), esc(trunc(dv, 44)), _km(sum(vec))))
+            h.append('<tr><td class="n">%s</td><td>%s</td><td class="n">%s</td>%s</tr>'
+                     % (esc(k), esc(trunc(dv, 44)), _km(sum(vec)),
+                        ('<td class="n">%s</td>' % esc(_inode.get(k, "-"))) if _inode else ''))
         h.append('</table>')
         parts.append(''.join(h))
         _hdr = ['<th>CPU</th>']
