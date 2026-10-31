@@ -33742,7 +33742,10 @@ def render(awr_dir, current_dir, metric, top_n, out_html):
 
     # --- Softirqs ---
     parts.append("<h3 class='sub'>Softirqs (window delta, summed across CPUs)</h3>")
-    bsf = bos.get("softirqs", {}); csf = cos.get("softirqs", {})
+    # values became per-CPU lists on 2026-10-30; this table stays summed --
+    # sum() takes the old ints too, so both snap generations render
+    bsf = {k: sum(v) for k, v in bos.get("softirqs", {}).items()}
+    csf = {k: sum(v) for k, v in cos.get("softirqs", {}).items()}
     cats = sorted(set(bsf) | set(csf), key=lambda k: abs(csf.get(k, 0.0)), reverse=True)
     parts.append("<table><tr><th>Category</th><th class='num'>awr</th>"
                  "<th class='num'>current</th><th class='num'>Delta</th></tr>")
@@ -33982,7 +33985,8 @@ def render_single(window_dir, metric, top_n, out_html):
     parts.append("</table>")
 
     parts.append("<h3 class='sub'>Softirqs (window delta, summed across CPUs)</h3>")
-    sf = osd.get("softirqs", {})
+    # per-CPU lists since 2026-10-30 -- sum() back to this table's semantics
+    sf = {k: sum(v) for k, v in osd.get("softirqs", {}).items()}
     cats = sorted(sf.keys(), key=lambda k: abs(sf[k]), reverse=True)
     parts.append("<table><tr><th>Category</th><th class='num'>count</th></tr>")
     if not cats:
