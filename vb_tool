@@ -35502,77 +35502,6 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             parts.append('<tr><td>Cpuset</td><td class="n">%s</td><td class="n">%s</td>'
                          '<td class="n">-</td></tr>'
                          % (esc(_csb_ or "-"), esc(_cse_ or "-")))
-        # cgroup envelope (2026-10-31): CPU quota / memory limit / cpuset
-        # mems of the SAME postmaster -- "unlimited" is written explicitly
-        # (a confirmed absence, not a blank); group name from the hierarchy
-        # path (e.g. Gaussdb:vastbase)
-        _cgb = parse_db_cgroup(win["os"].get(("begin", "db_cgroup"), ""))
-        _cge = parse_db_cgroup(win["os"].get(("end", "db_cgroup"), ""))
-        _cgdetail = None
-        if _cge:
-            _grp = _cge["paths"].get("cpu") or ""
-            _q = _cge["kv"].get("cpu.quota")
-            _p = to_num(_cge["kv"].get("cpu.period", 100000)) or 100000
-            _qtxt = "unlimited"
-            if _q is not None and to_num(_q) and to_num(_q) > 0:
-                _qtxt = "%.2f cores" % (to_num(_q) / (_p or 1))
-            elif _cge["kv"].get("cpu.max") and _cge["kv"]["cpu.max"].split()[0] not in ("max", "unlimited"):
-                _qtxt = "%.2f cores" % (to_num(_cge["kv"]["cpu.max"].split()[0])
-                                        / (to_num(_cge["kv"]["cpu.max"].split()[1]) or 100000))
-            parts.append('<tr><td>CPU Cgroup Quota%s</td><td class="n">%s</td>'
-                         '<td class="n">%s</td><td class="n">-</td></tr>'
-                         % ((' (' + esc(_grp) + ')') if _grp else '', esc(_qtxt), esc(_qtxt)))
-            _ml = _cge["kv"].get("memory.limit")
-            _mtxt = "unlimited"
-            if _ml is not None and 0 < to_num(_ml) < 9e18:
-                _mtxt = fmt_bytes(to_num(_ml))
-            _mu = _cge["kv"].get("memory.usage")
-            parts.append('<tr><td>Memory Cgroup%s</td><td class="n">%s%s</td>'
-                         '<td class="n">%s%s</td><td class="n">-</td></tr>'
-                         % ((' (' + esc(_cge["paths"].get("memory") or "") + ')') if _cge["paths"].get("memory") else '',
-                            esc(_mtxt),
-                            (' / ' + fmt_bytes(to_num(_mu))) if _mu is not None and to_num(_mu) else '',
-                            esc(_mtxt),
-                            (' / ' + fmt_bytes(to_num(_mu))) if _mu is not None and to_num(_mu) else ''))
-            _cm = _cge["kv"].get("cpuset.mems")
-            if _cm is not None:
-                parts.append('<tr><td>Cpuset Mems (NUMA nodes)</td><td class="n">%s</td>'
-                             '<td class="n">%s</td><td class="n">-</td></tr>'
-                             % (esc(_cm), esc(_cm)))
-            # full inventory folded: config rows static, cumulative counters
-            # (cpuacct.usage / throttle / failcnt / pids) as window deltas
-            _CFG = ("cpu.quota", "cpu.period", "cpu.max", "memory.limit", "memsw.limit",
-                    "pids.max", "cpuset.cpus", "cpuset.effective", "cpuset.mems")
-            _CUM = ("cpuacct.usage", "memory.usage", "pids.current", "memory.failcnt")
-            h = ['<h3 class="sub">Cgroup</h3>',
-                 '<table class="t"><tr><th>Metric</th><th class="n">Begin</th>'
-                 '<th class="n">End</th><th class="n">Delta</th></tr>']
-            for k in _CFG:
-                if k in _cge.get("kv", {}) or k in _cgb.get("kv", {}):
-                    v = _cge.get("kv", {}).get(k) or _cgb.get("kv", {}).get(k) or "-"
-                    h.append('<tr><td>%s</td><td class="n">%s</td><td class="n">%s</td>'
-                             '<td class="n">-</td></tr>' % (esc(k), esc(trunc(str(v), 40)), esc(trunc(str(v), 40))))
-            for k in _CUM:
-                vb_, ve_ = _cgb.get("kv", {}).get(k), _cge.get("kv", {}).get(k)
-                if vb_ is None and ve_ is None:
-                    continue
-                fb = fmt_int(to_num(vb_)) if vb_ is not None else "-"
-                fe = fmt_int(to_num(ve_)) if ve_ is not None else "-"
-                fd = ("%+s" % fmt_int(max(0, to_num(ve_) - to_num(vb_)))) \
-                    if (vb_ is not None and ve_ is not None) else "-"
-                h.append('<tr><td>%s</td><td class="n">%s</td><td class="n">%s</td>'
-                         '<td class="n">%s</td></tr>' % (esc(k), fb, fe, fd))
-            for k in ("cpu.stat", "io.service", "io.throttle.r", "io.throttle.w",
-                      "hugetlb.2MB.limit", "hugetlb.2MB.usage"):
-                ve_ = _cge["kv"].get(k)
-                if ve_:
-                    h.append('<tr><td>%s</td><td colspan="3" class="n">%s</td></tr>'
-                             % (esc(k), esc(trunc(str(ve_), 90))))
-            h.append('</table>')
-            # NOT appended here: this block runs mid-table (more rows follow)
-            # -- a <details> between <tr>s breaks the whole table apart;
-            # stashed and emitted after the DB Process table closes below
-            _cgdetail = _fold('Cgroup Detail', ''.join(h))
         _nvb, _nve = _dbnvc("begin"), _dbnvc("end")
         if _nvb is not None or _nve is not None:
             _bv = fmt_int(_nvb[0]) if _nvb is not None else "-"
@@ -35772,15 +35701,59 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                          '<td class="n"><b>%d</b></td><td class="n"><b>%+d</b></td></tr>'
                          % (_tb, _te, _te - _tb))
         parts.append('</table>')
-        # cgroup detail fold AFTER the table (mid-table <details> would tear
-        # the rows apart, 2026-10-31 format bug caught by user)
-        if _cgdetail:
-            parts.append(_cgdetail)
         # per-minute detail (user 2026-10-30): the former standalone TCP
         # Sockets section now lives here, folded by default exactly like CPU
         # utilization's per-minute detail, and carries the dbfd columns --
         # see dbproc_minute_table.
         parts.append(_fold("Per-minute detail", dbproc_minute_table(os_smp, m.get("begin_ts", ""))))
+    # Cgroup chapter (user 2026-10-31): standalone, right under DB Process,
+    # ONE plain table -- config rows static (Begin==End), cumulative counters
+    # (cpuacct.usage / usage / failcnt / pids.current) as window deltas;
+    # "unlimited"/"max" written explicitly (confirmed absence, not blank)
+    _cgb2 = parse_db_cgroup(win["os"].get(("begin", "db_cgroup"), ""))
+    _cge2 = parse_db_cgroup(win["os"].get(("end", "db_cgroup"), ""))
+    if _cge2 or _cgb2:
+        sub("Cgroup")
+        _grp = (_cge2 or _cgb2).get("paths", {}).get("cpu") or ""
+        h = ['<table class="t"><tr><th>Metric%s</th><th class="n">Begin</th>'
+             '<th class="n">End</th><th class="n">Delta</th></tr>'
+             % (('&nbsp;(' + esc(_grp) + ')') if _grp else '')]
+        _CFGQ = ("cpu.quota", "cpu.period", "cpu.max",
+                 "memory.limit", "memsw.limit", "pids.max",
+                 "cpuset.cpus", "cpuset.effective", "cpuset.mems")
+        _CUMQ = ("cpuacct.usage", "memory.usage", "memory.failcnt", "pids.current")
+        for k in _CFGQ:
+            vb_ = _cgb2.get("kv", {}).get(k)
+            ve_ = _cge2.get("kv", {}).get(k)
+            if vb_ is None and ve_ is None:
+                continue
+            v = ve_ if ve_ is not None else vb_
+            v = str(v)
+            if k in ("cpu.quota", "cpu.max") and v.split()[0] in ("-1", "max"):
+                v = "unlimited"
+            if k.endswith("limit") and to_num(v) >= 9e18:
+                v = "unlimited"
+            h.append('<tr><td>%s</td><td class="n">%s</td><td class="n">%s</td>'
+                     '<td class="n">-</td></tr>' % (esc(k), esc(trunc(v, 40)), esc(trunc(v, 40))))
+        for k in _CUMQ:
+            vb_ = _cgb2.get("kv", {}).get(k)
+            ve_ = _cge2.get("kv", {}).get(k)
+            if vb_ is None and ve_ is None:
+                continue
+            fb = fmt_int(to_num(vb_)) if vb_ is not None else "-"
+            fe = fmt_int(to_num(ve_)) if ve_ is not None else "-"
+            fd = ("%+s" % fmt_int(max(0, to_num(ve_) - to_num(vb_)))) \
+                if (vb_ is not None and ve_ is not None) else "-"
+            h.append('<tr><td>%s</td><td class="n">%s</td><td class="n">%s</td>'
+                     '<td class="n">%s</td></tr>' % (esc(k), fb, fe, fd))
+        for k in ("cpu.stat", "io.service", "io.throttle.r", "io.throttle.w",
+                  "hugetlb.2MB.limit", "hugetlb.2MB.usage"):
+            ve_ = (_cge2 or {}).get("kv", {}).get(k)
+            if ve_:
+                h.append('<tr><td>%s</td><td colspan="3" class="n">%s</td></tr>'
+                         % (esc(k), esc(trunc(str(ve_), 90))))
+        h.append('</table>')
+        parts.append(''.join(h))
     sub("OS Memory Usage")
     _bm = parse_meminfo(win["os"].get(("begin", "meminfo"), ""))
     _em = parse_meminfo(win["os"].get(("end", "meminfo"), ""))
