@@ -29804,6 +29804,13 @@ EOF
 # the CURRENT port points at (from $PGPORT, or -P which exports it), so several
 # instances can run awr side by side without sharing snap_ids, config or logs.
 # Migrates the pre-multi-instance flat layout once, under a lock.
+# _awr_port_lockfile -- per-port advisory lock OUTSIDE any datadir (it must
+# survive its own migration). CREATION/SAMPLING take a SHARED lock (they can
+# run concurrently with each other); DATADIR MIGRATION takes EXCLUSIVE --
+# closing the race where a cron create fires in the migration gap, recreates
+# the OLD root and scatters data across roots (2026-11-01 incident on 204:
+# snap history reset by repeated suite migrations racing the sampler).
+_awr_port_lockfile() { echo "${VB_TOOL_HOME:-$HOME/.vb_tool}/awr_port_${PGPORT:-5432}.lock"; }
 # _awr_datadir_* -- per-PORT data root overrides (user 2026-10-31, layout
 # "A"): the override dir plays the $HOME role, everything under it keeps the
 # exact default shape <dir>/.vb_tool/awrs/<port>/... The override table lives
@@ -29845,6 +29852,15 @@ _awr_default_base() {   # per-port root the resolver uses with NO override
 }
 _awr_datadir_migrate() {
     local newhome="$1" port="${PGPORT:-5432}"
+    # EXCLUSIVE port lock: no snapshot/sampler may resolve-and-write while
+    # the root moves underneath them (they wait, then resolve to the NEW root)
+    local _plock; _plock=$(_awr_port_lockfile)
+    mkdir -p "$(dirname "$_plock")" 2>/dev/null
+    exec 8>"$_plock"
+    if ! flock -w 30 -x 8; then
+        echo "Error: cannot acquire the port lock ($_plock) -- a snapshot or sampler is mid-run; retry shortly" >&2
+        return 1
+    fi
     [ "$newhome" = "default" ] && newhome=""
     if [ -n "$newhome" ]; then
         case "$newhome" in
@@ -30028,7 +30044,7 @@ _awr_collect() {
             # L-6 (round-4): a killed cp leaves a HALF file whose numbers look
             # plausible -- remove it so the renderer degrades instead of lying
             timeout -k 2 10 cp "/proc/$f" "$osd/$f" 2>/dev/null \
-                || { rm -f "$osd/$f"; echo "  [WARN] /proc/$f copy timed out or failed (removed partial)" >&2; }
+                || { mv -f "$osd/$f" "$osd/$f.partial" 2>/dev/null; echo "  [WARN] /proc/$f copy timed out or failed (partial kept as $f.partial)" >&2; }
         else
             echo "  [WARN] /proc/$f not readable" >&2
         fi
@@ -30048,14 +30064,14 @@ _awr_collect() {
             echo "irqbalance|inactive|-"
         fi
     } > "$osd/irq_affinity" 2>/dev/null
-    if [ -r /proc/net/dev ]; then timeout -k 2 10 cp /proc/net/dev "$osd/net_dev" 2>/dev/null || { rm -f "$osd/net_dev"; echo "  [WARN] /proc/net/dev copy timed out or failed (removed partial)" >&2; }
+    if [ -r /proc/net/dev ]; then timeout -k 2 10 cp /proc/net/dev "$osd/net_dev" 2>/dev/null || { mv -f "$osd/net_dev" "$osd/net_dev.partial" 2>/dev/null; echo "  [WARN] /proc/net/dev copy timed out or failed (partial kept as net_dev.partial)" >&2; }
     else echo "  [WARN] /proc/net/dev not readable" >&2; fi
-    if [ -r /proc/net/snmp ]; then timeout -k 2 10 cp /proc/net/snmp "$osd/net_snmp" 2>/dev/null || { rm -f "$osd/net_snmp"; echo "  [WARN] /proc/net/snmp copy timed out or failed (removed partial)" >&2; }; fi
-    if [ -r /proc/net/netstat ]; then timeout -k 2 10 cp /proc/net/netstat "$osd/net_netstat" 2>/dev/null || { rm -f "$osd/net_netstat"; echo "  [WARN] /proc/net/netstat copy timed out or failed (removed partial)" >&2; }; fi
-    if [ -r /proc/net/softnet_stat ]; then timeout -k 2 10 cp /proc/net/softnet_stat "$osd/softnet_stat" 2>/dev/null || { rm -f "$osd/softnet_stat"; echo "  [WARN] /proc/net/softnet_stat copy timed out or failed (removed partial)" >&2; }; fi
+    if [ -r /proc/net/snmp ]; then timeout -k 2 10 cp /proc/net/snmp "$osd/net_snmp" 2>/dev/null || { mv -f "$osd/net_snmp" "$osd/net_snmp.partial" 2>/dev/null; echo "  [WARN] /proc/net/snmp copy timed out or failed (partial kept as net_snmp.partial)" >&2; }; fi
+    if [ -r /proc/net/netstat ]; then timeout -k 2 10 cp /proc/net/netstat "$osd/net_netstat" 2>/dev/null || { mv -f "$osd/net_netstat" "$osd/net_netstat.partial" 2>/dev/null; echo "  [WARN] /proc/net/netstat copy timed out or failed (partial kept as net_netstat.partial)" >&2; }; fi
+    if [ -r /proc/net/softnet_stat ]; then timeout -k 2 10 cp /proc/net/softnet_stat "$osd/softnet_stat" 2>/dev/null || { mv -f "$osd/softnet_stat" "$osd/softnet_stat.partial" 2>/dev/null; echo "  [WARN] /proc/net/softnet_stat copy timed out or failed (partial kept as softnet_stat.partial)" >&2; }; fi
     # buddyinfo: free pages per zone per order -> snapshot-level fragmentation
     # (2MB+ contiguous availability), rendered as Begin/End in the report
-    if [ -r /proc/buddyinfo ]; then timeout -k 2 10 cp /proc/buddyinfo "$osd/buddyinfo" 2>/dev/null || { rm -f "$osd/buddyinfo"; echo "  [WARN] /proc/buddyinfo copy timed out or failed (removed partial)" >&2; }; fi
+    if [ -r /proc/buddyinfo ]; then timeout -k 2 10 cp /proc/buddyinfo "$osd/buddyinfo" 2>/dev/null || { mv -f "$osd/buddyinfo" "$osd/buddyinfo.partial" 2>/dev/null; echo "  [WARN] /proc/buddyinfo copy timed out or failed (partial kept as buddyinfo.partial)" >&2; }; fi
     # bond 三态 (mode / active slave / slave list); /proc/net/bonding absent = no bond
     if [ -d /proc/net/bonding ]; then
         : > "$osd/bonding" 2>/dev/null
@@ -30072,7 +30088,7 @@ _awr_collect() {
     # the snapshot for on-site OS-level checks; NOT rendered -- System
     # Activity's File Handles is process-scoped since 2026-10-30 (postmaster
     # fd count vs its /proc/<pid>/limits Max open files).
-    if [ -r /proc/sys/fs/file-nr ]; then timeout -k 2 10 cp /proc/sys/fs/file-nr "$osd/file_nr" 2>/dev/null || { rm -f "$osd/file_nr"; echo "  [WARN] /proc/sys/fs/file-nr copy timed out or failed (removed partial)" >&2; }; fi
+    if [ -r /proc/sys/fs/file-nr ]; then timeout -k 2 10 cp /proc/sys/fs/file-nr "$osd/file_nr" 2>/dev/null || { mv -f "$osd/file_nr" "$osd/file_nr.partial" 2>/dev/null; echo "  [WARN] /proc/sys/fs/file-nr copy timed out or failed (partial kept as file_nr.partial)" >&2; }; fi
     # irq -> node (2026-10-31): /proc/irq/N/node IS world-readable (unlike
     # the affinity masks) -- which node each IRQ is steered to; the renderer
     # adds a Node column to the IRQ legend. -1 = no node binding.
@@ -30139,7 +30155,7 @@ _awr_collect() {
                 print line "|unfaulted=" (unf + 0)
             }' "/proc/$_dpid/numa_maps" 2>/dev/null \
             | sort -t'|' -k1,1r -k2,2rn > "$osd/db_numa_maps" 2>/dev/null
-        [ -s "$osd/db_numa_maps" ] || rm -f "$osd/db_numa_maps"
+        [ -s "$osd/db_numa_maps" ] || :   # empty = no data this snap (kept; no rm per user rule 2026-11-01)
     fi
     # db_cgroup (2026-10-31): the postmaster's cgroup resource envelope --
     # CPU quota / actual usage / throttle counters, memory limit+usage+failcnt
@@ -30243,7 +30259,7 @@ _awr_collect() {
                 done
             fi
         } > "$osd/db_cgroup" 2>/dev/null
-        [ -s "$osd/db_cgroup" ] || rm -f "$osd/db_cgroup"
+        [ -s "$osd/db_cgroup" ] || :   # empty = no data this snap (kept; no rm per user rule 2026-11-01)
     fi
     # open fd classification: SAME postmaster, SAME instant as status/limits
     # above. VB is single-process multi-thread -- every backend's fd lives on
@@ -30508,8 +30524,8 @@ _awr_collect() {
     # IS the permission filter. Split at the FIRST " = " so values may
     # themselves contain " = ". "key|value" lines; renderer hides old snaps.
     if command -v sysctl >/dev/null 2>&1; then
-        LC_ALL=C timeout -k 2 10 sysctl -a 2>/dev/null | sed -E 's/^([^=]+) = (.*)$/\1|\2/' > "$osd/sysctl" || { rm -f "$osd/sysctl"; echo '  [WARN] sysctl -a timed out or failed (removed partial)' >&2; }
-        [ -s "$osd/sysctl" ] || rm -f "$osd/sysctl"
+        LC_ALL=C timeout -k 2 10 sysctl -a 2>/dev/null | sed -E 's/^([^=]+) = (.*)$/\1|\2/' > "$osd/sysctl" || { mv -f "$osd/sysctl" "$osd/sysctl.partial" 2>/dev/null; echo '  [WARN] sysctl -a timed out or failed (partial kept as sysctl.partial)' >&2; }
+        [ -s "$osd/sysctl" ] || :   # empty = no data this snap (kept; no rm per user rule 2026-11-01)
     fi
     # THP is a sysfs knob, not a sysctl: only whether it is on/off matters here
     # (user 2026-10-27), so map the effective value (bracketed one of
@@ -30578,7 +30594,7 @@ _awr_collect() {
     sscmd=$(command -v ss 2>/dev/null || echo /usr/sbin/ss)
     if [ -x "$sscmd" ]; then
         timeout -k 2 10 "$sscmd" -tin state established 2>/dev/null | head -c 524288 > "$osd/net_rtt"
-        [ -s "$osd/net_rtt" ] || rm -f "$osd/net_rtt"
+        [ -s "$osd/net_rtt" ] || :   # empty = no data this snap (kept; no rm per user rule 2026-11-01)
     fi
     # df_fs: filesystem inventory at snap time -- space (df -TPk, 1K blocks,
     # Available) and inodes (df -TPi) dumped raw into ONE file with an '@ino@'
@@ -30596,7 +30612,7 @@ _awr_collect() {
           printf '@ino@\n'
           timeout 10 stdbuf -oL df -TPi 2>/dev/null || _dfto=1
           [ -n "$_dfto" ] && printf '# df-timeout\n'; } > "$osd/df_fs"
-        [ -s "$osd/df_fs" ] || rm -f "$osd/df_fs"
+        [ -s "$osd/df_fs" ] || :   # empty = no data this snap (kept; no rm per user rule 2026-11-01)
     fi
     # ---- NUMA topology + numastat (per-node cumulative counters; renderer computes end-begin) ----
     # File format (one stanza per node, blank-line separated):
@@ -30621,7 +30637,7 @@ _awr_collect() {
     [ -s "$osd/numa" ] || echo "  [WARN] NUMA info unavailable (no /sys/devices/system/node or empty)" >&2
     # ---- block-device / NIC / DMI identity (END-snap state; renderer joins by name) ----
     # blockdev_meta: run_lsds --raw TSV (name|size|type|sched|rot|qdepth|nr_rq|wcache|model|vendor)
-    run_lsds --raw > "$osd/blockdev_meta" 2>/dev/null || rm -f "$osd/blockdev_meta"
+    run_lsds --raw > "$osd/blockdev_meta" 2>/dev/null || :   # empty = none (no rm per user rule)
     # netdev_meta: iface|speed|duplex|nrxq|ntxq|rx_max|rx_cur|tx_max|tx_cur  ('-' = unavailable)
     {
         for _if in $(ls /sys/class/net 2>/dev/null | grep -vE '^(lo|vir)'); do
@@ -40176,6 +40192,10 @@ _awr_lt_stack_sample() {
 #           bounded ~6 rows/min worst case)
 # Always returns 0 (cron-friendly; failures are data, not exit codes).
 _awr_repl_sample() {
+    local _plock; _plock=$(_awr_port_lockfile)
+    mkdir -p "$(dirname "$_plock")" 2>/dev/null
+    exec 8>"$_plock"
+    flock -n -s 8 || { return 0; }   # migration in progress: skip this minute
     local root; root=$(_awr_root)
     umask 077   # per-minute logs carry standby addrs/LSNs: 0600 like snapshots
     mkdir -p "$root" 2>/dev/null || return 0
@@ -40515,6 +40535,12 @@ _awr_db_up() {
 }
 
 _awr_snap() {
+    # SHARED port lock (migration holds the exclusive one while moving the
+    # root); -n: under a migrating root, skipping THIS minute is correct
+    local _plock; _plock=$(_awr_port_lockfile)
+    mkdir -p "$(dirname "$_plock")" 2>/dev/null
+    exec 8>"$_plock"
+    flock -n -s 8 || { echo "  [WARN] datadir migration in progress, snapshot skipped this round" >&2; return 0; }
     umask 077   # snapshots carry SQL literals: force 0700/0600 regardless of caller umask
     local root_override=""
     if [ "${1:-}" = "--root" ]; then root_override="${2:-}"; shift 2; fi
@@ -40550,19 +40576,19 @@ _awr_snap() {
         echo "Error: snap_$sid already exists -- refusing to overwrite (sequence corrupt? inspect $root/sequence)" >&2
         return 1
     fi
-    rm -rf "$dir" 2>/dev/null
+    mkdir -p "$(dirname "$dir")/.trash" 2>/dev/null; mv -f "$dir" "$(dirname "$dir")/.trash/$(basename "$dir").$$.failed" 2>/dev/null
     mkdir -p "$dir" 2>/dev/null || { echo "Error: cannot create $dir" >&2; return 1; }
     ts=$(date '+%F %T'); ts_ep=$(date +%s)
     echo "capturing snap $sid -> $dir"
     # collection failed midway (e.g. DB died during collection): discard the
     # in-flight dir -- a snap without db/ data would poison awr list/reports.
     if ! _awr_collect "$dir"; then
-        rm -rf "$dir" 2>/dev/null
+        mkdir -p "$(dirname "$dir")/.trash" 2>/dev/null; mv -f "$dir" "$(dirname "$dir")/.trash/$(basename "$dir").$$.failed" 2>/dev/null
         echo "  [WARN] snap $sid skipped, nothing kept (collection failed)" >&2
         return 1
     fi
     if ! _awr_write_meta "$dir" "$sid" "$ts" "$ts_ep"; then
-        rm -rf "$dir" 2>/dev/null
+        mkdir -p "$(dirname "$dir")/.trash" 2>/dev/null; mv -f "$dir" "$(dirname "$dir")/.trash/$(basename "$dir").$$.failed" 2>/dev/null
         echo "  [WARN] snap $sid skipped, nothing kept (meta write failed)" >&2
         return 1
     fi
@@ -40692,12 +40718,12 @@ _awr_baseline_begin() {
         [ "$n" -ge "$newid" ] && newid=$((n+1))
     done
     local broot="$root/baselines/$newid"
-    rm -rf "$broot"
+    { mkdir -p "$(dirname "$broot")/.trash" 2>/dev/null; mv -f "$broot" "$(dirname "$broot")/.trash/$(basename "$broot").$$.failed" 2>/dev/null; }
     mkdir -p "$broot" || { echo "Error: cannot create $broot" >&2; return 1; }
     # copy endpoints + covering logs; any failure drops the half-made dir
     local f day
     if ! cp -a "$bdir" "$edir" "$broot"/ 2>/dev/null; then
-        rm -rf "$broot"; echo "Error: copying snaps into $broot failed (disk full?)" >&2; return 1
+        { mkdir -p "$(dirname "$broot")/.trash" 2>/dev/null; mv -f "$broot" "$(dirname "$broot")/.trash/$(basename "$broot").$$.failed" 2>/dev/null; }; echo "Error: copying snaps into $broot failed (disk full?)" >&2; return 1
     fi
     # day set = natural days spanned by [begin_ts - 65s, end_ts] (the renderers
     # load window is [begin-65s, end]: the 65s pre-sample needs the prior day
@@ -40715,7 +40741,7 @@ while d <= t1.date():
 PYBL
 )
     if [ -z "$days" ]; then
-        rm -rf "$broot"; echo "Error: cannot read snap timestamps for the log day set" >&2; return 1
+        { mkdir -p "$(dirname "$broot")/.trash" 2>/dev/null; mv -f "$broot" "$(dirname "$broot")/.trash/$(basename "$broot").$$.failed" 2>/dev/null; }; echo "Error: cannot read snap timestamps for the log day set" >&2; return 1
     fi
     local _cpfail=0
     for day in $days; do
@@ -40730,7 +40756,7 @@ PYBL
         done
     done
     if [ "$_cpfail" -ne 0 ]; then
-        rm -rf "$broot"
+        { mkdir -p "$(dirname "$broot")/.trash" 2>/dev/null; mv -f "$broot" "$(dirname "$broot")/.trash/$(basename "$broot").$$.failed" 2>/dev/null; }
         echo "Error: baseline log copy failed (disk full / permission?) -- half-registered baseline removed" >&2
         return 1
     fi
@@ -40745,7 +40771,7 @@ json.dump({"baseline_id": int(newid), "begin_id": int(b), "end_id": int(e),
           open(broot + "/baseline.json", "w"), indent=2)
 PYBJ
     then
-        rm -rf "$broot"; echo "Error: writing baseline.json failed" >&2; return 1
+        { mkdir -p "$(dirname "$broot")/.trash" 2>/dev/null; mv -f "$broot" "$(dirname "$broot")/.trash/$(basename "$broot").$$.failed" 2>/dev/null; }; echo "Error: writing baseline.json failed" >&2; return 1
     fi
     echo "baseline $newid created: snap $begin_id -> $end_id ($broot)"
 }
