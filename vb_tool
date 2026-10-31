@@ -26084,7 +26084,7 @@ _vtop_cpustat() {
 _vtop_sockstat() {
     local out=""
     if command -v ss >/dev/null 2>&1; then
-        out=$(timeout 3 timeout -k 2 10 ss -tanH "sport = :${PGPORT:-5432}" 2>/dev/null | awk '
+        out=$(timeout -k 2 10 ss -tanH "sport = :${PGPORT:-5432}" 2>/dev/null | awk '
             { s = tolower($1); if (s == "estab") s = "established"; cnt[s]++ }
             END { n = split("listen|established|syn-recv|syn-sent|fin-wait-1|fin-wait-2|time-wait|close-wait|last-ack|closing|other", ord, "|")
                   for (i = 1; i <= n; i++) printf "%s%d", (i > 1 ? " " : ""), cnt[ord[i]] + 0
@@ -30025,8 +30025,10 @@ _awr_collect() {
     local f
     for f in diskstats stat interrupts softirqs meminfo cpuinfo vmstat loadavg; do
         if [ -r "/proc/$f" ]; then
+            # L-6 (round-4): a killed cp leaves a HALF file whose numbers look
+            # plausible -- remove it so the renderer degrades instead of lying
             timeout -k 2 10 cp "/proc/$f" "$osd/$f" 2>/dev/null \
-                || echo "  [WARN] /proc/$f copy timed out or failed" >&2
+                || { rm -f "$osd/$f"; echo "  [WARN] /proc/$f copy timed out or failed (removed partial)" >&2; }
         else
             echo "  [WARN] /proc/$f not readable" >&2
         fi
@@ -30046,14 +30048,14 @@ _awr_collect() {
             echo "irqbalance|inactive|-"
         fi
     } > "$osd/irq_affinity" 2>/dev/null
-    if [ -r /proc/net/dev ]; then timeout -k 2 10 cp /proc/net/dev "$osd/net_dev" 2>/dev/null
+    if [ -r /proc/net/dev ]; then timeout -k 2 10 cp /proc/net/dev "$osd/net_dev" 2>/dev/null || { rm -f "$osd/net_dev"; echo "  [WARN] /proc/net/dev copy timed out or failed (removed partial)" >&2; }
     else echo "  [WARN] /proc/net/dev not readable" >&2; fi
-    if [ -r /proc/net/snmp ]; then timeout -k 2 10 cp /proc/net/snmp "$osd/net_snmp" 2>/dev/null; fi
-    if [ -r /proc/net/netstat ]; then timeout -k 2 10 cp /proc/net/netstat "$osd/net_netstat" 2>/dev/null; fi
-    if [ -r /proc/net/softnet_stat ]; then timeout -k 2 10 cp /proc/net/softnet_stat "$osd/softnet_stat" 2>/dev/null; fi
+    if [ -r /proc/net/snmp ]; then timeout -k 2 10 cp /proc/net/snmp "$osd/net_snmp" 2>/dev/null || { rm -f "$osd/net_snmp"; echo "  [WARN] /proc/net/snmp copy timed out or failed (removed partial)" >&2; }; fi
+    if [ -r /proc/net/netstat ]; then timeout -k 2 10 cp /proc/net/netstat "$osd/net_netstat" 2>/dev/null || { rm -f "$osd/net_netstat"; echo "  [WARN] /proc/net/netstat copy timed out or failed (removed partial)" >&2; }; fi
+    if [ -r /proc/net/softnet_stat ]; then timeout -k 2 10 cp /proc/net/softnet_stat "$osd/softnet_stat" 2>/dev/null || { rm -f "$osd/softnet_stat"; echo "  [WARN] /proc/net/softnet_stat copy timed out or failed (removed partial)" >&2; }; fi
     # buddyinfo: free pages per zone per order -> snapshot-level fragmentation
     # (2MB+ contiguous availability), rendered as Begin/End in the report
-    if [ -r /proc/buddyinfo ]; then timeout -k 2 10 cp /proc/buddyinfo "$osd/buddyinfo" 2>/dev/null; fi
+    if [ -r /proc/buddyinfo ]; then timeout -k 2 10 cp /proc/buddyinfo "$osd/buddyinfo" 2>/dev/null || { rm -f "$osd/buddyinfo"; echo "  [WARN] /proc/buddyinfo copy timed out or failed (removed partial)" >&2; }; fi
     # bond 三态 (mode / active slave / slave list); /proc/net/bonding absent = no bond
     if [ -d /proc/net/bonding ]; then
         : > "$osd/bonding" 2>/dev/null
@@ -30070,7 +30072,7 @@ _awr_collect() {
     # the snapshot for on-site OS-level checks; NOT rendered -- System
     # Activity's File Handles is process-scoped since 2026-10-30 (postmaster
     # fd count vs its /proc/<pid>/limits Max open files).
-    if [ -r /proc/sys/fs/file-nr ]; then timeout -k 2 10 cp /proc/sys/fs/file-nr "$osd/file_nr" 2>/dev/null; fi
+    if [ -r /proc/sys/fs/file-nr ]; then timeout -k 2 10 cp /proc/sys/fs/file-nr "$osd/file_nr" 2>/dev/null || { rm -f "$osd/file_nr"; echo "  [WARN] /proc/sys/fs/file-nr copy timed out or failed (removed partial)" >&2; }; fi
     # irq -> node (2026-10-31): /proc/irq/N/node IS world-readable (unlike
     # the affinity masks) -- which node each IRQ is steered to; the renderer
     # adds a Node column to the IRQ legend. -1 = no node binding.
@@ -30506,7 +30508,7 @@ _awr_collect() {
     # IS the permission filter. Split at the FIRST " = " so values may
     # themselves contain " = ". "key|value" lines; renderer hides old snaps.
     if command -v sysctl >/dev/null 2>&1; then
-        LC_ALL=C timeout -k 2 10 sysctl -a 2>/dev/null | sed -E 's/^([^=]+) = (.*)$/\1|\2/' > "$osd/sysctl"
+        LC_ALL=C timeout -k 2 10 sysctl -a 2>/dev/null | sed -E 's/^([^=]+) = (.*)$/\1|\2/' > "$osd/sysctl" || { rm -f "$osd/sysctl"; echo '  [WARN] sysctl -a timed out or failed (removed partial)' >&2; }
         [ -s "$osd/sysctl" ] || rm -f "$osd/sysctl"
     fi
     # THP is a sysfs knob, not a sysctl: only whether it is on/off matters here
@@ -33556,7 +33558,6 @@ def numa_html_table(topology, stats_delta_factory, placement=None):
         _pltot = placement.get("total", 0.0)
     parts.append('<table class="t"><tr><th>NUMA Nodes</th><th class="n">%d</th></tr></table>'
                  % len(nodes))
-    _ncol = 11 + (2 if placement else 0)
     parts.append('<table class="t"><tr><th>Node</th><th>CPU List</th><th class="n">MemTotal</th>'
                  '<th class="n">MemFree</th><th class="n">Distance</th>'
                  '<th class="n">Numa Hit</th><th class="n">Numa Miss</th>'
@@ -35312,7 +35313,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         # flags + kernelpagesize_kB (the per-node AGGREGATE lives in the
         # numastat table's DB Pages/DB Share columns)
         if _dnm and _dnm["total"] > 0:
-            _mn = sorted(_dnm["nodes"].keys())
+            _mn = sorted(_dnm["nodes"].keys(), key=lambda x: int(x[1:]) if x[1:].isdigit() else 0)
             h2 = ['<h3 class="sub">DB Memory Placement (top mappings, faulted pages)</h3>',
                   '<table class="t"><tr><th class="n">Pages</th>'
                   + ''.join('<th class="n">%s</th>' % esc(x) for x in _mn)
@@ -35412,9 +35413,13 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         # compact counts (user 2026-10-31: 7-digit raw numbers were the
         # width problem; window-Delta 口径 unchanged, only rendering shrinks)
         v = to_num(v)
-        if v >= 1000000:
+        # L-1 (round-4): promote at the rounding boundary -- 999,999 must
+        # read 1.0M, not "1000K"; same for M -> G on billion-scale counters
+        if v >= 999500000:
+            return '%.1fG' % (v / 1000000000.0)
+        if v >= 999500:
             return '%.1fM' % (v / 1000000.0)
-        if v >= 10000:
+        if v >= 9995:
             return '%.0fK' % (v / 1000.0)
         if v >= 1000:
             return '%.1fK' % (v / 1000.0)
@@ -35541,7 +35546,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             # the per-minute detail tables; the legend above carries the keys
             parts.append(_fold('Softirq per CPU', ''.join(h)))
     # ---- IRQ: cpu rows x active-IRQ columns (user 2026-10-31) ----
-    _idelta.sort(key=lambda t: -sum(t[2]))
+    _idelta.sort(key=lambda t: (-sum(t[2]), 0 if t[0].isdigit() else 1, int(t[0]) if t[0].isdigit() else t[0]))
     _actirq = [t for t in _idelta if sum(t[2]) > 0]
     _CAP = 48
     _otherirq = _actirq[_CAP:]
@@ -35897,7 +35902,14 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                 continue
             v = ve_ if ve_ is not None else vb_
             v = str(v)
-            if k in ("cpu.quota", "cpu.max") and v.split()[0] in ("-1", "max"):
+            # M-1 (round-4): a truncated snapshot (ENOSPC/copy cut) can leave
+            # "cpu.max|" with an EMPTY value -- v.split()[0] would IndexError
+            # and kill the WHOLE report; () or [""] keeps it alive as ""
+            if k in ("cpu.quota", "cpu.max") and (v.split() or [""])[0] in ("-1", "max"):
+                v = "unlimited"
+            # L-4: v2 writes the literal "max" for memory/pids limits too --
+            # one table, one word
+            if v == "max":
                 v = "unlimited"
             if k.endswith("limit") and to_num(v) >= 9e18:
                 v = "unlimited"
@@ -35910,8 +35922,8 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                 continue
             fb = fmt_int(to_num(vb_)) if vb_ is not None else "-"
             fe = fmt_int(to_num(ve_)) if ve_ is not None else "-"
-            fd = ("%+s" % fmt_int(max(0, to_num(ve_) - to_num(vb_)))) \
-                if (vb_ is not None and ve_ is not None) else "-"
+            _dv = max(0, to_num(ve_) - to_num(vb_)) if (vb_ is not None and ve_ is not None) else None
+            fd = ("+" + fmt_int(_dv)) if _dv else ("-" if _dv is None else fmt_int(_dv))
             h.append('<tr><td>%s</td><td class="n">%s</td><td class="n">%s</td>'
                      '<td class="n">%s</td></tr>' % (esc(k), fb, fe, fd))
         # cpu.stat: split into per-counter rows (user 2026-10-31: every row
@@ -35932,7 +35944,8 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             if k2 in _bcs or k2 in _ecs:
                 _fb = fmt_int(_bcs[k2]) if k2 in _bcs else "-"
                 _fe = fmt_int(_ecs[k2]) if k2 in _ecs else "-"
-                _fd = ("%+s" % fmt_int(max(0, _ecs[k2] - _bcs[k2]))) if (k2 in _bcs and k2 in _ecs) else "-"
+                _dv2 = max(0, _ecs[k2] - _bcs[k2]) if (k2 in _bcs and k2 in _ecs) else None
+                _fd = ("+" + fmt_int(_dv2)) if _dv2 else ("-" if _dv2 is None else fmt_int(_dv2))
                 h.append('<tr><td>cpu.%s</td><td class="n">%s</td><td class="n">%s</td>'
                          '<td class="n">%s</td></tr>' % (k2, _fb, _fe, _fd))
         # blkio service bytes: per-device Read/Write rows, window delta =
@@ -35957,7 +35970,8 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         for _dk in sorted(set(_bio) | set(_eio)):
             _fb = fmt_int(_bio[_dk]) if _dk in _bio else "-"
             _fe = fmt_int(_eio[_dk]) if _dk in _eio else "-"
-            _fd = ("%+s" % fmt_int(max(0, _eio[_dk] - _bio[_dk]))) if (_dk in _bio and _dk in _eio) else "-"
+            _dv3 = max(0, _eio[_dk] - _bio[_dk]) if (_dk in _bio and _dk in _eio) else None
+            _fd = ("+" + fmt_int(_dv3)) if _dv3 else ("-" if _dv3 is None else fmt_int(_dv3))
             h.append('<tr><td>io %s %s</td><td class="n">%s</td><td class="n">%s</td>'
                      '<td class="n">%s</td></tr>' % (esc(_dk[0]), esc(_dk[1]), _fb, _fe, _fd))
         # io throttle config (v1): static config rows when present
@@ -35979,7 +35993,8 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             elif k.endswith(".usage"):
                 _fb = fmt_int(to_num(vb_)) if vb_ is not None else "-"
                 _fe = fmt_int(to_num(ve_)) if ve_ is not None else "-"
-                _fd = ("%+s" % fmt_int(max(0, to_num(ve_) - to_num(vb_)))) if (vb_ is not None and ve_ is not None) else "-"
+                _dv4 = max(0, to_num(ve_) - to_num(vb_)) if (vb_ is not None and ve_ is not None) else None
+                _fd = ("+" + fmt_int(_dv4)) if _dv4 else ("-" if _dv4 is None else fmt_int(_dv4))
                 h.append('<tr><td>%s</td><td class="n">%s</td><td class="n">%s</td>'
                          '<td class="n">%s</td></tr>' % (esc(k), _fb, _fe, _fd))
         h.append('</table>')
