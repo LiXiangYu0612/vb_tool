@@ -34350,88 +34350,63 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     # is a standard IRQ/softirq triage need
     parts.append('<table class="t"><tr>%s</tr><tr>%s</tr></table>'
                  % ("".join(_th), "".join(_td)))
-    # Softirq + IRQ per-CPU distribution (user 2026-10-30: WHICH CPU runs the
-    # irq/softirq is the signal -- a single hot NET_RX/IRQ core is the RPS /
-    # affinity / multi-queue argument a summed total hides). Both tables are
-    # window-delta matrices: rows = top entries by total delta, columns =
-    # cpu0..N, plus a Max column naming the hottest core and its share.
-    _dur = to_num(m.get("duration")) or 1.0
+    # Softirq + IRQ per-CPU distribution, TRANSPOSED (user 2026-10-31: cpus
+    # run down the ROWS -- core count only makes the table longer, never
+    # wider; irq/softirq categories run across the columns). The leading
+    # %irq/%sirq columns come from the per-cpu lines of the already-collected
+    # /proc/stat: the counts below say WHERE interrupts land, %irq+%sirq say
+    # how much of that core's TIME they eat -- the saturation verdict (1 hot
+    # core in 64 averages to 1.4% machine-wide and stays invisible in every
+    # aggregate table).
+    def _km(v):
+        # compact counts (user 2026-10-31: 7-digit raw numbers were the
+        # width problem; window-Delta 口径 unchanged, only rendering shrinks)
+        v = to_num(v)
+        if v >= 1000000:
+            return '%.1fM' % (v / 1000000.0)
+        if v >= 10000:
+            return '%.0fK' % (v / 1000.0)
+        if v >= 1000:
+            return '%.1fK' % (v / 1000.0)
+        return '%d' % v
+    def _stat_percpu(phase):
+        # per-cpu jiffies from the stat snapshot: {name: [usr nice sys idle
+        # iowait irq softirq steal]}; name "cpu" = machine aggregate
+        out = {}
+        for ln in win["os"].get((phase, "stat"), "").splitlines():
+            f = ln.split()
+            if len(f) >= 9 and f[0].startswith("cpu") and (f[0] == "cpu" or f[0][3:].isdigit()):
+                try:
+                    out[f[0]] = [to_num(x) for x in f[1:9]]
+                except Exception:
+                    pass
+        return out
+    _pb, _pe = _stat_percpu("begin"), _stat_percpu("end")
+    def _pctpair(name):
+        # /proc/stat fields: usr nice sys idle iowait IRQ SOFTIRQ steal --
+        # irq is index 5, softirq 6 (steal is 7)
+        b, e = _pb.get(name, [0.0] * 8), _pe.get(name, [0.0] * 8)
+        d = [max(0.0, e[i] - b[i]) for i in range(8)]
+        t = sum(d)
+        return (100.0 * d[5] / t, 100.0 * d[6] / t) if t else (0.0, 0.0)
+    _irqpct = {n: _pctpair(n) for n in set(_pb) | set(_pe)
+               if n != "cpu" and n[3:].isdigit()}
     # parse BOTH ends here (user 2026-10-30: list ALL categories including
-    # zero-delta ones -- the osd path drops them) so every /proc/softirqs
-    # category shows, zeros included
+    # zero-delta ones -- the osd path drops them); category order = kernel
+    # file order (HI TIMER NET_TX NET_RX BLOCK ...), stable across reports
     _sb = proc_softirqs(win["os"].get(("begin", "softirqs"), ""))
     _se = proc_softirqs(win["os"].get(("end", "softirqs"), ""))
     _sq = {}
-    for _c in set(_sb) | set(_se):
+    for _c in list(_se) + [k for k in _sb if k not in _se]:
         _vb, _ve = _sb.get(_c, []), _se.get(_c, [])
         _n = max(len(_vb), len(_ve))
         if _n:
             _sq[_c] = [max(0, (_ve[i] if i < len(_ve) else 0) - (_vb[i] if i < len(_vb) else 0))
                        for i in range(_n)]
-    def _active_cols(rows_vecs, ncpu):
-        """Column selection for wide machines (user 2026-10-30: 256-core
-        boxes must still show the FULL distribution, not Top-3): a cpu column
-        is shown when it carries >=5% of the busiest column's total across
-        the table; all remaining columns collapse into one 'other' column.
-        Result: a stuck-affinity box shows 1-2 columns, a 64-queue NIC spread
-        shows those 64 -- width self-adapts to real activity, hard cap 24
-        shown columns."""
-        col_tot = [sum(v[i] if i < len(v) else 0 for v in rows_vecs) for i in range(ncpu)]
-        if not col_tot or max(col_tot) == 0:
-            # all-zero table: no distribution to show -- first 16 cols only,
-            # no 'other' (nothing to collapse)
-            return list(range(min(ncpu, 16))), []
-        hot = max(col_tot)
-        act = [i for i in range(ncpu) if col_tot[i] >= 0.05 * hot]
-        rest = [i for i in range(ncpu) if col_tot[i] < 0.05 * hot]
-        if len(act) > 24:                      # cap: keep the 24 heaviest
-            act = sorted(act, key=lambda i: -col_tot[i])[:24]
-            rest = [i for i in range(ncpu) if i not in set(act)]
-        return act, rest
-    def _matrix_hdr(ncol_cpu, first_cols, act, rest):
-        _cols = ''.join('<th class="n">cpu%d</th>' % i for i in act)
-        if rest:
-            _cols += '<th class="n">other (%d cpus)</th>' % len(rest)
-        return ('<table class="t"><tr>' + first_cols + _cols +
-                '<th class="n">Total</th><th class="n">Max</th></tr>')
-    def _maxcell(vec):
-        # small machines: the single hottest core says it all. >16-core
-        # machines (user 2026-10-30): "which cores carry it" needs Top-3 +
-        # an activity count -- one Max would hide the multi-queue vs
-        # single-stuck-core distinction (192 cores, top3 ~33% each = queue
-        # spread working; cpu0 98% = affinity stuck)
-        if not vec or not any(vec):
-            return '<td class="n">-</td>'
-        _tot = sum(vec)
-        if not _tot:
-            return '<td class="n">-</td>'
-        _idx = sorted(range(len(vec)), key=lambda i: -vec[i])
-        if len(vec) <= 16:
-            return '<td class="n">cpu%d %.0f%%</td>' % (_idx[0], 100.0 * vec[_idx[0]] / _tot)
-        _top = [i for i in _idx if vec[i] > 0][:3]
-        _hot = sum(1 for v in vec if v and v >= 0.05 * vec[_idx[0]])
-        return '<td class="n">%s (%d/%d cores ≥5%% of max)</td>' % (
-            ' · '.join('cpu%d %.0f%%' % (i, 100.0 * vec[i] / _tot) for i in _top),
-            _hot, len(vec))
-    if _sq:
-        _ncpu = max(len(v) for v in _sq.values())
-        _rows = sorted(_sq.items(), key=lambda kv: abs(sum(kv[1])), reverse=True)
-        _act, _rest = _active_cols([v for _, v in _rows], _ncpu)
-        h = [_matrix_hdr(_ncpu, '<th>Softirq (Delta)</th>', _act, _rest)]
-        for k, vec in _rows:
-            h.append('<tr><td>%s</td>%s%s<td class="n">%s</td>%s</tr>'
-                     % (esc(k),
-                        ''.join('<td class="n">%s</td>' % fmt_int(vec[i] if i < len(vec) else 0)
-                                for i in _act),
-                        ('<td class="n">%s</td>' % fmt_int(sum(vec[i] for i in _rest
-                                                                if i < len(vec))))
-                        if _rest else '',
-                        fmt_int(sum(vec)), _maxcell(vec)))
-        h.append('</table>')
-        parts.append(''.join(h))
-    # IRQ breakdown top10 (audit 2026-10-30): the interrupts snapshot file was
-    # collected since day one with NO consumer at all -- which NIC/disk IRQ is
-    # hot was unanswerable from the report
+    # IRQ deltas: ALL irqs incl zero-delta (a silent IRQ is information --
+    # dead queue / affinity pinned to an offline core); complete listing
+    # lives on, zero-delta ones just don't get a COLUMN in the transposed
+    # table (a column costs width, the note below costs a line)
     _ib = proc_interrupts(win["os"].get(("begin", "interrupts"), ""))
     _ie = proc_interrupts(win["os"].get(("end", "interrupts"), ""))
     _idelta = []
@@ -34441,14 +34416,63 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         _n = max(len(_vb), len(_ve))
         _dv = [max(0, (_ve[i] if i < len(_ve) else 0) - (_vb[i] if i < len(_vb) else 0))
                for i in range(_n)]
-        # zero-delta rows stay listed too (user 2026-10-30: a silent IRQ is
-        # information -- dead queue / affinity pinned to an offline core)
         _desc = (_ie.get(_k) or _ib.get(_k) or ([0], ""))[1]
         _idelta.append((_k, _desc, _dv))
-    if _idelta:
-        _idelta.sort(key=lambda t: -sum(t[2]))
-        _ncpu = max(len(t[2]) for t in _idelta)
-        _act, _rest = _active_cols([t[2] for t in _idelta], _ncpu)
+    _ncpu = max([len(_irqpct)] + [len(v) for v in _sq.values()] +
+                [len(t[2]) for t in _idelta] + [0])
+    if _ncpu and _sq:
+        # ---- Softirq: cpu rows x category columns ----
+        _cats = list(_sq)
+        _hdr = (['<th>CPU</th>', '<th class="n">%irq</th>', '<th class="n">%sirq</th>']
+                + ['<th class="n">%s</th>' % esc(c) for c in _cats]
+                + ['<th class="n">Total</th>', '<th class="n">Top Cat</th>'])
+        h = ['<h3 class="sub">Softirq per CPU (window Delta)</h3>',
+             '<table class="t"><tr>' + ''.join(_hdr) + '</tr>']
+        for i in range(_ncpu):
+            row = ['<td>cpu%d</td>' % i]
+            pi, ps = _irqpct.get("cpu%d" % i, (None, None))
+            row.append('<td class="n%s">%s</td>' % (thr_cell_cls(pi, 20.0, 50.0),
+                                                    '-' if pi is None else '%.1f' % pi))
+            row.append('<td class="n%s">%s</td>' % (thr_cell_cls(ps, 20.0, 50.0),
+                                                    '-' if ps is None else '%.1f' % ps))
+            vec = [_sq[c][i] if i < len(_sq[c]) else 0 for c in _cats]
+            row += ['<td class="n">%s</td>' % _km(v) for v in vec]
+            tot = sum(vec)
+            row.append('<td class="n">%s</td>' % _km(tot))
+            if tot:
+                hi = max(range(len(_cats)), key=lambda j: vec[j])
+                row.append('<td class="n">%s %.0f%%</td>' % (esc(_cats[hi]), 100.0 * vec[hi] / tot))
+            else:
+                row.append('<td class="n">-</td>')
+            h.append('<tr>' + ''.join(row) + '</tr>')
+        # footer: per-category totals + the machine-wide aggregate %irq/%sirq
+        # for contrast with the per-core columns above
+        ftr = ['<tr><td>Total</td>']
+        if "cpu" in _pb or "cpu" in _pe:
+            ai, asr = _pctpair("cpu")
+            ftr += ['<td class="n">%.1f</td>' % ai, '<td class="n">%.1f</td>' % asr]
+        else:
+            ftr += ['<td class="n">-</td>', '<td class="n">-</td>']
+        ftr += ['<td class="n">%s</td>' % _km(sum(_sq[c])) for c in _cats]
+        ftr.append('<td class="n">%s</td>' % _km(sum(sum(_sq[c]) for c in _cats)))
+        ftr.append('<td class="n">-</td>')
+        h.append(''.join(ftr) + '</tr>')
+        h.append('</table>')
+        parts.append(''.join(h))
+        note("%irq/%sirq = share of that core's CPU TIME spent servicing "
+             "interrupts/softinterrupts in the window (/proc/stat per-cpu lines; "
+             "bold >20%, red >50%: the core is being eaten while the machine-wide "
+             "average in the Total row stays deceptively low).\n"
+             "Counts are window deltas (not /s); Top Cat = hottest category on "
+             "that core; all /proc/softirqs categories listed, zero-delta included.")
+    # ---- IRQ: cpu rows x active-IRQ columns (user 2026-10-31) ----
+    _idelta.sort(key=lambda t: -sum(t[2]))
+    _actirq = [t for t in _idelta if sum(t[2]) > 0]
+    _silent = [t for t in _idelta if sum(t[2]) == 0]
+    _CAP = 48
+    _otherirq = _actirq[_CAP:]
+    _actirq = _actirq[:_CAP]
+    if _actirq and _ncpu:
         # affinity config (2026-10-30): distribution shows WHERE load lands,
         # the mask shows what was PINNED; irqbalance active = masks move under
         # it (a hand-set mask is not the last word)
@@ -34461,34 +34485,65 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                     _ibq = _f[1]
                 else:
                     _iaff[_f[0]] = (_f[1], _f[2])
-        def _affcell(k):
+        def _affshort(k):
             # request != effective (e.g. mask 0-15 but kernel delivers to cpu0
             # only) is itself a finding -- show both when they diverge
             _t = _iaff.get(k)
             if _t is None or _t[0] == "-":
-                return '<td>-</td>'
+                return ""
             _a, _e = _t
             if _e and _e not in ("-", "", _a):
-                return '<td class="n">%s → %s</td>' % (esc(_a), esc(_e))
-            return '<td class="n">%s</td>' % esc(_a)
-        _bqnote = (' <span class="note">(irqbalance %s -- masks dynamically '
-                   'managed)</span>' % esc(_ibq)) if _ibq == "active" else ''
-        h = ['<table class="t"><tr><th>IRQ</th><th>Device</th>'
-             + ''.join('<th class="n">cpu%d</th>' % i for i in _act)
-             + ('<th class="n">other (%d cpus)</th>' % len(_rest) if _rest else '')
-             + '<th class="n">Total</th><th class="n">Max</th>'
-               '<th>Affinity%s</th></tr>' % _bqnote]
-        for k, dv, vec in _idelta:
-            h.append('<tr><td>%s</td><td>%s</td>%s%s<td class="n">%s</td>%s%s</tr>'
-                     % (esc(k), esc(dv),
-                        ''.join('<td class="n">%s</td>' % fmt_int(vec[i] if i < len(vec) else 0)
-                                for i in _act),
-                        ('<td class="n">%s</td>' % fmt_int(sum(vec[i] for i in _rest
-                                                                if i < len(vec))))
-                        if _rest else '',
-                        fmt_int(sum(vec)), _maxcell(vec), _affcell(k)))
+                return '<br>%s → %s' % (esc(_a), esc(_e))
+            return '<br>%s' % esc(_a)
+        _hdr = ['<th>CPU</th>']
+        for k, dv, vec in _actirq:
+            _hdr.append('<th class="n">%s<br>%s%s</th>'
+                        % (esc(k), esc(trunc(dv, 18)), _affshort(k)))
+        if _otherirq:
+            _hdr.append('<th class="n">other (%d irq)</th>' % len(_otherirq))
+        _hdr += ['<th class="n">Total</th>', '<th class="n">Top IRQ</th>']
+        h = ['<h3 class="sub">IRQ per CPU (window Delta)</h3>',
+             '<table class="t"><tr>' + ''.join(_hdr) + '</tr>']
+        for i in range(_ncpu):
+            row = ['<td>cpu%d</td>' % i]
+            vec = [v[i] if i < len(v) else 0 for (_, _, v) in _actirq]
+            row += ['<td class="n">%s</td>' % _km(x) for x in vec]
+            oth = sum(v[i] if i < len(v) else 0 for (_, _, v) in _otherirq)
+            if _otherirq:
+                row.append('<td class="n">%s</td>' % _km(oth))
+            tot = sum(vec) + oth
+            row.append('<td class="n">%s</td>' % _km(tot))
+            if tot:
+                hi = max(range(len(vec)), key=lambda j: vec[j])
+                row.append('<td class="n">%s %.0f%%</td>' % (esc(_actirq[hi][0]), 100.0 * vec[hi] / tot))
+            else:
+                row.append('<td class="n">-</td>')
+            h.append('<tr>' + ''.join(row) + '</tr>')
+        ftr = ['<tr><td>Total</td>']
+        ftr += ['<td class="n">%s</td>' % _km(sum(v)) for (_, _, v) in _actirq]
+        if _otherirq:
+            ftr.append('<td class="n">%s</td>' % _km(sum(sum(v) for (_, _, v) in _otherirq)))
+        ftr.append('<td class="n">%s</td>' % _km(sum(sum(t[2]) for t in _idelta)))
+        ftr.append('<td class="n">-</td>')
+        h.append(''.join(ftr) + '</tr>')
         h.append('</table>')
         parts.append(''.join(h))
+        _nl = []
+        if _silent:
+            _nl.append("silent IRQs (zero delta, all %d listed): %s" % (
+                len(_silent), ", ".join(
+                    "%s:%s" % (k, trunc(desc.split()[-1], 14) if desc and desc.split() else "?")
+                    for k, desc, _v in _silent)))
+        if _otherirq:
+            _nl.append("low-activity IRQs collapsed into 'other' (all %d listed): %s" % (
+                len(_otherirq), ", ".join(k for k, _d, _v in _otherirq)))
+        if _ibq == "active":
+            _nl.append("irqbalance active -- affinity masks are dynamically "
+                       "re-managed; a hand-set mask is not the last word")
+        _nl.append("column header: IRQ number / device / requested affinity "
+                   "(→ effective when the kernel actually delivers elsewhere); "
+                   "counts are window deltas")
+        note("\n".join(_nl))
     # DB Process: the postmaster listening on THIS awr's port (multi-instance
     # safe), its cpuset pinning and its EFFECTIVE rlimits (/proc/<pid>/limits,
     # world-readable) -- the running process's limits are the authoritative
