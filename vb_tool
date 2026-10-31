@@ -32673,13 +32673,11 @@ def _numa_stat_delta(numa_a, numa_b, nid, key):
     return sb[key] - sa.get(key, sb[key])
 
 def numa_html_table(topology, stats_delta_factory, placement=None):
-    """Emit the NUMA table(s) shared by awrrpt/awrdiff.
-    topology: parse_numa() result (static info; any snap's copy works).
-    stats_delta_factory(nid, key) -> value or None (window delta; None = unavailable).
-    placement: optional parse_db_numa_maps() result -- the postmaster's
-    faulted pages per node merged INTO the numastat rows as DB Pages / DB
-    Share columns (user 2026-10-31: per-node data belongs in the per-node
-    table, not a separate one)."""
+    """Emit the NUMA table shared by awrrpt/awrdiff -- ONE table, one row per
+    node (user 2026-10-31: topology + numastat delta + DB placement are all
+    per-node, so they merge): static columns first, window-delta columns
+    after. placement: optional parse_db_numa_maps() result for the DB Pages /
+    DB Share columns."""
     parts = []
     nodes = topology.get("nodes", {})
     _pl = {}
@@ -32690,37 +32688,31 @@ def numa_html_table(topology, stats_delta_factory, placement=None):
         _pltot = placement.get("total", 0.0)
     parts.append('<table class="t"><tr><th>NUMA Nodes</th><th class="n">%d</th></tr></table>'
                  % len(nodes))
+    _ncol = 11 + (2 if placement else 0)
     parts.append('<table class="t"><tr><th>Node</th><th>CPU List</th><th class="n">MemTotal</th>'
-                 '<th class="n">MemFree</th><th class="n">Distance</th></tr>')
-    for nid in sorted(nodes, key=lambda x: int(x) if x.isdigit() else 0):
-        nd = nodes[nid]
-        parts.append('<tr><td>%s</td><td>%s</td><td class="n">%s</td>'
-                     '<td class="n">%s</td><td class="n">%s</td></tr>' % (
-                         esc(nid), esc(nd["cpus"]),
-                         fmt_kb(nd["mem_total_kb"]), fmt_kb(nd["mem_free_kb"]),
-                         esc(nd["distance"])))
-    parts.append('</table>')
-    parts.append('<table class="t"><tr><th>Node</th><th class="n">Numa Hit</th><th class="n">Numa Miss</th>'
-                 '<th class="n">Interleave Hit</th><th class="n">Local Node</th><th class="n">Other Node</th>'
-                 '<th class="n">Local Ratio</th>'
+                 '<th class="n">MemFree</th><th class="n">Distance</th>'
+                 '<th class="n">Numa Hit</th><th class="n">Numa Miss</th>'
+                 '<th class="n">Interleave Hit</th><th class="n">Local Node</th>'
+                 '<th class="n">Other Node</th><th class="n">Local Ratio</th>'
                  + ('<th class="n">DB Pages</th><th class="n">DB Share</th>' if placement else '')
                  + '</tr>')
-    any_stat = False
     for nid in sorted(nodes, key=lambda x: int(x) if x.isdigit() else 0):
+        nd = nodes[nid]
         hit = stats_delta_factory(nid, "numa_hit")
         miss = stats_delta_factory(nid, "numa_miss")
         ih = stats_delta_factory(nid, "interleave_hit")
         loc = stats_delta_factory(nid, "local_node")
         oth = stats_delta_factory(nid, "other_node")
-        if hit is None and miss is None and loc is None and oth is None:
-            continue   # node has no numastat delta data at all
-        any_stat = True
         _loc_den = (loc or 0) + (oth or 0)
         ratio = "%.2f%%" % ((loc or 0) / _loc_den * 100.0) if _loc_den > 0 else "n/a"
-        parts.append('<tr><td>%s</td><td class="n">%s</td><td class="n">%s</td>'
+        parts.append('<tr><td>%s</td><td>%s</td><td class="n">%s</td>'
+                     '<td class="n">%s</td><td class="n">%s</td>'
+                     '<td class="n">%s</td><td class="n">%s</td>'
                      '<td class="n">%s</td><td class="n">%s</td><td class="n">%s</td>'
                      '<td class="n">%s</td>%s</tr>' % (
-                         esc(nid),
+                         esc(nid), esc(nd["cpus"]),
+                         fmt_kb(nd["mem_total_kb"]), fmt_kb(nd["mem_free_kb"]),
+                         esc(nd["distance"]),
                          fmt_int(hit) if hit is not None else "?",
                          fmt_int(miss) if miss is not None else "?",
                          fmt_int(ih) if ih is not None else "?",
@@ -32731,8 +32723,6 @@ def numa_html_table(topology, stats_delta_factory, placement=None):
                             % (fmt_int(_pl[nid]) if nid in _pl else "-",
                                '%.1f%%' % (100.0 * _pl[nid] / _pltot) if nid in _pl and _pltot > 0 else "-"))
                           if placement else '')))
-    if not any_stat:
-        parts.append('<tr><td colspan="7" class="note">no data</td></tr>')
     parts.append('</table>')
     return "".join(parts)
 
