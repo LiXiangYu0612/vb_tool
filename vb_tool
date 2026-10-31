@@ -35508,6 +35508,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         # path (e.g. Gaussdb:vastbase)
         _cgb = parse_db_cgroup(win["os"].get(("begin", "db_cgroup"), ""))
         _cge = parse_db_cgroup(win["os"].get(("end", "db_cgroup"), ""))
+        _cgdetail = None
         if _cge:
             _grp = _cge["paths"].get("cpu") or ""
             _q = _cge["kv"].get("cpu.quota")
@@ -35568,7 +35569,10 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                     h.append('<tr><td>%s</td><td colspan="3" class="n">%s</td></tr>'
                              % (esc(k), esc(trunc(str(ve_), 90))))
             h.append('</table>')
-            parts.append(_fold('Cgroup Detail', ''.join(h)))
+            # NOT appended here: this block runs mid-table (more rows follow)
+            # -- a <details> between <tr>s breaks the whole table apart;
+            # stashed and emitted after the DB Process table closes below
+            _cgdetail = _fold('Cgroup Detail', ''.join(h))
         _nvb, _nve = _dbnvc("begin"), _dbnvc("end")
         if _nvb is not None or _nve is not None:
             _bv = fmt_int(_nvb[0]) if _nvb is not None else "-"
@@ -35768,6 +35772,10 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                          '<td class="n"><b>%d</b></td><td class="n"><b>%+d</b></td></tr>'
                          % (_tb, _te, _te - _tb))
         parts.append('</table>')
+        # cgroup detail fold AFTER the table (mid-table <details> would tear
+        # the rows apart, 2026-10-31 format bug caught by user)
+        if _cgdetail:
+            parts.append(_cgdetail)
         # per-minute detail (user 2026-10-30): the former standalone TCP
         # Sockets section now lives here, folded by default exactly like CPU
         # utilization's per-minute detail, and carries the dbfd columns --
