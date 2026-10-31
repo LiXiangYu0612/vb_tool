@@ -34459,32 +34459,39 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                      % (_j, esc(_c), esc(_smean.get(_c, "")), _km(sum(_sq[_c]))))
         h.append('</table>')
         parts.append(''.join(h))
-        _hdr = (['<th>CPU</th>']
-                + ['<th class="n">%d</th>' % _j for _j in range(1, len(_cats) + 1)]
-                + ['<th class="n">Total</th>', '<th class="n">Top Cat</th>'])
-        h = ['<table class="t"><tr>' + ''.join(_hdr) + '</tr>']
-        for i in range(_ncpu):
-            row = ['<td>cpu%d</td>' % i]
-            vec = [_sq[c][i] if i < len(_sq[c]) else 0 for c in _cats]
-            row += ['<td class="n">%s</td>' % _km(v) for v in vec]
-            tot = sum(vec)
-            row.append('<td class="n">%s</td>' % _km(tot))
-            if tot:
-                hi = max(range(len(_cats)), key=lambda j: vec[j])
-                row.append('<td class="n">%s %.0f%%</td>' % (esc(_cats[hi]), 100.0 * vec[hi] / tot))
-            else:
-                row.append('<td class="n">-</td>')
-            h.append('<tr>' + ''.join(row) + '</tr>')
-        # footer: per-category totals
-        ftr = ['<tr><td>Total</td>']
-        ftr += ['<td class="n">%s</td>' % _km(sum(_sq[c])) for c in _cats]
-        ftr.append('<td class="n">%s</td>' % _km(sum(sum(_sq[c]) for c in _cats)))
-        ftr.append('<td class="n">-</td>')
-        h.append(''.join(ftr) + '</tr>')
-        h.append('</table>')
-        # collapsed by default (user 2026-10-31) -- same _fold handling as the
-        # per-minute detail tables; the legend above carries the reading keys
-        parts.append(_fold('Softirq per CPU', ''.join(h)))
+        # matrix columns = only categories with activity (user 2026-10-31):
+        # an all-zero category stays in the legend above (Delta 0) but gets
+        # no column -- same rule as the IRQ matrix; each column keeps its
+        # legend number so the mapping stays stable (numbers may skip)
+        _mcols = [(_j, _c) for _j, _c in enumerate(_cats, 1) if sum(_sq[_c]) > 0]
+        if _mcols:
+            _hdr = (['<th>CPU</th>']
+                    + ['<th class="n">%d</th>' % _j for _j, _c in _mcols]
+                    + ['<th class="n">Total</th>', '<th class="n">Top Cat</th>'])
+            h = ['<table class="t"><tr>' + ''.join(_hdr) + '</tr>']
+            for i in range(_ncpu):
+                row = ['<td>cpu%d</td>' % i]
+                vec = [_sq[c][i] if i < len(_sq[c]) else 0 for _j, c in _mcols]
+                row += ['<td class="n">%s</td>' % _km(v) for v in vec]
+                tot = sum(vec)
+                row.append('<td class="n">%s</td>' % _km(tot))
+                if tot:
+                    hi = max(range(len(_mcols)), key=lambda j: vec[j])
+                    row.append('<td class="n">%s %.0f%%</td>'
+                               % (esc(_mcols[hi][1]), 100.0 * vec[hi] / tot))
+                else:
+                    row.append('<td class="n">-</td>')
+                h.append('<tr>' + ''.join(row) + '</tr>')
+            # footer: per-category totals
+            ftr = ['<tr><td>Total</td>']
+            ftr += ['<td class="n">%s</td>' % _km(sum(_sq[c])) for _j, c in _mcols]
+            ftr.append('<td class="n">%s</td>' % _km(sum(sum(_sq[c]) for _j, c in _mcols)))
+            ftr.append('<td class="n">-</td>')
+            h.append(''.join(ftr) + '</tr>')
+            h.append('</table>')
+            # collapsed by default (user 2026-10-31) -- same _fold handling as
+            # the per-minute detail tables; the legend above carries the keys
+            parts.append(_fold('Softirq per CPU', ''.join(h)))
     # ---- IRQ: cpu rows x active-IRQ columns (user 2026-10-31) ----
     _idelta.sort(key=lambda t: -sum(t[2]))
     _actirq = [t for t in _idelta if sum(t[2]) > 0]
