@@ -32673,7 +32673,7 @@ def _numa_stat_delta(numa_a, numa_b, nid, key):
     return sb[key] - sa.get(key, sb[key])
 
 def numa_html_table(topology, stats_delta_factory, placement=None):
-    """Emit the NUMA table shared by awrrpt/awrdiff -- ONE table, one row per
+    """Emit the awrrpt NUMA table -- ONE table, one row per
     node (user 2026-10-31: topology + numastat delta + DB placement are all
     per-node, so they merge): static columns first, window-delta columns
     after. placement: optional parse_db_numa_maps() result for the DB Pages /
@@ -34651,7 +34651,10 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     _CAP = 48
     _otherirq = _actirq[_CAP:]
     _actirq = _actirq[:_CAP]
-    if _actirq and _ncpu:
+    # legend = FULL inventory, renders whenever any irq data exists (same
+    # rule as the Softirq legend -- activity must not gate the inventory);
+    # only the matrix below requires active irqs
+    if _idelta and _ncpu:
         # irqbalance/header-explainer notes dropped (user 2026-10-31); the
         # collector still records the irqbalance line in the snap file.
         # IRQ legend (user 2026-10-31): full inventory -- every IRQ incl
@@ -34678,46 +34681,47 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                         ('<td class="n">%s</td>' % esc(_inode.get(k, "-"))) if _inode else ''))
         h.append('</table>')
         parts.append(''.join(h))
-        _hdr = ['<th>CPU</th>', '<th class="n">%irq</th>']
-        for k, dv, vec in _actirq:
-            _hdr.append('<th class="n">%s</th>' % esc(k))
-        if _otherirq:
-            _hdr.append('<th class="n">other (%d irq)</th>' % len(_otherirq))
-        _hdr += ['<th class="n">Total</th>', '<th class="n">Top IRQ</th>']
-        h = ['<table class="t"><tr>' + ''.join(_hdr) + '</tr>']
-        for i in range(_ncpu):
-            pi = _pirq.get("cpu%d" % i)
-            row = ['<td>cpu%d</td>' % i,
-                   '<td class="n%s">%s</td>' % (thr_cell_cls(pi, 20.0, 50.0),
-                                                '-' if pi is None else '%.1f' % pi)]
-            vec = [v[i] if i < len(v) else 0 for (_, _, v) in _actirq]
-            row += ['<td class="n">%s</td>' % _km(x) for x in vec]
-            oth = sum(v[i] if i < len(v) else 0 for (_, _, v) in _otherirq)
+        if _actirq:
+            _hdr = ['<th>CPU</th>', '<th class="n">%irq</th>']
+            for k, dv, vec in _actirq:
+                _hdr.append('<th class="n">%s</th>' % esc(k))
             if _otherirq:
-                row.append('<td class="n">%s</td>' % _km(oth))
-            tot = sum(vec) + oth
-            row.append('<td class="n">%s</td>' % _km(tot))
-            if tot:
-                hi = max(range(len(vec)), key=lambda j: vec[j])
-                row.append('<td class="n">%s %.0f%%</td>' % (esc(_actirq[hi][0]), 100.0 * vec[hi] / tot))
-            else:
-                row.append('<td class="n">-</td>')
-            h.append('<tr>' + ''.join(row) + '</tr>')
-        _ag = _pct("cpu", 5)
-        ftr = ['<tr><td>Total</td>',
-               '<td class="n">%s</td>' % ('-' if _ag is None else '%.1f' % _ag)]
-        ftr += ['<td class="n">%s</td>' % _km(sum(v)) for (_, _, v) in _actirq]
-        if _otherirq:
-            ftr.append('<td class="n">%s</td>' % _km(sum(sum(v) for (_, _, v) in _otherirq)))
-        ftr.append('<td class="n">%s</td>' % _km(sum(sum(t[2]) for t in _idelta)))
-        ftr.append('<td class="n">-</td>')
-        h.append(''.join(ftr) + '</tr>')
-        h.append('</table>')
-        # collapsed by default (user 2026-10-31), same _fold handling as above
-        parts.append(_fold('IRQ per CPU', ''.join(h)))
-        if _otherirq:
-            note("low-activity IRQs collapsed into 'other' (all %d listed): %s" % (
-                len(_otherirq), ", ".join(k for k, _d, _v in _otherirq)))
+                _hdr.append('<th class="n">other (%d irq)</th>' % len(_otherirq))
+            _hdr += ['<th class="n">Total</th>', '<th class="n">Top IRQ</th>']
+            h = ['<table class="t"><tr>' + ''.join(_hdr) + '</tr>']
+            for i in range(_ncpu):
+                pi = _pirq.get("cpu%d" % i)
+                row = ['<td>cpu%d</td>' % i,
+                       '<td class="n%s">%s</td>' % (thr_cell_cls(pi, 20.0, 50.0),
+                                                    '-' if pi is None else '%.1f' % pi)]
+                vec = [v[i] if i < len(v) else 0 for (_, _, v) in _actirq]
+                row += ['<td class="n">%s</td>' % _km(x) for x in vec]
+                oth = sum(v[i] if i < len(v) else 0 for (_, _, v) in _otherirq)
+                if _otherirq:
+                    row.append('<td class="n">%s</td>' % _km(oth))
+                tot = sum(vec) + oth
+                row.append('<td class="n">%s</td>' % _km(tot))
+                if tot:
+                    hi = max(range(len(vec)), key=lambda j: vec[j])
+                    row.append('<td class="n">%s %.0f%%</td>' % (esc(_actirq[hi][0]), 100.0 * vec[hi] / tot))
+                else:
+                    row.append('<td class="n">-</td>')
+                h.append('<tr>' + ''.join(row) + '</tr>')
+            _ag = _pct("cpu", 5)
+            ftr = ['<tr><td>Total</td>',
+                   '<td class="n">%s</td>' % ('-' if _ag is None else '%.1f' % _ag)]
+            ftr += ['<td class="n">%s</td>' % _km(sum(v)) for (_, _, v) in _actirq]
+            if _otherirq:
+                ftr.append('<td class="n">%s</td>' % _km(sum(sum(v) for (_, _, v) in _otherirq)))
+            ftr.append('<td class="n">%s</td>' % _km(sum(sum(t[2]) for t in _idelta)))
+            ftr.append('<td class="n">-</td>')
+            h.append(''.join(ftr) + '</tr>')
+            h.append('</table>')
+            # collapsed by default (user 2026-10-31), same _fold handling as above
+            parts.append(_fold('IRQ per CPU', ''.join(h)))
+            if _otherirq:
+                note("low-activity IRQs collapsed into 'other' (all %d listed): %s" % (
+                    len(_otherirq), ", ".join(k for k, _d, _v in _otherirq)))
     # DB Process: the postmaster listening on THIS awr's port (multi-instance
     # safe), its cpuset pinning and its EFFECTIVE rlimits (/proc/<pid>/limits,
     # world-readable) -- the running process's limits are the authoritative
