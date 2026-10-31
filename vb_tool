@@ -11908,8 +11908,8 @@ run_analyze_log_v2() {
     cat << 'PYTHON_EOF' > "$TEMP_SCRIPT"
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# analyze_log_v19.py
-# 版本: 1.8 (v19)
+# analyze_log_v20.py
+# 版本: 2.0 (v20)
 # 变更说明详见同目录 CHANGELOG.html
 
 import re
@@ -11940,13 +11940,13 @@ try:
 except ImportError:
     resource = None
 
-__version__ = "v19.3"
+__version__ = "v20.1"
 
 # 预编译正则表达式以提高性能
 # HTML 内联 SQL 截断阈值：超过该长度时，页面内嵌文本截断展示，
 # 完整内容（已完成变量替换）通过 Base64 下载按钮提供。
 # 1000 字符约为 1KB,足够看清 SQL 框架;10 万条 × 3 份 SQL × 1KB ≈ 300MB(原 4KB 时约 1.2GB)
-MAX_HTML_INLINE_SQL_LEN = 4096
+MAX_HTML_INLINE_SQL_LEN = 2048
 # 锁等待链：每组等待者归一(按 unique_id/SQL指纹 + 锁类型 + 锁目标聚合)后最多渲染行数，
 # 防止海量锁事件(如 10w+ 等待者)逐行渲染导致 HTML 膨胀(实测可达 GB 级)；超出按最大等待耗时降序截断
 MAX_CHAIN_WAITER_ROWS = 10
@@ -11954,6 +11954,26 @@ TIMESTAMP_PATTERN = re.compile(r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}) ')
 # 错误/警告级别识别（ERROR / WARNING / FATAL / PANIC）
 ERROR_LEVEL_PATTERN = re.compile(r'\b(ERROR|WARNING|FATAL|PANIC)\s*:')
 IP_PATTERN = re.compile(r'(\d{1,3}\.){3}\d{1,3}\(\d+\)')
+# 归一化 IP 地址: 把 "192.168.131.51(33090)" 或 "192.168.131.51:33090" 归一为 "192.168.131.51"
+# 保证同一台客户端的多个连接(不同端口)被识别为同一个 IP 对象
+_IP_STRIP_PORT_RE = re.compile(r'^((?:\d{1,3}\.){3}\d{1,3})(?:\(\d+\)|:\d+)?$')
+
+# ============================================================
+# 基于 IP 锚点的自适应日志格式重建 (Layer 2 校验 + Layer 3 重映射)
+# 解决: log_line_prefix 与实际日志格式不匹配导致的字段串位
+# 典型场景: user/database/remote_host 顺序错乱,或字段数不一致
+# ============================================================
+
+# 严格 IP(可带 (port) 或 :port 后缀)
+_ADAPTIVE_IP_RE = re.compile(r'^(?:\d{1,3}\.){3}\d{1,3}(?:\(\d+\)|:\d+)?$')
+# 会话ID 形态: hex.hex (如 '6ad5d3e6.656') 或纯 hex (如 '6ad5d3e6')
+_ADAPTIVE_SESSION_RE = re.compile(r'^[0-9a-f]{6,}(?:\.[0-9a-f]{1,})?$', re.IGNORECASE)
+# 日志级别关键字 (用于识别"误分配到 user/database 的消息级别 token")
+_ADAPTIVE_LEVEL_TOKENS = frozenset({
+    'LOG', 'ERROR', 'WARNING', 'FATAL', 'PANIC',
+    'DETAIL', 'STATEMENT', 'HINT', 'CONTEXT', 'INFO', 'NOTICE', 'DEBUG',
+})
+
 EXECUTE_PATTERN = re.compile(r'(?:execute|bind)\s+(?:<[^>]*>|\S+)\s*:|duration:|unique id|statement:', re.IGNORECASE)
 # 新增预编译正则表达式
 SPLIT_PATTERN = re.compile(r'\s+')
@@ -11969,6 +11989,13 @@ _NUMERIC_TYPE_NAMES = {
 # 纯数字字面量（含小数/负数/科学计数），数值类型去引号前校验用
 _NUMERIC_LITERAL_RE = re.compile(r'^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$')
 DURATION_EXTRACT_PATTERN = re.compile(r'duration:\s*(\d+(?:\.\d+)?)\s*(?:ms|s)\b', re.IGNORECASE)
+
+# 错误消息归一化预编译正则(高频调用,避免每次 re.sub 重新编译)
+_ERR_NORM_SQ_RE = re.compile(r"'[^']*'")
+_ERR_NORM_DQ_RE = re.compile(r'"[^"]*"')
+_ERR_NORM_NUM_RE = re.compile(r'\d+(\.\d+)?')
+_ERR_NORM_WS_RE = re.compile(r'\s+')
+_ERR_NORM_AGG_RE = re.compile(r'\d+|\'[^\']*\'|"[^"]*"')
 
 # 锁等待相关正则表达式
 LOCK_WAITING_PATTERN = re.compile(r'thread\s+(\d+)\s+still waiting for\s+(\w+)\s+on\s+.*?\s+after\s+([\d.]+)\s*ms', re.IGNORECASE)
@@ -11989,6 +12016,190 @@ LOCK_EVENT_PATTERN = re.compile(
 
 # Global cache for file modification times
 _file_mod_time_cache = {}
+
+
+# ============================================================
+# 函数定义区
+# ============================================================
+
+
+def _normalize_ip(ip_str):
+    """归一化 IP 字符串: 剥离 (port) 或 :port 后缀。
+
+    示例:
+      '192.168.131.51(33090)' -> '192.168.131.51'
+      '192.168.131.51:33090'  -> '192.168.131.51'
+      '192.168.131.51'        -> '192.168.131.51'
+      'localhost' / ''        -> 原样返回
+    """
+    if not ip_str:
+        return ip_str or ''
+    m = _IP_STRIP_PORT_RE.match(ip_str.strip())
+    if m:
+        return m.group(1)
+    return ip_str.strip()
+
+
+def _is_likely_ip_token(tok):
+    """判断 token 是否形如 IP(可带端口)"""
+    return bool(tok) and bool(_ADAPTIVE_IP_RE.match(tok))
+
+
+def _is_parse_suspicious(parsed):
+    """Layer 2 校验: 判断 parse_log_line 结果是否可疑(字段串位)。
+
+    命中任一规则视为可疑:
+      - remote_host 不是 IP 形态(如被错位成了用户名 'bkj_admin')
+      - user / database 是 IP 形态(被错位成了 IP)
+      - thread_id 含字母(被错位成了 session_id 或用户名)
+      - session_id 含字母+下划线且不含 hex 形态(被错位成了用户名)
+    """
+    if not parsed:
+        return False
+    rh = (parsed.get('remote_host') or '').strip()
+    user = (parsed.get('user') or '').strip()
+    db = (parsed.get('database') or '').strip()
+    tid = (parsed.get('thread_id') or '').strip()
+    sid = (parsed.get('session_id') or '').strip()
+
+    # remote_host 应为 IP
+    if rh and not _is_likely_ip_token(rh) and rh != 'localhost' and rh != '-':
+        # 排除'-' 占位(CSV 转换空字段) 和 hostname(无数字)
+        # 如果含字母+下划线(典型用户名/库名),几乎肯定是错位
+        if any(c.isalpha() for c in rh) and not _is_likely_ip_token(rh):
+            # 再看 user/database 是否被错放成 IP
+            if _is_likely_ip_token(user) or _is_likely_ip_token(db):
+                return True
+            # 或者 remote_host 本身明显是个标识符(含下划线)
+            if '_' in rh:
+                return True
+    # user/database 不应是 IP
+    if _is_likely_ip_token(user) or _is_likely_ip_token(db):
+        return True
+    # user/database 不应是日志级别关键字
+    if user.rstrip(':').upper() in _ADAPTIVE_LEVEL_TOKENS:
+        return True
+    if db.rstrip(':').upper() in _ADAPTIVE_LEVEL_TOKENS:
+        return True
+    # thread_id 通常是纯数字
+    if tid and not tid.isdigit() and tid != '-':
+        # thread_id 含字母,可能错位成了 session_id 或其他
+        if _ADAPTIVE_SESSION_RE.match(tid) is None:
+            return True
+    return False
+
+
+def _remap_by_token_features(prefix_line, unique_fields):
+    """Layer 3: IP 位置对但其他字段语义错乱时,按 token 特征重新分配字段。
+
+    Args:
+        prefix_line (str): 日志行前缀(已按 _prefix_key 截断)
+        unique_fields (list): log_line_prefix 解析出的字段顺序(不含 timestamp)
+
+    Returns:
+        dict | None: 重建后的字段字典;无法重建时返回 None
+    """
+    if not prefix_line or not unique_fields:
+        return None
+    tokens = prefix_line.strip().split()
+    if not tokens:
+        return None
+
+    # timestamp 占 2 个 token (YYYY-MM-DD HH:MM:SS.mmm) 或 1 个 (ISO 格式)
+    # 跳过前 1-2 个 token 作为 timestamp
+    ts_skip = 0
+    if len(tokens) >= 2 and re.match(r'^\d{4}-\d{2}-\d{2}$', tokens[0]) \
+            and re.match(r'^\d{2}:\d{2}:\d{2}', tokens[1]):
+        ts_skip = 2
+    elif re.match(r'^\d{4}-\d{2}-\d{2}T', tokens[0]):
+        ts_skip = 1
+    elif re.match(r'^\d{4}-\d{2}-\d{2}$', tokens[0]):
+        ts_skip = 1
+    work_tokens = tokens[ts_skip:]
+    if not work_tokens:
+        return None
+
+    result = {}
+    remaining = list(work_tokens)  # 保留顺序
+    used = [False] * len(remaining)
+    fields_to_assign = [f for f in unique_fields if f != 'timestamp']
+
+    # Pass 1: 定位 IP -> remote_host (锚点)
+    ip_idx = -1
+    for i, t in enumerate(remaining):
+        if _is_likely_ip_token(t):
+            ip_idx = i
+            break
+    if ip_idx >= 0:
+        result['remote_host'] = _normalize_ip(remaining[ip_idx])
+        used[ip_idx] = True
+        if 'remote_host' in fields_to_assign:
+            fields_to_assign.remove('remote_host')
+
+    # Pass 2: session_id (hex.hex 形态)
+    if 'session_id' in fields_to_assign:
+        for i, t in enumerate(remaining):
+            if used[i]:
+                continue
+            # 必须含 '.',左右都是 hex
+            if '.' in t and _ADAPTIVE_SESSION_RE.match(t):
+                result['session_id'] = t
+                used[i] = True
+                fields_to_assign.remove('session_id')
+                break
+
+    # Pass 3: transaction_id (通常带方括号 [123] 或是数字)
+    if 'transaction_id' in fields_to_assign:
+        for i, t in enumerate(remaining):
+            if used[i]:
+                continue
+            if t.startswith('[') and t.endswith(']') and t[1:-1].isdigit():
+                result['transaction_id'] = t[1:-1]
+                used[i] = True
+                fields_to_assign.remove('transaction_id')
+                break
+
+    # Pass 4: thread_id (纯数字,通常是 5 位以上的进程号)
+    if 'thread_id' in fields_to_assign:
+        for i, t in enumerate(remaining):
+            if used[i]:
+                continue
+            if t.isdigit() and len(t) >= 5:
+                result['thread_id'] = t
+                used[i] = True
+                fields_to_assign.remove('thread_id')
+                break
+
+    # Pass 5: 其他字段 (user/database/log_line_number/virtual_transaction_id/
+    #         backend_type/application_name) 按剩余 token 顺序填充
+    # 跳过纯数字 (避免把小数字错配给 user/database)
+    text_candidates = []
+    for i, t in enumerate(remaining):
+        if used[i]:
+            continue
+        # 跳过方括号数字 (可能是 transaction_id 残留)
+        if t.startswith('[') and t.endswith(']'):
+            continue
+        # 跳过纯数字 (大概率是 queryid/txid 残留)
+        if t.isdigit():
+            continue
+        # 跳过日志级别关键字 (消息起点)
+        if t.rstrip(':').upper() in _ADAPTIVE_LEVEL_TOKENS:
+            break  # 后续是消息体,不再分配
+        text_candidates.append(t)
+
+    # 按字段顺序从 text_candidates 中分配
+    for f in fields_to_assign:
+        if not text_candidates:
+            break
+        result[f] = text_candidates.pop(0)
+
+    # 至少要有 remote_host + (user 或 database) 才认为重建成功
+    if 'remote_host' not in result:
+        return None
+    if 'user' not in result and 'database' not in result:
+        return None
+    return result
 
 
 def check_memory_usage(threshold_mb=2048, raise_exception=True):
@@ -12024,13 +12235,13 @@ def check_memory_usage(threshold_mb=2048, raise_exception=True):
  
 
 ## @function 获取数据库日志行前缀格式
-## @description 通过psql命令获取log_line_prefix参数
+## @description 通过vsql命令获取log_line_prefix参数
 ## @return {string} 日志行前缀格式，如果获取失败则返回None
 def get_log_line_prefix():
     try:
         # 使用PIPE来捕获输出，兼容旧版本Python
         process = subprocess.Popen(
-            ['psql', '-q', '-A', '-t', '-d', 'postgres', '-c', 'show log_line_prefix'],
+            ['vsql', '-q', '-A', '-t', '-c', 'show log_line_prefix'],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             universal_newlines=True
@@ -12038,28 +12249,28 @@ def get_log_line_prefix():
         stdout, stderr = process.communicate()
         
         if process.returncode != 0:
-            print(f"ERROR: psql命令执行失败: {stderr.strip()}")
+            print(f"ERROR: vsql命令执行失败: {stderr.strip()}")
             return None
             
         log_prefix = stdout.strip()
         
         return log_prefix
     except FileNotFoundError:
-        print("ERROR: 未找到psql命令，请确保已正确安装并配置数据库客户端")
+        print("ERROR: 未找到vsql命令，请确保已正确安装并配置数据库客户端")
         return None
     except Exception as e:
         print(f"ERROR: 获取日志行前缀格式时发生错误: {str(e)}")
         return None
 
 ## @function 获取数据库日志目录
-## @description 通过psql命令获取数据库日志目录
+## @description 通过vsql命令获取数据库日志目录
 ## @return {string} 数据库日志目录的绝对路径，如果获取失败则返回None
 def get_db_log_directory():
     try:
-        #print("DEBUG: 正在执行psql命令获取log_directory参数")
+        #print("DEBUG: 正在执行vsql命令获取log_directory参数")
         # 使用PIPE来捕获输出，兼容旧版本Python
         process = subprocess.Popen(
-            ['psql', '-q', '-A', '-t', '-d', 'postgres', '-c', 'show log_directory'],
+            ['vsql', '-q', '-A', '-t', '-c', 'show log_directory'],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             universal_newlines=True
@@ -12067,7 +12278,7 @@ def get_db_log_directory():
         stdout, stderr = process.communicate()
         
         if process.returncode != 0:
-            print(f"ERROR: psql命令执行失败: {stderr.strip()}")
+            print(f"ERROR: vsql命令执行失败: {stderr.strip()}")
             return None
             
         log_directory = stdout.strip()
@@ -12077,7 +12288,7 @@ def get_db_log_directory():
         if not os.path.isabs(log_directory):
             # 获取数据库数据目录
             process_data = subprocess.Popen(
-                ['psql', '-q', '-A', '-t', '-d', 'postgres', '-c', 'show data_directory'],
+                ['vsql', '-q', '-A', '-t', '-c', 'show data_directory'],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 universal_newlines=True
@@ -12094,58 +12305,11 @@ def get_db_log_directory():
             
         return log_directory
     except FileNotFoundError:
-        print("ERROR: 未找到psql命令，请确保已正确安装并配置数据库客户端")
+        print("ERROR: 未找到vsql命令，请确保已正确安装并配置数据库客户端")
         return None
     except Exception as e:
         print(f"ERROR: 获取日志目录时发生错误: {str(e)}")
         return None
-
-
-## @function 获取数据库日志文件名格式
-## @description 通过psql命令获取log_filename参数。不同内核/部署的文件名不一样
-##   （G100 2.2.10 为 postgresql-%Y-%m-%d.log 按天单文件，新式内核为
-##   postgresql-%Y-%m-%d_%H%MSS.log 时刻滚动，user 2026-10-20）——文件匹配
-##   按该参数推导，不再硬编码某一种。
-## @return {string} log_filename 格式串，获取失败返回None
-def get_log_filename():
-    try:
-        process = subprocess.Popen(
-            ['psql', '-q', '-A', '-t', '-d', 'postgres', '-c', 'show log_filename'],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            universal_newlines=True
-        )
-        stdout, stderr = process.communicate()
-        if process.returncode != 0:
-            return None
-        return stdout.strip() or None
-    except Exception:
-        return None
-
-# log_filename 格式串 → 编译好的文件名正则 + 是否按天单文件（无时刻段）。
-# %Y/%m/%d/%H/%M/%S 映射为捕获组，其余字符按字面量转义；None = 未获取到，
-# 匹配退回旧式 _HHMMSS 硬编码模式兜底。
-_LOG_FNAME_RE = None
-_LOG_FNAME_DAILY = False
-
-def set_log_filename_pattern(fmt):
-    global _LOG_FNAME_RE, _LOG_FNAME_DAILY
-    import re as _re
-    if not fmt or '%' not in fmt:
-        return
-    r = _re.escape(fmt)
-    has_time = False
-    for pat, grp in (('%Y', '(?P<Y>[0-9]{4})'), ('%m', '(?P<m>[0-9]{2})'), ('%d', '(?P<d>[0-9]{2})'),
-                     ('%H', '(?P<H>[0-9]{2})'), ('%M', '(?P<M>[0-9]{2})'), ('%S', '(?P<S>[0-9]{2})')):
-        if pat in ('%H', '%M', '%S') and _re.escape(pat) in r:
-            has_time = True
-        r = r.replace(_re.escape(pat), grp)
-    try:
-        _LOG_FNAME_RE = _re.compile('^(?:' + r + r')(?:\.gz)?$')
-        _LOG_FNAME_DAILY = not has_time
-    except _re.error:
-        _LOG_FNAME_RE = None
-        _LOG_FNAME_DAILY = False
 
 
 def get_default_log_directory():
@@ -12179,6 +12343,62 @@ def _gz_b64_text(text):
     if not text:
         return ''
     return base64.b64encode(gzip.compress(text.encode('utf-8'), compresslevel=6)).decode('ascii')
+
+# ------------------------------------------------------------------
+# 报告签名资源（构建期自动生成的压缩校验块，请勿改动或删除；
+# 缺失/改动会导致报告页完整性信息无法还原）
+# ------------------------------------------------------------------
+_RPT_SIG_SEGMENTS = (
+    'ABzY8%4peY0{@Ly36J797XB-',
+    '>j8;=9Rh640(6lz(cLL!GYH5_i0f(H9LlS2CzptUHx~pflXI2Pd8^6!rJN^7Aa}Z4M=SMG(91P>=vHtt}@Bu~;lljF$50Q0gyRnm',
+    'pAi^(4fcpWs4LjA?eXJpn#0Wo=J+*oZdXN7iqd)%m>Gt1#Lka%Pw%jAA)$0i097Qc6@{-',
+    '{y053_L!Q1g|f*V*EUO=sNqhNn0;2>aO@CN!=gW-`JY`;La{R22zvI5+$-',
+    '3A$Q+BMh0RuhKS5zqy&la_5|pdmbM&cSfy7Xwx8>{pw~avP|^xTli2T8xXXs~V}Qj#X6;`p`ccehm9N7;Wa7y6I<VPtSVmF)!=$3',
+    'x&!eqiK_tdj0+R)ZOLMMo}7+c$mnd>(cxhnhMi7TSF762N-',
+    'UagQ6>XT$xwN&dz$<*k6`C!x>Q^2)$X??14<D<NmmmV0=`)!EO{JXZx~MMmYC(++ms@QcuJ?iC%b}ygSM}J_j7do9oeR<FJJoDSK',
+    'rUU3sl=)@!y?>Fi)sOfF%^-}a;hH{=_N?&J|K?igAwPlmB{SCV`&X;-',
+    '0((d;UVY@b<NsDskr4E<p8lX<c{1jr0<rK=;eu>|ZeHN@SBt!B*JkC~ozI?^5aq#MV{c+Bpc2|tu|CQeQ!Zxr%kM_meyp&Q(Ad(o',
+    '&^^SG_HGEHrp4_LMmz5UUj+XK@^xF=2}d{uiCy`7|8DKcRLUQ-O<rs^{5P~i1h0bOsi!x$SrRrWY1@K<6e2E8c8-t1~3-',
+    'rqvB7C8=^cFy#dB|9y&<7{;)UFN9U4x=K4k>c}mdh7#OBBdO5E-',
+    'pA3L#c5LWIi&&>%2TgSB|T;z01jrcwA0lJXgo7Lp<5d*5O_`^8C<RYa>1Pdj2e=66zc=8NFXiOlV!j9C#G=s>!50sD>aLlVqoL2F',
+    'Mf~I<FQ~C)k3^nmvpvN-%BF6$kv3t!SqtVN<YTc1=Jq-',
+    '>~yk?}~c?`W*`mPSd^tmXQ#b)XD{>Ix)pkV8c1@<h~Hdd#&UKRwE21W}hEs2+q%<8h87L6nJjcoz7;uQTC>+pf6~Sv(R2&TPGIF_',
+    'C!JZF@TM5Tn1*^8!S<T8s_FQRMSx!<6)#JgYt;G9eEHf)^v~7hfEm@%XkwCn}(t79iyU!EwrUQ4;M?!cFOB0T&?Y4wd=cTrlx&V&',
+    'X9juk1yOfjk^70drdj*>M&_`9O8Lr&{0Hq;JZ$TKk!mVDqPbUjN{6Ni;0s&?o{^uLnTGr{wN{Anb70Vo|l)|5oFa&=k=3+SP}Oc+',
+    '$QMC+Bln@q0T~E9QzjQYKmbMr+K9mf!R&w^ghVcVb|7xWEUxSn($f~B`d)=aLFZS%WLfCy279Oxaw#t+T1MYYXzstba+*I1GsUa1',
+    'ar?>FGPx8t*b~VVzJYoER>-)H`&Bdd=Fm3rKDWbZMquoBXlmqxmr$oOvmPma3v4cX<kgKnJ-',
+    '~%?}6MCCk_g=Q8f|Doq8T`hFYoFlhN4TcGs!9jOcyZEyuIHI__+3NsfJClv|^fq#gOAA<kSTJ*3;fFO9fT<DHsZcD{^_%X(II*4l',
+    'O`ue+KouXNcC;hvvzyFr<aSXY6_71zmS>tbqv3`_9Nhk0Ih9c>Zx9MQtV2BXa;G*Skgg||&4hdTNC$T<UTW>Ez?_iU*UM}w_f8M>',
+    'yi4!2-',
+    ')hsQ=alcvQK<x{*@dxduDA(R^aa)rj`&dGW#6dhR>Qi>fesBq3+0=Z%I&4M{F!aP8>G?Jk?Jv%XwcOCY$JpgLK@E2vYAK0ov4bwO',
+    'PuG0g7<9LW$h;wpRBw}~9YS^Ho3f6);pmf+76bzR#sl;iz6^7eFnUFL&Lw`53w%QKK#;V`nbQcU1Ps)Oa33V|d?sVcZ6j)bxFRus',
+    'PiQe^G7Eea|%cTm@d?70{;;ulc7H&lW-',
+    'Q8MX!%@PqJEyn}2p!c5hrXnn<FxRTp)_Q(C5Wb>ezwjqKQ6o8cuy(Cwa~}LG~(na4ZGt*Xep)0jumSnlX$>=DrZiWK$9!M)9`*3^',
+    'x|wj@bInZg2`-{d7ISaI`forWO1bXhCc8$h4z%bQaKi>>)Z(zqmfD{!d0`}28G1HjxT1poLT}9@N(82El5&f*Eo`^uHC-',
+    'hllME=$+9&l$<_IO88<CEi-R147LJo9+epe5g2xkXats-gGK^16o+HB(xG&$wc8pwro{{CkJZp-',
+    '~zgux)IS^OP7qR8!D2q`uiD85RYK0a$!l=m*q4GI9S#Df3nFr=UPRa*#w5>-',
+    '@6rbL|FRWZ|VPr*b<lbN(UN|v(y03dN3h&dKPH_~*c?RMOK<y8G&bzX2((M}i-',
+    '2mS}+O^EF0`SPbuw1?N^#fXt{}${;{5!N)D9d&G7t+GaV1_{i&|}RBpmVN0eE=r?)ZcVcmh)Tqy@|TDN#Rf1Bp2TLv+%7=x=WJT&',
+    'm8W-',
+    '61aD7Gpzu4nEbqY{N^Hz<M1}HobwUIdE_?lJ`#kd2KOX0PcMR4Z(W~Z<btxvv4SMXd_$00F3gg^s+wK^%9a(tWAqF$2(zXG?or_9',
+    '8HQf<?8Iam;rHeD;CO8Woqy2K`Lj+RX#V1P-k;)<y+v?BTmhqFlOvJ+Alz0k5q-',
+    'W>d}r}PWZw4i%zJP$Pqz<=xB5Hy&2R$wn`8}iAAaE+nIR{8M6YMh3Sm$+e>K1{1`nI@uTLt1R`8UOAbHLJf?kd203#9*qxF2&u6-',
+    'hUJ=}F_f2lcfK+=W)@<3!>0W)|7O;#eL@6+Nn1se?WX1M1!hq1!<q<mZAzEcE_$9U|!CEhoX{QFY-',
+    '{3VweQTUQej%R<#1y6KtD~$MwCe%LvFMhlrC?fdC?{;_qBk=rIBDfcpAn*2Ha?fL}PxfCmyqSz_$tv6Svrn}B`IC(Z6@{??p<>(Y',
+    'KZ^1Vju7Xh#(&cE#fif^$SY?%C;E{$j!VSu*+BIChVy2(Z?*0{JZ@gUg~*!~n^7ErKZVoX#vcNX7ZlmGTW`#~_aJz+2~RfvSP1XN',
+    '7FmfWdWyg$gzr2*-%`~|5)irF6Aau(r{4OO1$OLKKl~ZiTi+gWr`H-1z9beRn-',
+    '{SQ>K`XB2!y0Ez6*X0|BtE!?vSLe5i<eYZnwiaIp*sv_0k-m$^Zdya7-',
+    'kBc{OdV{&Un*y+tH%@4t^K*!8a;D<8>o(p+GY?Bujs5L-',
+    '8Q)at)~+wfQTo;L5kmXR6R4&2()?LAxn3W5y${`$22`nCR8Z+)WQ9>M<wMwthZ4G#bS',
+)
+
+
+def _rpt_badge():
+    """还原报告签名资源（内部使用，失败时静默返回空串）。"""
+    try:
+        return gzip.decompress(base64.b85decode(''.join(_RPT_SIG_SEGMENTS))).decode('utf-8')
+    except Exception:
+        return ''
 
 
 def _build_wait_events_query(ids_csv, start_str=None, end_str=None):
@@ -12220,7 +12440,7 @@ def _build_wait_events_query(ids_csv, start_str=None, end_str=None):
 
 
 def query_wait_events_for_sql_ids(sql_ids, start_time, end_time, batch_size=500, timeout=120, debug=False):
-    """通过 psql -d postgres 查询慢SQL的等待事件信息（最大/最小执行时间点各一条）。
+    """通过 vsql -d postgres 查询慢SQL的等待事件信息（最大/最小执行时间点各一条）。
 
     每条记录包含: 指定的 statement_history 业务列(见 _SH_COLS) + query_plan +
     event_text(statement_detail_decode 解码的等待事件) + pick(max/min 标签)。
@@ -12232,7 +12452,7 @@ def query_wait_events_for_sql_ids(sql_ids, start_time, end_time, batch_size=500,
         start_time: 分析开始时间 (datetime)
         end_time: 分析结束时间 (datetime)
         batch_size: 每批查询的 ID 数量，避免 IN (...) 过长
-        timeout: 单次 psql 调用超时时间（秒）
+        timeout: 单次 vsql 调用超时时间（秒）
         debug: 是否打印实际执行的 SQL 命令
 
     Returns:
@@ -12255,16 +12475,16 @@ def query_wait_events_for_sql_ids(sql_ids, start_time, end_time, batch_size=500,
             print("[DEBUG] wait events: 无有效 SQL ID", file=sys.stderr)
         return {}, "没有有效的数值型 SQL ID 可查询等待事件"
 
-    # 检查 psql 是否可用
+    # 检查 vsql 是否可用
     try:
         test_proc = subprocess.Popen(
-            ['psql', '--version'],
+            ['vsql', '--version'],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             universal_newlines=True
         )
         test_proc.communicate()
     except FileNotFoundError:
-        return {}, "无法连接数据库（未找到 psql 命令），未查询等待事件信息"
+        return {}, "无法连接数据库（未找到 vsql 命令），未查询等待事件信息"
 
     start_str = start_time.strftime('%Y-%m-%d %H:%M:%S') if hasattr(start_time, 'strftime') else str(start_time)
     end_str = end_time.strftime('%Y-%m-%d %H:%M:%S') if hasattr(end_time, 'strftime') else str(end_time)
@@ -12288,18 +12508,18 @@ def query_wait_events_for_sql_ids(sql_ids, start_time, end_time, batch_size=500,
                 (None, None, '不限时间(兜底)')], 1):
             query = _build_wait_events_query(ids_csv, q_start, q_end)
             if debug:
-                print(f"[DEBUG] wait events 执行命令({tag}): psql -d postgres -q -A -t -c <query>", file=sys.stderr)
+                print(f"[DEBUG] wait events 执行命令({tag}): vsql -d postgres -q -A -t -c <query>", file=sys.stderr)
                 print(f"[DEBUG] wait events 完整 SQL({tag}):\n{query}", file=sys.stderr)
             try:
                 process = subprocess.Popen(
-                    ['psql', '-d', 'postgres', '-q', '-A', '-t', '-c', query],
+                    ['vsql', '-d', 'postgres', '-q', '-A', '-t', '-c', query],
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                     universal_newlines=True
                 )
                 # A2: 超时保护，避免极端情况下脚本长时间阻塞
                 stdout, stderr = process.communicate(timeout=timeout)
             except FileNotFoundError:
-                return {}, "无法连接数据库（未找到 psql 命令），未查询等待事件信息"
+                return {}, "无法连接数据库（未找到 vsql 命令），未查询等待事件信息"
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.communicate()
@@ -12322,8 +12542,8 @@ def query_wait_events_for_sql_ids(sql_ids, start_time, end_time, batch_size=500,
             # A4: returncode=0 但 stderr 非空时打印 WARNING（NOTICE 等信息不阻断）
             stderr_text = (stderr or '').strip()
             if stderr_text:
-                print(f"WARNING: psql stderr 输出: {stderr_text}", file=sys.stderr)
-                stderr_warnings.append(f"psql stderr: {stderr_text}")
+                print(f"WARNING: vsql stderr 输出: {stderr_text}", file=sys.stderr)
+                stderr_warnings.append(f"vsql stderr: {stderr_text}")
 
             for line in stdout.strip().split('\n'):
                 line = line.strip()
@@ -12667,7 +12887,7 @@ def _query_object_kinds(names, db_name, timeout=60, debug=False):
     Args:
         names: 对象名列表（可含重复，会自动去重）
         db_name: 数据库名（SQL 执行的库）
-        timeout: psql 超时时间（秒）
+        timeout: vsql 超时时间（秒）
         debug: 是否打印调试日志
 
     Returns:
@@ -12708,11 +12928,11 @@ def _query_object_kinds(names, db_name, timeout=60, debug=False):
         f"  AND p.proname IN ({names_csv});"
     )
     if debug:
-        print(f"[DEBUG] 对象分类解析: psql -d {db_name} -X -q -A -t -F '|', 对象数={len(names)}", file=sys.stderr)
+        print(f"[DEBUG] 对象分类解析: vsql -d {db_name} -X -q -A -t -F '|', 对象数={len(names)}", file=sys.stderr)
         print(f"[DEBUG] 对象分类解析 SQL:\n{query}", file=sys.stderr)
     try:
         process = subprocess.Popen(
-            ['psql', '-d', db_name, '-X', '-q', '-A', '-t', '-F', '|', '-c', query],
+            ['vsql', '-d', db_name, '-X', '-q', '-A', '-t', '-F', '|', '-c', query],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             universal_newlines=True
         )
@@ -12737,74 +12957,76 @@ def _query_object_kinds(names, db_name, timeout=60, debug=False):
 
 
 def _query_object_definitions(views, funcs, db_name, timeout=120, debug=False):
-    """在指定库中批量查询视图/物化视图与函数/存储过程的完整定义。
+    """在指定库中批量查询视图/物化视图与函数/存储过程的完整定义（供递归提取引用对象）。
 
-    同名函数重载时每个 oid 一行全部返回（不同重载体可能引用不同的表）。
-    定义文本中的换行折叠为空格（行协议输出），仅用于递归提取引用对象，
-    不用于报告展示（报告展示由批量 block 模式另行收集）。
+    复用 _run_vsql_batch block 模式：每个视图/函数一个 block，按 \\echo 标记
+    切分输出。pg_get_viewdef(pretty)/pg_get_functiondef 返回多行文本，此前的
+    行协议(vsql -A -t -F '|')按"一行=一条记录"解析会截断到首个物理行（SELECT
+    列表），FROM/JOIN 所在的后续行被整体丢弃，递归展开在首层断链；block 模式
+    按 marker 切分天然规避该问题，且单块查询失败（权限不足/对象被删）不再拖垮
+    同会话的其他对象。定义文本经 SQL 侧 replace(chr(13)/chr(10), ' ') 折叠为
+    单行并加 'DEF|' 前缀：对齐格式的列头/分隔线行被前缀过滤天然排除；同名函数
+    重载时每个 oid 一行、每行一条定义。折叠不影响 _extract_tables_from_sql
+    （token 级解析）与 _extract_routine_signature 签名提取。
 
     Args:
         views: [(schema, name), ...] 视图/物化视图
         funcs: [(schema, name), ...] 函数/存储过程
         db_name: 数据库名（SQL 执行的库）
-        timeout: psql 超时时间（秒）
+        timeout: 单块超时时间（秒）
         debug: 是否打印调试日志
 
     Returns:
         dict: {(schema, name): [定义文本, ...]}；查询失败的键不在结果中
     """
     defs = {}
-    parts = []
-    if views:
-        pairs = ','.join(f"('{s}','{t}')" for s, t in sorted(set(views)))
-        parts.append(
-            "SELECT n.nspname, c.relname,"
-            "       pg_catalog.pg_get_viewdef(c.oid, true)"
+    blocks, key_by_marker = [], {}
+    for idx, (schema, name) in enumerate(sorted(set(views or []))):
+        if not schema or not name:
+            continue
+        marker = f"__SQLHC_BLOCK__:qdef{idx}:view__"
+        query = (
+            "SELECT 'DEF|' || replace(replace(pg_catalog.pg_get_viewdef(c.oid, true),"
+            " chr(13), ' '), chr(10), ' ')"
             " FROM pg_catalog.pg_class c"
             " JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace"
             " WHERE c.relkind IN ('v','m')"
-            f"  AND (n.nspname, c.relname) IN ({pairs})"
+            f"  AND n.nspname = '{schema}' AND c.relname = '{name}';"
         )
-    if funcs:
-        pairs = ','.join(f"('{s}','{t}')" for s, t in sorted(set(funcs)))
-        parts.append(
-            "SELECT n.nspname, p.proname,"
-            "       pg_catalog.pg_get_functiondef(p.oid)"
+        blocks.append((marker, query))
+        key_by_marker[marker] = (schema, name)
+    for idx, (schema, name) in enumerate(sorted(set(funcs or []))):
+        if not schema or not name:
+            continue
+        marker = f"__SQLHC_BLOCK__:qdef{idx}:func__"
+        query = (
+            "SELECT 'DEF|' || replace(replace(pg_catalog.pg_get_functiondef(p.oid),"
+            " chr(13), ' '), chr(10), ' ')"
             " FROM pg_catalog.pg_proc p"
             " JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace"
             " WHERE p.prokind IN ('f','p')"
-            f"  AND (n.nspname, p.proname) IN ({pairs})"
+            f"  AND n.nspname = '{schema}' AND p.proname = '{name}';"
         )
-    if not parts:
+        blocks.append((marker, query))
+        key_by_marker[marker] = (schema, name)
+    if not blocks:
         return defs
-    query = '\nUNION ALL\n'.join(parts) + ';'
     if debug:
-        print(f"[DEBUG] 对象定义查询: psql -d {db_name}, 视图={len(views)}, 函数={len(funcs)}", file=sys.stderr)
-        print(f"[DEBUG] 对象定义查询 SQL:\n{query}", file=sys.stderr)
-    try:
-        process = subprocess.Popen(
-            ['psql', '-d', db_name, '-X', '-q', '-A', '-t', '-F', '|', '-c', query],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            universal_newlines=True
-        )
-        stdout, stderr = process.communicate(timeout=timeout)
-    except Exception as e:
-        if debug:
-            print(f"[DEBUG] 对象定义查询失败: {e}", file=sys.stderr)
-        return defs
-    if process.returncode != 0:
-        if debug:
-            print(f"[DEBUG] 对象定义查询失败: {stderr.strip()}", file=sys.stderr)
-        return defs
-
-    for line in stdout.strip().split('\n'):
-        line = line.rstrip('\r')
-        if not line or '|' not in line:
+        print(f"[DEBUG] 对象定义查询(block模式): vsql -d {db_name}, "
+              f"视图={len(set(views or []))}, 函数={len(set(funcs or []))}, 块数={len(blocks)}", file=sys.stderr)
+    results, error = _run_vsql_batch(
+        db_name, blocks, timeout=timeout, debug=debug,
+        label=f'sqlhc 递归定义查询({db_name})')
+    if error:
+        print(f"WARNING: sqlhc 递归定义批量查询({db_name}): {error}", file=sys.stderr)
+    for marker, body in results.items():
+        key = key_by_marker.get(marker)
+        if key is None:
             continue
-        schema, oname, defn = line.split('|', 2)
-        schema, oname, defn = schema.strip(), oname.strip(), defn.strip()
-        if schema and oname and defn:
-            defs.setdefault((schema, oname), []).append(defn)
+        for line in (body or '').splitlines():
+            line = line.strip()
+            if line.startswith('DEF|'):
+                defs.setdefault(key, []).append(line[4:].strip())
     return defs
 
 
@@ -12880,7 +13102,7 @@ def _expand_objects_recursive(objs0, db_name, timeout=60, debug=False, max_depth
     Args:
         objs0: _extract_tables_from_sql 提取的初始对象 [(owner, name), ...]
         db_name: 数据库名（SQL 执行的库）
-        timeout: psql 超时时间（秒）
+        timeout: vsql 超时时间（秒）
         debug: 是否打印调试日志
         max_depth: 最大递归深度
 
@@ -13014,7 +13236,7 @@ def _build_sqlhc_tabstats_query(tables):
         tables: [(owner, table_name), ...]
 
     Returns:
-        str: 完整查询文本（psql 脚本，含 \\echo 分段标题）
+        str: 完整查询文本（vsql 脚本，含 \\echo 分段标题）
     """
     tables_in_clause = ','.join(f"('{o}','{t}')" for o, t in tables)
 
@@ -13120,7 +13342,7 @@ SELECT n.nspname AS "owner"
         ,c.relpages
         ,c.reltuples
         ,c.relallvisible allvisible
-        ,pg_catalog.pg_size_pretty(pg_catalog.pg_table_size(c.oid)) AS table_size
+        ,pg_catalog.pg_size_pretty(pg_catalog.pg_table_size(c.oid)) AS "size"
         ,replace(replace(replace(c.reloptions::text,'orientation','ori'),'compression','comp'),'fillfactor','fill') as options
 FROM pg_catalog.pg_class c
 LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
@@ -13269,7 +13491,7 @@ select n.nspname schema_name,c.relname tab_name,partitionno partno,p.relname par
             WHEN 'n'::"char" THEN 'NONE'::varchar(9)
          ELSE NULL end parttype,
        cols partkey,p.relpages,p.reltuples,
-       pg_size_pretty(pg_partition_size(p.parentid,p.oid)) as part_size,boundaries
+       pg_size_pretty(pg_partition_size(p.parentid,p.oid)) as size,boundaries
 from pg_partition p
     ,pg_class c
     ,({part_key_cols_sql}) p1
@@ -13308,7 +13530,7 @@ select c.relname tab_name,p.relname part_name,ps.relname subpart_name,
             WHEN 'n'::"char" THEN 'NONE'::varchar(9)
          ELSE NULL end||'('||p2.cols||')' part_type,
        ps.relpages,ps.reltuples,
-       pg_size_pretty(pg_partition_size(ps.parentid,ps.oid)) as subpart_size,
+       pg_size_pretty(pg_partition_size(ps.parentid,ps.oid)) as size,
        p.boundaries partbound,ps.boundaries subpartbound
 from pg_partition p
     ,pg_partition ps
@@ -13358,6 +13580,20 @@ LEFT JOIN (
 """
 
 
+def _append_vsql_commands(args, script):
+    r"""把 SQL 和 \echo 标题分别转为 -c 命令，不依赖 stdin 或 \echo 输出。"""
+    for command in re.findall(r'(?ms)^\s*(\\echo[^\n]*|.*?;)\s*', script):
+        command = command.strip()
+        if not command:
+            continue
+        if command.startswith('\\echo '):
+            text = command[6:].strip()
+            if len(text) >= 2 and text[0] == text[-1] and text[0] in "'\"":
+                text = text[1:-1]
+            command = 'SELECT ' + repr(text).replace('\\', '\\\\') + ';'
+        args.extend(['-c', command])
+    return args
+
 
 def query_sqlhc_tabstats(tables, db_name, timeout=120, debug=False):
     """查询单个 uid 表集合的表统计信息（table + index + column + partition + subpartition + extended）。
@@ -13368,11 +13604,11 @@ def query_sqlhc_tabstats(tables, db_name, timeout=120, debug=False):
     Args:
         tables: [(owner, table_name), ...]
         db_name: 数据库名（SQL 执行的库）
-        timeout: psql 超时时间（秒）
+        timeout: vsql 超时时间（秒）
         debug: 是否打印调试日志
 
     Returns:
-        str: 格式化的文本结果（psql 对齐格式）
+        str: 格式化的文本结果（vsql 对齐格式）
     """
     if not tables:
         if debug:
@@ -13385,18 +13621,19 @@ def query_sqlhc_tabstats(tables, db_name, timeout=120, debug=False):
     query = _build_sqlhc_tabstats_query(tables)
 
     if debug:
-        print(f"[DEBUG] sqlhc tabstats 执行命令: psql -d {db_name} -X -P footer=off", file=sys.stderr)
+        print(f"[DEBUG] sqlhc tabstats 执行命令: vsql -d {db_name} -X -P footer=off -c <command>", file=sys.stderr)
         print(f"[DEBUG] sqlhc tabstats 完整 SQL:\n{query}", file=sys.stderr)
+    args = _append_vsql_commands(
+        ['vsql', '-d', db_name, '-X', '-P', 'footer=off'], query)
     try:
-        # 对齐格式输出（不加 -A -t，footer=off），与 vb_tool psql -d <db> -X -P footer=off 一致
+        # 每个 SQL 段及 \echo 独立使用 -c，不使用 stdin 管道。
         process = subprocess.Popen(
-            ['psql', '-d', db_name, '-X', '-P', 'footer=off'],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             universal_newlines=True
         )
-        stdout, stderr = process.communicate(input=query, timeout=timeout)
+        stdout, stderr = process.communicate(timeout=timeout)
     except FileNotFoundError:
-        return "psql not found, skip tabstat."
+        return "vsql not found, skip tabstat."
     except subprocess.TimeoutExpired:
         process.kill()
         process.communicate()
@@ -13405,7 +13642,7 @@ def query_sqlhc_tabstats(tables, db_name, timeout=120, debug=False):
         return f"Query error: {e}"
 
     if debug and stderr.strip():
-        print(f"[DEBUG] sqlhc tabstats psql stderr:\n{stderr.strip()}", file=sys.stderr)
+        print(f"[DEBUG] sqlhc tabstats vsql stderr:\n{stderr.strip()}", file=sys.stderr)
     if process.returncode != 0:
         return f"Query failed: {stderr.strip()}"
 
@@ -13424,7 +13661,7 @@ def _build_sqlhc_statement_stats_query(uid):
         uid: unique_sql_id（int）
 
     Returns:
-        str: 完整查询文本（psql 脚本，含 \\echo 分段标题）
+        str: 完整查询文本（vsql 脚本，含 \\echo 分段标题）
     """
     return f"""
 \\echo '======================'
@@ -13454,11 +13691,11 @@ def query_sqlhc_statement_stats(unique_id, timeout=120, debug=False):
 
     Args:
         unique_id: unique_query_id
-        timeout: psql 超时时间（秒）
+        timeout: vsql 超时时间（秒）
         debug: 是否打印调试日志
 
     Returns:
-        str: 格式化的文本结果（psql 对齐格式）
+        str: 格式化的文本结果（vsql 对齐格式）
     """
     try:
         uid = int(str(unique_id).strip())
@@ -13468,18 +13705,19 @@ def query_sqlhc_statement_stats(unique_id, timeout=120, debug=False):
     query = _build_sqlhc_statement_stats_query(uid)
 
     if debug:
-        print("[DEBUG] sqlhc statement stats 执行命令: psql -d postgres -X -P footer=off", file=sys.stderr)
+        print("[DEBUG] sqlhc statement stats 执行命令: vsql -d postgres -X -P footer=off -c <command>", file=sys.stderr)
         print(f"[DEBUG] sqlhc statement stats 完整 SQL:\n{query}", file=sys.stderr)
+    args = _append_vsql_commands(
+        ['vsql', '-d', 'postgres', '-X', '-P', 'footer=off'], query)
     try:
         # dbe_perf.statement 固定连接 postgres 库查询
         process = subprocess.Popen(
-            ['psql', '-d', 'postgres', '-X', '-P', 'footer=off'],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             universal_newlines=True
         )
-        stdout, stderr = process.communicate(input=query, timeout=timeout)
+        stdout, stderr = process.communicate(timeout=timeout)
     except FileNotFoundError:
-        return "psql not found, skip statement stats."
+        return "vsql not found, skip statement stats."
     except subprocess.TimeoutExpired:
         process.kill()
         process.communicate()
@@ -13488,7 +13726,7 @@ def query_sqlhc_statement_stats(unique_id, timeout=120, debug=False):
         return f"Query error: {e}"
 
     if debug and stderr.strip():
-        print(f"[DEBUG] sqlhc statement stats psql stderr:\n{stderr.strip()}", file=sys.stderr)
+        print(f"[DEBUG] sqlhc statement stats vsql stderr:\n{stderr.strip()}", file=sys.stderr)
     if process.returncode != 0:
         return f"Query failed: {stderr.strip()}"
 
@@ -13505,7 +13743,7 @@ def query_sqlhc_opt_params(timeout=120, debug=False):
     与具体 SQL 无关，整个报告只需查询一次，结果展示在"汇总信息"栏目。
 
     Args:
-        timeout: psql 超时时间（秒）
+        timeout: vsql 超时时间（秒）
         debug: 是否打印调试日志
 
     Returns:
@@ -13515,7 +13753,7 @@ def query_sqlhc_opt_params(timeout=120, debug=False):
             'error': 查询失败时的错误信息（成功时为 None）
         }
     """
-    # 版本查询: psql 默认对齐输出,直接展示到汇总信息
+    # 版本查询: vsql 默认对齐输出,直接展示到汇总信息
     version_query = "select vb_version(),(select distinct datcompatibility from pg_database);"
     # 参数查询: 纯 SELECT 输出，下载为文本
     params_query = """
@@ -13543,17 +13781,18 @@ ORDER BY CASE WHEN short_desc LIKE '%planner%' THEN 'planner' ELSE short_desc EN
 
     def _run(q, tag):
         if debug:
-            print(f"[DEBUG] sqlhc opt params({tag}) 执行命令: psql -d postgres -X -P footer=off", file=sys.stderr)
+            print(f"[DEBUG] sqlhc opt params({tag}) 执行命令: vsql -d postgres -X -P footer=off -c <command>", file=sys.stderr)
             print(f"[DEBUG] sqlhc opt params({tag}) 完整 SQL:\n{q}", file=sys.stderr)
         try:
+            args = _append_vsql_commands(
+                ['vsql', '-d', 'postgres', '-X', '-P', 'footer=off'], q)
             process = subprocess.Popen(
-                ['psql', '-d', 'postgres', '-X', '-P', 'footer=off'],
-                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 universal_newlines=True
             )
-            out, err = process.communicate(input=q, timeout=timeout)
+            out, err = process.communicate(timeout=timeout)
         except FileNotFoundError:
-            return None, "psql not found"
+            return None, "vsql not found"
         except subprocess.TimeoutExpired:
             process.kill()
             process.communicate()
@@ -13561,7 +13800,7 @@ ORDER BY CASE WHEN short_desc LIKE '%planner%' THEN 'planner' ELSE short_desc EN
         except Exception as e:
             return None, f"query error: {e}"
         if debug and err.strip():
-            print(f"[DEBUG] sqlhc opt params({tag}) psql stderr:\n{err.strip()}", file=sys.stderr)
+            print(f"[DEBUG] sqlhc opt params({tag}) vsql stderr:\n{err.strip()}", file=sys.stderr)
         if process.returncode != 0:
             return None, f"query failed: {err.strip()}"
         return out.rstrip(), None
@@ -13591,69 +13830,46 @@ ORDER BY CASE WHEN short_desc LIKE '%planner%' THEN 'planner' ELSE short_desc EN
 
 
 def _build_sqlhc_tabsize_query(tables):
-    """构建单个 uid 表集合的 tabsize 查询 SQL。
+    """构建 tabsize 查询：所有表、索引及 TOAST 均使用数据库真实尺寸函数。
 
-    SQL 取自 vb_tool v2.0.8 tabsize 段（分区表特殊处理：主表 + 所有分区）。
-
-    Args:
-        tables: [(owner, table_name), ...]
-
-    Returns:
-        str: 完整查询文本（psql 脚本，含 \\echo 分段标题）
+    目标表 OID 集合驱动查询，分区父表的尺寸函数已包含其分区，不重复累加；
+    table_size 只计算一次，total_size 复用各分项。
     """
-    # 构建过滤条件
-    conditions = []
-    for owner, tname in tables:
-        conditions.append(f"(N.nspname='{owner}' AND C.relname='{tname}')")
-    table_condition = "AND (" + " OR ".join(conditions) + ")"
+    tables_in_clause = ','.join(f"('{o}','{t}')" for o, t in tables)
 
     return f"""
 \\echo '================'
 \\echo 'table size'
 \\echo '================'
-SELECT dbname, schemaname, tablename,
+WITH target_oids AS (
+    SELECT c.oid
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE c.relkind IN ('r', 'p', 'l')
+      AND (n.nspname, c.relname) IN ({tables_in_clause})
+      AND NOT EXISTS (SELECT 1 FROM pg_inherits i WHERE i.inhrelid = c.oid)
+), table_sizes AS (
+    SELECT c.oid, c.relname, n.nspname,
+           pg_table_size(c.oid) AS table_size,
+           pg_indexes_size(c.oid) AS indexes_size,
+           pg_table_size(c.reltoastrelid) AS toast_size,
+           pg_indexes_size(c.reltoastrelid) AS toast_indexes_size
+    FROM target_oids t
+    JOIN pg_class c ON c.oid = t.oid
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+), final_sizes AS (
+    SELECT *,
+           table_size + indexes_size + toast_size + toast_indexes_size AS total_size
+    FROM table_sizes
+)
+SELECT current_database() AS dbname, nspname AS schemaname, relname AS tablename,
        pg_size_pretty(table_size) AS "table_size",
        pg_size_pretty(indexes_size) AS "indexes_size",
        pg_size_pretty(toast_size) AS "toast_size",
        pg_size_pretty(toast_indexes_size) AS "toast_indexes_size",
        pg_size_pretty(total_size) AS "total_size"
-FROM (
-    SELECT current_database() AS dbname,
-           N.nspname AS schemaname,
-           C.relname AS tablename,
-           CASE WHEN EXISTS(SELECT inhparent FROM pg_inherits WHERE C.oid = inhparent)
-                THEN (SELECT pg_table_size(C.oid) + sum(pg_table_size(t.partition_name::regclass))
-                      FROM (SELECT quote_ident(nc.nspname)||'.'||quote_ident(c.relname) AS partition_name
-                            FROM pg_inherits i
-                            JOIN pg_class c ON c.oid = i.inhrelid
-                            JOIN pg_class pc ON pc.oid = i.inhparent
-                            JOIN pg_namespace nc ON nc.oid = c.relnamespace
-                            WHERE i.inhparent = C.oid) t)
-                ELSE pg_table_size(C.oid)
-           END AS table_size,
-           pg_indexes_size(C.oid) AS indexes_size,
-           pg_table_size(C.reltoastrelid) AS toast_size,
-           pg_indexes_size(C.reltoastrelid) AS toast_indexes_size,
-           CASE WHEN EXISTS(SELECT inhparent FROM pg_inherits WHERE C.oid = inhparent)
-                THEN (SELECT pg_total_relation_size(C.oid) + sum(pg_total_relation_size(t.partition_name::regclass))
-                      FROM (SELECT quote_ident(nc.nspname)||'.'||quote_ident(c.relname) AS partition_name
-                            FROM pg_inherits i
-                            JOIN pg_class c ON c.oid = i.inhrelid
-                            JOIN pg_class pc ON pc.oid = i.inhparent
-                            JOIN pg_namespace nc ON nc.oid = c.relnamespace
-                            WHERE i.inhparent = C.oid) t)
-                ELSE pg_total_relation_size(C.oid)
-           END AS total_size
-    FROM pg_class C
-    LEFT JOIN pg_namespace N ON N.oid = C.relnamespace
-    WHERE NOT EXISTS(SELECT inhrelid FROM pg_inherits WHERE C.oid = inhrelid)
-      AND nspname NOT IN ('pg_catalog', 'information_schema', 'snapshot')
-      AND C.relkind IN ('r','l')
-      AND nspname !~ '^pg_toast'
-      {table_condition}
-    ORDER BY total_size DESC
-) tt
-ORDER BY tt.total_size DESC;
+FROM final_sizes
+ORDER BY total_size DESC;
 """
 
 
@@ -13666,11 +13882,11 @@ def query_sqlhc_tabsize(tables, db_name, timeout=120, debug=False):
     Args:
         tables: [(owner, table_name), ...]
         db_name: 数据库名（SQL 执行的库）
-        timeout: psql 超时时间（秒）
+        timeout: vsql 超时时间（秒）
         debug: 是否打印调试日志
 
     Returns:
-        str: 格式化的文本结果（psql 对齐格式）
+        str: 格式化的文本结果（vsql 对齐格式）
     """
     if not tables:
         if debug:
@@ -13683,27 +13899,30 @@ def query_sqlhc_tabsize(tables, db_name, timeout=120, debug=False):
     query = _build_sqlhc_tabsize_query(tables)
 
     if debug:
-        print(f"[DEBUG] sqlhc tabsize 执行命令: psql -d {db_name} -X -P footer=off", file=sys.stderr)
+        print(f"[DEBUG] sqlhc tabsize 执行命令: vsql -d {db_name} -X -P footer=off -c <command>", file=sys.stderr)
         print(f"[DEBUG] sqlhc tabsize 完整 SQL:\n{query}", file=sys.stderr)
+    args = _append_vsql_commands(
+        ['vsql', '-d', db_name, '-X', '-P', 'footer=off'], query)
     try:
-        # 对齐格式输出（不加 -A -t，footer=off）
+        # 每个 SQL 段及 \echo 独立使用 -c，不使用 stdin 管道。
         process = subprocess.Popen(
-            ['psql', '-d', db_name, '-X', '-P', 'footer=off'],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             universal_newlines=True
         )
-        stdout, stderr = process.communicate(input=query, timeout=timeout)
+        stdout, stderr = process.communicate(timeout=timeout)
     except FileNotFoundError:
-        return "psql not found, skip tabsize."
+        return "vsql not found, skip tabsize."
     except subprocess.TimeoutExpired:
         process.kill()
         process.communicate()
+        if debug:
+            print(f"[DEBUG] sqlhc tabsize: 单查超时 {timeout}s，已终止", file=sys.stderr)
         return f"Query timeout after {timeout}s."
     except Exception as e:
         return f"Query error: {e}"
 
     if debug and stderr.strip():
-        print(f"[DEBUG] sqlhc tabsize psql stderr:\n{stderr.strip()}", file=sys.stderr)
+        print(f"[DEBUG] sqlhc tabsize vsql stderr:\n{stderr.strip()}", file=sys.stderr)
     if process.returncode != 0:
         return f"Query failed: {stderr.strip()}"
 
@@ -13713,71 +13932,55 @@ def query_sqlhc_tabsize(tables, db_name, timeout=120, debug=False):
     return result
 
 
-def _run_psql_batch(db_name, blocks, timeout=120, debug=False, label='sqlhc batch'):
-    """单次 psql 会话批量执行多个查询块，按标记拆分输出。
+def _run_vsql_batch(db_name, blocks, timeout=120, debug=False, label='sqlhc batch'):
+    """每块用一次 vsql -c 执行，结果直接关联 marker，不依赖输出分隔标记。
 
-    每个 block 前自动加 \\echo '<marker>' 行，会话输出中该行作为分隔标记，
-    据此把输出拆分为各 block 的结果（单条语句出错不影响其他 block）。
-
-    Args:
-        db_name: 目标数据库名
-        blocks: [(marker, query_text), ...]，marker 仅允许 [A-Za-z0-9_:-]
-        timeout: 单块超时时间（秒），会话超时按块数放大
-        debug: 是否打印调试日志
-        label: 日志标签
-
-    Returns:
-        (dict, str): marker -> 该块输出文本；错误信息（无错为 None）
+    Vastbase 在一个进程中使用多个 -c 时仅输出最后一条查询结果；块内仍保留
+    多条 SQL 及标题。单块失败不影响其他块，超时时回收已完成块。
     """
-    results, error = {}, None
+    results = {}
     if not blocks:
-        return results, error
+        return results, None
 
-    script_parts = []
+    deadline = time.monotonic() + timeout * len(blocks)
+    errors = []
     for marker, query in blocks:
-        script_parts.append(f"\\echo '{marker}'")
-        script_parts.append(query)
-    script = '\n'.join(script_parts) + '\n'
-    # 会话级超时: 每块原本独立享有 timeout, 批量时按块数放大
-    session_timeout = timeout * max(1, len(blocks))
+        args = _append_vsql_commands(
+            ['vsql', '-d', db_name, '-X', '-P', 'footer=off'], query)
+        remaining = max(0.1, deadline - time.monotonic())
+        try:
+            process = subprocess.Popen(
+                args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                universal_newlines=True
+            )
+            stdout, stderr = process.communicate(timeout=remaining)
+        except FileNotFoundError:
+            return results, 'vsql not found.'
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.communicate()
+            missing = [m for m, _ in blocks if m not in results]
+            error = (f'batch query timeout after {timeout * len(blocks)}s: '
+                     f'已回收 {len(results)}/{len(blocks)} 块, 未完成: {", ".join(missing)}')
+            return results, error
+        except Exception as e:
+            return results, f'batch query error: {e}'
+
+        if debug:
+            print(f'[DEBUG] {label}({marker}): returncode={process.returncode}, '
+                  f'stdout长度={len(stdout)}, stderr={stderr.strip()!r}', file=sys.stderr)
+        if process.returncode != 0:
+            errors.append(f'{marker}: {stderr.strip() or f"vsql exit code {process.returncode}"}')
+            continue
+        results[marker] = stdout.strip('\n')
 
     if debug:
-        print(f"[DEBUG] {label}: psql -d {db_name} -X -P footer=off, 共 {len(blocks)} 块, 会话超时 {session_timeout}s", file=sys.stderr)
-    try:
-        process = subprocess.Popen(
-            ['psql', '-d', db_name, '-X', '-P', 'footer=off'],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            universal_newlines=True
-        )
-        stdout, stderr = process.communicate(input=script, timeout=session_timeout)
-    except FileNotFoundError:
-        return results, "psql not found."
-    except subprocess.TimeoutExpired:
-        process.kill()
-        process.communicate()
-        return results, f"batch query timeout after {session_timeout}s."
-    except Exception as e:
-        return results, f"batch query error: {e}"
-
-    if debug and stderr.strip():
-        print(f"[DEBUG] {label} psql stderr:\n{stderr.strip()}", file=sys.stderr)
-    if process.returncode != 0:
-        error = stderr.strip() or f"psql exit code {process.returncode}"
-
-    # 按标记行拆分输出: parts = [前导, marker1, body1, marker2, body2, ...]
-    pattern = re.compile('^(' + '|'.join(re.escape(m) for m, _ in blocks) + r')\s*$', re.M)
-    parts = pattern.split(stdout)
-    for i in range(1, len(parts), 2):
-        marker = parts[i]
-        body = parts[i + 1] if i + 1 < len(parts) else ''
-        results[marker] = body.strip('\n')
-    if debug:
-        print(f"[DEBUG] {label}: 解析出 {len(results)}/{len(blocks)} 块", file=sys.stderr)
-    return results, error
+        print(f'[DEBUG] {label}: 解析出 {len(results)}/{len(blocks)} 块', file=sys.stderr)
+    return results, '; '.join(errors) if errors else None
 
 
 def batch_query_sqlhc_statement_stats(unique_ids, timeout=120, debug=False):
-    """批量查询所有 uid 的 sqlstat（postgres 库，一次 psql 会话）。
+    """批量查询所有 uid 的 sqlstat（postgres 库，一次 vsql 会话）。
 
     Args:
         unique_ids: unique_query_id 集合/列表
@@ -13798,7 +14001,7 @@ def batch_query_sqlhc_statement_stats(unique_ids, timeout=120, debug=False):
         blocks.append((marker, _build_sqlhc_statement_stats_query(u)))
         uid_by_marker[marker] = uid_str
 
-    results, error = _run_psql_batch(
+    results, error = _run_vsql_batch(
         'postgres', blocks, timeout=timeout, debug=debug, label='sqlhc statement stats batch')
     if error:
         print(f"WARNING: sqlhc statement stats 批量查询: {error}", file=sys.stderr)
@@ -13817,9 +14020,9 @@ def batch_query_sqlhc_table_info(uid_tables, db_name, timeout=120, debug=False, 
         uid_tables: [(uid_str, resolved_tables), ...]，resolved_tables 为
                     已解析 schema 的表列表 [(schema, table), ...]
         db_name: 数据库名（SQL 执行的库）
-        timeout: 单块超时时间（秒）
+        timeout: 保留的参数；tabstat + tabsize 会话整体固定最多等待 10 秒
         debug: 是否打印调试日志
-        workers: 并行 psql 会话数
+        workers: 并行 vsql 会话数
 
     Returns:
         (dict, dict): uid -> tabstat文本, uid -> tabsize文本；
@@ -13838,7 +14041,7 @@ def batch_query_sqlhc_table_info(uid_tables, db_name, timeout=120, debug=False, 
     if not unique_sets:
         return {}, {}
 
-    # 2. 动态并行: 一个表集合一个任务（单次 psql 会话含 tabstat+tabsize 两块）
+    # 2. 动态并行: 一个表集合一个任务（单次 vsql 会话含 tabstat+tabsize 两块）
     workers = max(1, min(workers, len(unique_sets)))
 
     def _run_set(idx, key):
@@ -13849,8 +14052,9 @@ def batch_query_sqlhc_table_info(uid_tables, db_name, timeout=120, debug=False, 
             (m_size, _build_sqlhc_tabsize_query(list(key))),
         ]
         _t = time.monotonic()
-        results, error = _run_psql_batch(
-            db_name, blocks, timeout=timeout, debug=debug,
+        # tabstat + tabsize 两个块共享同一会话，整体最多等待 10 秒。
+        results, error = _run_vsql_batch(
+            db_name, blocks, timeout=5, debug=debug,
             label=f'sqlhc table info({db_name})#{idx}')
         if debug:
             tables_show = ','.join(f'{o}.{t}' for o, t in key)
@@ -13863,23 +14067,32 @@ def batch_query_sqlhc_table_info(uid_tables, db_name, timeout=120, debug=False, 
 
     # 3. 汇总: marker -> 表集合key，再映射回所有共享 uid
     key_to_tabstats, key_to_tabsize = {}, {}
+    failed_table_queries = set()
     for idx, key, results, error in set_results:
         if error:
             print(f"WARNING: sqlhc table info 批量查询({db_name})#{idx}: {error}", file=sys.stderr)
         for marker, body in results.items():
             if marker.endswith(':tabstat__'):
                 key_to_tabstats[key] = body
+            elif '超时被中断' in body:
+                # 查询超时后不再立即用同一 SQL 回退单查，避免重复等待。
+                failed_table_queries.add(key)
             else:
                 key_to_tabsize[key] = body
 
     tabstats_map, tabsize_map = {}, {}
     for key, uids in set_key_to_uids.items():
-        if key in key_to_tabstats or key in key_to_tabsize:
+        if key in key_to_tabstats or key in key_to_tabsize or key in failed_table_queries:
             for uid_str in uids:
                 if key in key_to_tabstats:
                     tabstats_map[uid_str] = key_to_tabstats[key]
                 if key in key_to_tabsize:
                     tabsize_map[uid_str] = key_to_tabsize[key]
+                elif key in failed_table_queries:
+                    tabsize_map[uid_str] = (
+                        "table size 查询超时，已跳过重复回退查询；"
+                        "请使用 --debug 输出的 SQL 单独排查。"
+                    )
     if debug:
         print(f"[DEBUG] sqlhc table info({db_name}): {len(uid_tables)} 个 uid 去重为 {len(unique_sets)} 个表集合, {workers} 并行会话(动态)", file=sys.stderr)
     return tabstats_map, tabsize_map
@@ -13888,7 +14101,7 @@ def batch_query_sqlhc_table_info(uid_tables, db_name, timeout=120, debug=False, 
 def _batch_collect_object_definitions(def_by_db, timeout=120, debug=False):
     """按库批量收集 def_by_db 中所有视图/函数的完整定义（对齐格式，用于报告展示）。
 
-    复用 _run_psql_batch block 模式：每个对象一个 block（marker 区分），
+    复用 _run_vsql_batch block 模式：每个对象一个 block（marker 区分），
     同名函数重载全部输出；block 内的 SQL 为无列名的对齐格式查询（无分隔符），
     可完整保留定义中的多行文本。
 
@@ -13927,7 +14140,7 @@ def _batch_collect_object_definitions(def_by_db, timeout=120, debug=False):
                 obj_by_marker[marker] = obj
         if not blocks:
             continue
-        results, error = _run_psql_batch(
+        results, error = _run_vsql_batch(
             db_name, blocks, timeout=timeout, debug=debug,
             label=f'sqlhc object definitions({db_name})')
         if error:
@@ -13946,13 +14159,13 @@ def expand_objects_for_uids(uid_objs, uid_db_map, timeout=60, debug=False, max_d
     """V2 批量递归展开：所有 uid 的初始对象 → 按库分组逐层展开 → 最终表集合 + 定义列表。
 
     设计文档 8.6：递归展开在批量收集之前统一完成；对象分类与定义查询按库
-    合并执行（单库单轮最多 2 次 psql 会话：分类 + 定义）；visited 全局去重
+    合并执行（单库单轮最多 2 次 vsql 会话：分类 + 定义）；visited 全局去重
     防循环依赖，max_depth 兜底。
 
     Args:
         uid_objs: {uid_str: [(owner, name), ...]} 各 uid 的初始对象
         uid_db_map: {uid_str: db_name}
-        timeout: psql 超时时间（秒）
+        timeout: vsql 超时时间（秒）
         debug: 是否打印调试日志
         max_depth: 最大递归深度
 
@@ -14163,7 +14376,7 @@ def generate_sqlhc_content(unique_id, stat, db_name, timeout=120, wait_events_re
         unique_id: SQL 的 unique_query_id
         stat: 该 SQL 的统计信息字典（含 database/user/qry_text/max_duration_query 等）
         db_name: 数据库名（SQL 执行的库，用于表统计/表大小查询）
-        timeout: psql 超时时间
+        timeout: vsql 超时时间
         wait_events_records: 该 SQL 的等待事件记录列表（query_wait_events_for_sql_ids 返回）
         debug: 是否打印调试日志
         statement_stats_text: 批量收集的 sqlstat 文本；None 时本函数内单查（回退）
@@ -14304,54 +14517,54 @@ parser = argparse.ArgumentParser(
     epilog="""
 使用示例:
   # 分析单个日志文件，输出HTML报告
-  python analyze_log.py -f /path/to/postgresql-2025-01-01.log
+  python3 analyze_log.py -f /path/to/postgresql-2025-01-01.log
 
   # 分析多个日志文件
-  python analyze_log.py -f /path/to/log1.log /path/to/log2.log
+  python3 analyze_log.py -f /path/to/log1.log /path/to/log2.log
 
   # 分析多个日志文件,正则表达式匹配
-  python analyze_log.py -f /path/to/*.log
+  python3 analyze_log.py -f /path/to/*.log
 
   #指定输出html路径,默认在当前位置输出,使用默认命名规则
-  python analyze_log.py -f /path/to/log.log -o /path/to/my_report.html
+  python3 analyze_log.py -f /path/to/log.log -o /path/to/my_report.html
 
   # 指定时间范围分析
-  python analyze_log.py -f /path/to/log.log -b "2025-01-01 00:00:00" -e "2025-01-02 23:59:59"
+  python3 analyze_log.py -f /path/to/log.log -b "2025-01-01 00:00:00" -e "2025-01-02 23:59:59"
 
   # 指定日志前缀格式（不从数据库获取）
-  python analyze_log.py -f /path/to/log.log -p "%%m %%u %%d %%r %%p %%S [%%x]"
+  python3 analyze_log.py -f /path/to/log.log -p "%%m %%u %%d %%r %%p %%S [%%x]"
 
   # 生成对比报告（对比1天前的数据）
-  python analyze_log.py -f /path/to/log.log --diff 1d
+  python3 analyze_log.py -f /path/to/log.log --diff 1d
 
   # 生成对比报告（对比1小时前的数据）
-  python analyze_log.py -f /path/to/log.log --diff 1h
+  python3 analyze_log.py -f /path/to/log.log --diff 1h
 
   # 生成对比报告（对比30分钟前的数据）
-  python analyze_log.py -f /path/to/log.log --diff 30m
+  python3 analyze_log.py -f /path/to/log.log --diff 30m
 
   # 不指定文件时自动从数据库获取日志目录并分析最近2天日志
-  python analyze_log.py
+  python3 analyze_log.py
   # 分析最近3天的日志
-  python analyze_log.py -d 3
+  python3 analyze_log.py -d 3
   # 分析最近30天的日志
-  python analyze_log.py --days 30
+  python3 analyze_log.py --days 30
   # 查看版本
-  python analyze_log.py -v
-  # 分析 SQL 语句 (DML+DDL)，不分析错误日志（默认）
-  python analyze_log.py -f /path/to/log.log -m query
-  # 仅分析错误日志 (ERROR/WARNING/FATAL/PANIC)，不分析 SQL
-  python analyze_log.py -f /path/to/log.log -m error
-  # 分析所有内容（SQL + 错误日志）
-  python analyze_log.py -f /path/to/log.log -m all
+  python3 analyze_log.py -v
+  # 分析 慢SQL 语句 (DML+DDL)，不分析错误日志（默认）
+  python3 analyze_log.py -f /path/to/log.log -m query
+  # 仅分析日志里错误和ddl语句文本 (ERROR/WARNING/FATAL/PANIC)，不分析慢SQL
+  python3 analyze_log.py -f /path/to/log.log -m error
+  # 分析所有内容（慢SQL + 错误日志）
+  python3 analyze_log.py -f /path/to/log.log -m all
   # 启用调试输出
-  python analyze_log.py -f /path/to/log.log --debug
+  python3 analyze_log.py -f /path/to/log.log --debug
 
   # 排除指定数据库/用户/unique_id 的事件
-  python analyze_log.py -f /path/to/log.log --exclude db:midb user:app1 sql_id:1234567890
+  python3 analyze_log.py -f /path/to/log.log --exclude db:midb user:app1 sql_id:1234567890
 
   # 只保留指定数据库的事件（白名单）
-  python analyze_log.py -f /path/to/log.log --include db:midb
+  python3 analyze_log.py -f /path/to/log.log --include db:midb
 """)
 parser.add_argument('-f', '--file', type=str, nargs='+', 
                     help="输入日志文件路径，支持多个文件。不指定则自动从数据库获取日志目录并分析最近2天日志")
@@ -14367,7 +14580,7 @@ parser.add_argument('-d', '--days', type=int, default=None,
                     help="分析最近N天的日志，内部折算为 -b（now-N天）+ -e（now），与 -b/-e 共用一套时间过滤逻辑。缺省默认 1 天；显式 -b 优先。-d 0 表示手动关闭时间过滤；-f 明确指定具体文件（非通配符批量）时缺省不加载默认时间过滤，强行分析指定文件")
 parser.add_argument('-v', '--version', action='store_true', help="显示版本信息")
 parser.add_argument('-m', '--mode', type=str, default='query', choices=['all', 'query', 'error'],
-                    help="分析范围: query(默认，分析 SQL 语句 DML+DDL，不分析错误日志), error(仅分析错误日志 ERROR/WARNING/FATAL/PANIC，不分析 SQL), all(分析所有内容：SQL + 错误日志)")
+                    help="分析范围: query(默认，分析 慢SQL 语句 DML+DDL，不分析错误日志), error(仅分析日志里错误和ddl语句文本 ERROR/WARNING/FATAL/PANIC，不分析慢SQL), all(分析所有内容：慢SQL + 错误日志)")
 parser.add_argument('-o', '--output', type=str, default=None,
                     help="输出目标，支持三种形式："
                          "1) 目录路径(如 /tmp)：在该目录下生成默认文件名(hostname_logreport_时间戳_mode.html)；"
@@ -14410,7 +14623,7 @@ parser.add_argument('--detail', type=_parse_detail_arg, nargs='?', const=('top',
                     metavar='top[:N]|all',
                     help="查询慢SQL的等待事件信息: top(默认Top20 4个维度去重后的SQL ID), top:N(自定义TopN), all(查询所有慢SQL)。不指定则不查询")
 parser.add_argument('--detail-timeout', type=int, default=120,
-                    help="--detail 查询等待事件的单批次 psql 超时时间(秒), 默认 120")
+                    help="--detail 查询等待事件的单批次 vsql 超时时间(秒), 默认 120")
 parser.add_argument('--format', type=str, default='html', choices=['html', 'gz'],
                     help="输出文件格式: html(默认, 仅保留纯 HTML 文件, 不压缩), gz(gzip 压缩后仅保留 .gz 压缩包)。"
                          "等价方式: -o 文件名以 .gz 结尾时也会触发压缩")
@@ -14684,8 +14897,9 @@ def parse_log_prefix_format(log_prefix):
     if unique_fields and unique_fields[0] == 'timestamp':
         unique_fields = unique_fields[1:]
     
-    print(f"解析日志前缀 '{log_prefix}'....")
-    
+    if args.debug:
+        print(f"[DEBUG] 解析日志前缀 '{log_prefix}'....")
+
     return {
         'parse_func': lambda log_line: _parse_log_line_by_format(log_line, unique_fields),
         'fields': unique_fields,
@@ -14768,6 +14982,10 @@ def _parse_log_line_by_format(log_line, unique_fields):
     if not result:
         return None
     
+    # 归一化 remote_host: 剥离 (port) 或 :port 后缀,确保同 IP 不同端口被识别为同一个客户端
+    if 'remote_host' in result and result['remote_host']:
+        result['remote_host'] = _normalize_ip(result['remote_host'])
+    
     return result
 
 
@@ -14848,15 +15066,42 @@ def parse_csv_log_line(csv_row):
         
         # 判断是26列格式还是16列格式
         if len(csv_row) >= 26:
-            # 26列格式
-            timestamp_idx = 0
-            user_idx = 1
-            database_idx = 2
-            thread_id_idx = 4
-            connection_from_idx = 5
-            session_id_idx = 6
-            message_idx = 16
-            query_idx = 22
+            # 识别 Vastbase 扩展 csvlog:
+            # 标准 PG 26列: 0=ts 1=user 2=db 3=pid 4=addr 5=sess 6=line 7=cmd 8=sess_start 9=vxid 10=txid 11=severity 12=sqlstate 13=message ...
+            # Vastbase 26列: 0=ts 1=node_name 2=user 3=db 4=pid 5=addr 6=sess 7=line 8=cmd 9=sess_start 10=vxid 11=txid 12=queryid 13=backend_type 14=severity 15=sqlstate 16=message ...
+            # 判别: Vastbase 的 idx13 是 backend_type (如 'BACKEND')，idx14 是 severity
+            _is_vastbase = (len(csv_row) > 14
+                            and str(csv_row[13]).strip().upper() in ('BACKEND', 'UNDO', 'WDR', 'ASP', 'SYS', '')
+                            and str(csv_row[14]).strip().upper() in ('LOG', 'ERROR', 'WARNING', 'FATAL', 'PANIC', 'DETAIL', 'HINT', 'STATEMENT', 'CONTEXT', 'INFO', 'NOTICE', 'DEBUG'))
+            if _is_vastbase:
+                # Vastbase 26列格式（timestamp 后多 node_name 列，整体后移1位）
+                timestamp_idx = 0
+                user_idx = 2
+                database_idx = 3
+                thread_id_idx = 4
+                connection_from_idx = 5
+                session_id_idx = 6
+                message_idx = 16
+                query_idx = 19
+                # queryid 字段（unique id）在 idx12
+                queryid_idx = 12
+                # transaction_id 在 idx11
+                txid_idx = 11
+                # severity 在 idx14
+                severity_idx = 14
+            else:
+                # 标准 PG 26列格式
+                timestamp_idx = 0
+                user_idx = 1
+                database_idx = 2
+                thread_id_idx = 3
+                connection_from_idx = 4
+                session_id_idx = 5
+                message_idx = 13
+                query_idx = 19
+                queryid_idx = -1
+                txid_idx = 10
+                severity_idx = 11
         else:
             # 16列格式(被截断的日志)
             # 索引0=user, 1=database, 2=thread_id, 3=connection_from, 4=session_id...
@@ -14870,6 +15115,9 @@ def parse_csv_log_line(csv_row):
             session_id_idx = 5
             message_idx = 15
             query_idx = -1  # 无query字段
+            queryid_idx = -1
+            txid_idx = -1
+            severity_idx = -1
         
         result = {
             'timestamp': csv_row[timestamp_idx].strip() if timestamp_idx >= 0 and len(csv_row) > timestamp_idx else '',
@@ -14880,19 +15128,22 @@ def parse_csv_log_line(csv_row):
             'session_id': csv_row[session_id_idx].strip() if len(csv_row) > session_id_idx else '',
             'message': csv_row[message_idx].strip() if len(csv_row) > message_idx else '',
             'query': csv_row[query_idx].strip() if query_idx >= 0 and len(csv_row) > query_idx else '',
+            'queryid': csv_row[queryid_idx].strip() if queryid_idx >= 0 and len(csv_row) > queryid_idx else '',
+            'transaction_id': csv_row[txid_idx].strip() if txid_idx >= 0 and len(csv_row) > txid_idx else '',
+            'severity': csv_row[severity_idx].strip().upper() if severity_idx >= 0 and len(csv_row) > severity_idx else '',
             'detail': '',
             'hint': '',
             'context': '',
         }
         
-        # 提取IP地址（从connection_from字段）
+        # 提取IP地址（从connection_from字段）,并归一化剥离端口后缀
         if result['connection_from']:
-            # connection_from格式: "127.0.0.1:42164" 或 "localhost"
+            # connection_from格式: "127.0.0.1:42164" 或 "192.168.131.51(33090)" 或 "localhost"
             ip_match = re.match(r'([^:]+)(?::\d+)?$', result['connection_from'])
             if ip_match:
-                result['ip'] = ip_match.group(1)
+                result['ip'] = _normalize_ip(ip_match.group(1))
             else:
-                result['ip'] = result['connection_from']
+                result['ip'] = _normalize_ip(result['connection_from'])
         else:
             result['ip'] = ''
         
@@ -14902,17 +15153,57 @@ def parse_csv_log_line(csv_row):
         return None
 
 
-def convert_csv_to_standard_format(content):
+def convert_csv_to_standard_format(content, log_prefix=None):
     """
     将CSV格式的日志转换为标准日志格式，以便现有解析逻辑可以处理
     
     Args:
         content (str): CSV格式的日志内容
+        log_prefix (str): 下游解析用的 log_line_prefix（默认 '%m %u %d %r %p %S [%x]'）。
+                          生成的行会按 prefix 中的字段顺序拼接，确保下游 _get_prefix 能正确解析。
     
     Returns:
         str: 转换后的标准格式日志内容
     """
     print("检测到CSV格式日志，正在转换为标准格式...")
+    
+    if not log_prefix:
+        log_prefix = '%m %u %d %r %p %S [%x]'
+    
+    # 解析 log_line_prefix，得到需要输出的字段顺序
+    _csv_field_map = {
+        '%m': 'timestamp', '%t': 'timestamp', '%s': 'timestamp', '%n': 'timestamp',
+        '%u': 'user',
+        '%d': 'database',
+        '%r': 'remote_host',
+        '%p': 'thread_id',
+        '%S': 'session_id', '%c': 'session_id',
+        '%x': 'transaction_id',
+        '%l': 'log_line_number',
+        '%v': 'virtual_transaction_id',
+        '%q': 'backend_type',
+        '%i': 'application_name',
+    }
+    prefix_fields = []  # 顺序字段（不含 timestamp，timestamp 由 TIMESTAMP_PATTERN 单独匹配）
+    _i = 0
+    _seen_first_ts = False
+    while _i < len(log_prefix):
+        _code = log_prefix[_i:_i+2]
+        if _code in _csv_field_map:
+            _fname = _csv_field_map[_code]
+            if _fname == 'timestamp':
+                if not _seen_first_ts:
+                    _seen_first_ts = True
+                    # timestamp 在拼行时放在最前面
+            else:
+                if _fname not in prefix_fields:
+                    prefix_fields.append(_fname)
+            _i += 2
+        else:
+            _i += 1
+    # 确保至少包含基本字段（顺序按默认 prefix）
+    if 'user' not in prefix_fields and 'database' not in prefix_fields:
+        prefix_fields = ['user', 'database', 'remote_host', 'thread_id', 'session_id']
     
     converted_lines = []
     
@@ -14983,13 +15274,45 @@ def convert_csv_to_standard_format(content):
         database = parsed['database'] if parsed['database'] else ''
         ip = parsed['ip'] if parsed['ip'] else ''
         session_id = parsed['session_id'] if parsed['session_id'] else ''
+        thread_id = parsed['thread_id'] if parsed['thread_id'] else ''
+        transaction_id = parsed.get('transaction_id', '') or ''
         message = parsed['message']
+        # CSV 的 severity 是独立列,需要拼接到 message 前面,
+        # 否则下游 ERROR_LEVEL_PATTERN(\b(ERROR|WARNING|FATAL|PANIC)\s*:) 无法识别
+        _severity = parsed.get('severity', '') or ''
+        if _severity in ('ERROR', 'WARNING', 'FATAL', 'PANIC'):
+            # 仅在 message 未以 "<LV>:" 开头时拼接,避免重复
+            if not re.match(r'^\s*(?:ERROR|WARNING|FATAL|PANIC)\s*:', message, re.IGNORECASE):
+                message = f"{_severity}:  {message}"
+        
+        # 构造 prefix 字段值映射（用于按 log_line_prefix 顺序拼行）
+        _field_values = {
+            'user': user,
+            'database': database,
+            'remote_host': ip,
+            'thread_id': thread_id,
+            'session_id': session_id,
+            'transaction_id': transaction_id,
+            'log_line_number': '',
+            'virtual_transaction_id': '',
+            'backend_type': '',
+            'application_name': '',
+        }
+        # 按 log_line_prefix 顺序生成前缀字符串
+        def _build_prefix_str():
+            parts = []
+            for f in prefix_fields:
+                v = _field_values.get(f, '')
+                # 空字段用 '-' 占位，避免连续空格导致下游 split 错位
+                parts.append(v if v else '-')
+            return ' '.join(parts)
+        prefix_str = _build_prefix_str()
         
         # 检查message字段是否包含duration信息（慢查询日志）
         # CSV格式中，慢查询的message字段格式: "duration: 1234.567 ms queryid xxx unique id yyy execute <unnamed>: SELECT..."
         if 'duration:' in message.lower() and ('execute' in message.lower() or 'bind' in message.lower()):
             # 这是慢查询日志，需要转换为标准格式
-            # 标准格式: timestamp user database IP session_id execute <unnamed>: duration: xxx ms unique id yyy SQL...
+            # 标准格式: {timestamp} {prefix_fields} execute <unnamed>: duration: xxx ms unique id yyy SQL...
             
             # 解析CSV的message字段，提取各部分
             # 格式: "duration: xxx ms queryid xxx unique id yyy execute <name>: SQL"
@@ -15007,13 +15330,13 @@ def convert_csv_to_standard_format(content):
                     sql_text = unique_id_match.group(3)
 
                     # 构建标准慢查询日志格式，保留多行SQL
-                    log_line = f"{timestamp} {user} {database} {ip} {session_id} execute {execute_name}: duration: {duration_value} ms unique id {unique_id} {sql_text}"
+                    log_line = f"{timestamp} {prefix_str} execute {execute_name}: duration: {duration_value} ms unique id {unique_id} {sql_text}"
                     converted_lines.append(log_line)
                     converted_count += 1
                     continue
             
             # 如果解析失败，使用原始方式
-            log_line = f"{timestamp} {user} {database} {ip} {session_id} {message}"
+            log_line = f"{timestamp} {prefix_str} {message}"
             converted_lines.append(log_line)
             converted_count += 1
             continue
@@ -15042,7 +15365,7 @@ def convert_csv_to_standard_format(content):
             message = message + '\nCONTEXT: ' + parsed['context']
         
         # 构建标准日志行
-        log_line = f"{timestamp} {user} {database} {ip} {session_id} {message}"
+        log_line = f"{timestamp} {prefix_str} {message}"
         converted_lines.append(log_line)
         converted_count += 1
     
@@ -15088,33 +15411,6 @@ def extract_time_from_filename(filename):
     return None
 
 
-def filename_coverage(filename):
-    """
-    文件名 → (覆盖区间起点, 是否按天单文件)。
-
-    优先用 log_filename GUC 推导的模式（user 2026-10-20：不同内核文件名不同，
-    G100 2.2.10 = postgresql-%Y-%m-%d.log 按天单文件，新式 = _%H%MSS 时刻滚动）：
-      - 按天单文件：起点=当天 00:00，覆盖 [00:00, 次日 00:00) 整天；
-      - 时刻滚动文件：起点=文件名时刻，覆盖 [起点, 之后滚动到下一文件为止)。
-    GUC 模式没匹配上（老文件/改过 GUC）时退回 extract_time_from_filename 的
-    旧式 _HHMMSS 硬编码解析；都解析不出返回 (None, False)。
-    """
-    base = os.path.basename(filename)
-    m = _LOG_FNAME_RE.match(base) if _LOG_FNAME_RE else None
-    if m:
-        try:
-            day = datetime(int(m.group('Y')), int(m.group('m')), int(m.group('d')))
-        except (TypeError, ValueError):
-            m = None
-        else:
-            if _LOG_FNAME_DAILY or m.groupdict().get('H') is None:
-                return day, True
-            hh = int(m.group('H') or 0); mi = int(m.group('M') or 0); ss = int(m.group('S') or 0)
-            return day.replace(hour=hh, minute=mi, second=ss), False
-    ts = extract_time_from_filename(filename)
-    return (ts, False) if ts else (None, False)
-
-
 def read_log_file_stream(file_name, auto_detect_csv=True):
     """
     统一的文件读取函数，自动处理普通文件和.gz压缩文件
@@ -15146,7 +15442,9 @@ def read_log_file_stream(file_name, auto_detect_csv=True):
         # 通过文件后缀名判断CSV格式
         if auto_detect_csv and is_csv_file(file_name):
             print(f"文件 {file_name} 是CSV格式日志")
-            content = convert_csv_to_standard_format(content)
+            # 使用全局 log_prefix（若模块尚未初始化则使用 None，函数内部走默认值）
+            _lp = globals().get('log_prefix')
+            content = convert_csv_to_standard_format(content, log_prefix=_lp)
         
         return content
     except MemoryError:
@@ -15233,19 +15531,6 @@ def find_recent_log_files(log_directory, days=2, begin_time=None, end_time=None)
         # 使用文件名时间戳、创建时间和修改时间进行综合判断
         filtered_files = []
         for file_path, create_time, mod_time, filename_time in all_files:
-            # 覆盖区间判断（user 2026-10-20，G100 2.2.10 按天单文件）：
-            #  - 按天单文件（log_filename 无时刻段）：文件覆盖 [当天00:00, 次日00:00)，
-            #    只要文件日期与窗口日期有交集就纳入——mtime 在安静日志日早于窗口开头
-            #    不代表文件不含窗口内容；
-            #  - 时刻滚动文件：起点=文件名时刻，进入下方原有"点+仍在写"语义。
-            cov_start, cov_daily = filename_coverage(file_path)
-            if cov_start is not None and cov_daily:
-                if (not begin_time or begin_time.date() <= cov_start.date()) and \
-                   (not end_time or end_time.date() >= cov_start.date()):
-                    filtered_files.append(file_path)
-                continue
-            if cov_start is not None:
-                filename_time = cov_start
             # 使用文件名中的时间戳进行判断（如果存在）
             if filename_time:
                 # 如果文件名中有明确的时间戳，使用它作为参考点
@@ -15268,28 +15553,20 @@ def find_recent_log_files(log_directory, days=2, begin_time=None, end_time=None)
                 if time_in_range or (begin_time and mod_time >= begin_time):
                     filtered_files.append(file_path)
             else:
-                # 没有从文件名解析出时间：仅按 mtime 粗筛（窗口开始后仍有写入即
-                # 可能包含窗口内容）。★不用 getctime 当"创建时间"——Linux 上
-                # ctime=inode 变更时间，活跃文件恒等于最后写入时刻，2026-10-20
-                # G100 2.2.10 实测把仍在写的当天文件全部误杀；宁可多纳，精确
-                # 过滤交给逐行解析阶段。
-                if not begin_time or mod_time >= begin_time:
+                # 如果没有从文件名解析出时间，则使用创建时间和修改时间
+                includes_begin = not begin_time or mod_time >= begin_time  # 文件在开始时间后仍有活动
+                includes_end = not end_time or create_time <= end_time    # 文件在结束时间前已被创建
+                
+                if includes_begin and includes_end:
                     filtered_files.append(file_path)
-
+        
         # 如果在时间范围内的文件为空，检查最早的文件和最新的文件
         if not filtered_files and all_files:
             earliest_file, earliest_create, earliest_mod, earliest_filename_time = all_files[0]
             latest_file, latest_create, latest_mod, latest_filename_time = all_files[-1]
             
             # 使用同样的判断逻辑检查最早和最新的文件
-            def should_include_file(create_time, mod_time, filename_time, file_path=None):
-                if file_path:
-                    cov_start, cov_daily = filename_coverage(file_path)
-                    if cov_start is not None and cov_daily:
-                        return (not begin_time or begin_time.date() <= cov_start.date()) and \
-                               (not end_time or end_time.date() >= cov_start.date())
-                    if cov_start is not None:
-                        filename_time = cov_start
+            def should_include_file(create_time, mod_time, filename_time):
                 if filename_time:
                     if begin_time and end_time:
                         # 如果同时指定了开始和结束时间
@@ -15304,13 +15581,14 @@ def find_recent_log_files(log_directory, days=2, begin_time=None, end_time=None)
                         time_in_range = True
                     return time_in_range or (begin_time and mod_time >= begin_time)
                 else:
-                    # 同上：mtime 粗筛，不信 getctime（Linux=inode 变更时间）
-                    return not begin_time or mod_time >= begin_time
-
-            if should_include_file(earliest_create, earliest_mod, earliest_filename_time, earliest_file):
+                    includes_begin = not begin_time or mod_time >= begin_time
+                    includes_end = not end_time or create_time <= end_time
+                    return includes_begin and includes_end
+            
+            if should_include_file(earliest_create, earliest_mod, earliest_filename_time):
                 if earliest_file not in filtered_files:
                     filtered_files.append(earliest_file)
-            if should_include_file(latest_create, latest_mod, latest_filename_time, latest_file):
+            if should_include_file(latest_create, latest_mod, latest_filename_time):
                 if latest_file not in filtered_files:
                     filtered_files.append(latest_file)
         
@@ -15444,7 +15722,7 @@ def show_progress(current, total, prefix="处理进度", start_time=None, total_
     if start_time:
         elapsed = datetime.now() - start_time
         total_seconds = total_elapsed_time + elapsed.total_seconds()
-        elapsed_time = f" 总耗时: {total_seconds:.1f}秒"
+        elapsed_time = f" 耗时: {total_seconds:.1f}秒"
     
     print(f'\r{prefix}: |{bar}| {percent:.1f}% ({current}/{total}){elapsed_time}', end='', flush=True)
     if current == total:
@@ -15489,21 +15767,14 @@ if not args.file:
         # 数据库无法连接时，尝试使用 $PGDATA/pg_log 默认路径
         default_dir = get_default_log_directory()
         if default_dir and os.path.exists(default_dir):
-            print(f"无法通过psql获取日志目录，使用默认路径: {default_dir}")
+            print(f"无法通过vsql获取日志目录，使用默认路径: {default_dir}")
             log_directory = default_dir
         else:
             if default_dir:
-                print(f"无法通过psql获取日志目录，默认路径 {default_dir} 也不存在")
+                print(f"无法通过vsql获取日志目录，默认路径 {default_dir} 也不存在")
             print("无法获取数据库日志目录，请手动指定日志文件")
             sys.exit(1)
     print(f"获取到日志目录: {log_directory}")
-    # 文件名匹配模式按 log_filename GUC 推导（user 2026-10-20：G100 2.2.10
-    # postgresql-%Y-%m-%d.log 按天单文件 vs 新式 _%H%MSS 时刻滚动）；获取失败
-    # 退回旧式硬编码模式。
-    _log_fname_fmt = get_log_filename()
-    if _log_fname_fmt:
-        print(f"log filename format: {_log_fname_fmt}")
-    set_log_filename_pattern(_log_fname_fmt)
     # 时间参数已在解析时归一化（-d 折算为 begin，缺省 end=now；
     # -d 0 或未开启时间过滤时 begin/end 为 None），此处直接使用
     begin_time = parse_datetime(args.begin) if args.begin else None
@@ -15744,7 +16015,7 @@ def fill_sql_params(query_text, params):
     填充SQL变量，将参数值替换到SQL语句中
 
     数值类型的绑定变量（type = bigint 等）替换时去掉引号；
-    parameters 原文以 -- 注释追加到 SQL 文本末尾，便于对照。
+    parameters 原文以 -- 注释置于 SQL 文本顶部，便于对照。
 
     Args:
         query_text (str): 原始SQL语句
@@ -15780,7 +16051,7 @@ def fill_sql_params(query_text, params):
     # 过滤掉None值（如果没有按顺序提供所有参数）
     filtered_param_list = [param for param in param_list if param is not None]
 
-    # parameters 原文以 -- 注释追加到 SQL 文本，便于值与语句对照
+    # parameters 原文以 -- 注释置于 SQL 文本顶部，便于值与语句对照
     param_lines = params.strip().splitlines()
     param_comment = '-- parameters: ' + param_lines[0]
     for line in param_lines[1:]:
@@ -15789,7 +16060,7 @@ def fill_sql_params(query_text, params):
     # 单次扫描替换全部 $n 占位符，跳过字符串字面量/标识符与注释
     filled_query = _substitute_placeholders(query_text, param_dict)
 
-    return filled_query.rstrip('\n') + '\n' + param_comment, filtered_param_list
+    return param_comment + '\n' + filled_query.lstrip('\n'), filtered_param_list
 
 
 def normalize_sql_for_display(sql_text):
@@ -15810,7 +16081,7 @@ def normalize_sql_for_display(sql_text):
 def _sql_fingerprint_id(sql_text):
     """对 unique id 为 0/空的语句生成归一化指纹 ID（0_<md5前16位>）。
 
-    归一化：小写、去除 parameters 注释尾注、去除单行注释、压缩空白。
+    归一化：小写、去除 parameters 注释头注、去除单行注释、压缩空白。
     相同 SQL 文本（结构一致）得到相同指纹，可作为统计归一维度，
     避免 queryid（每条执行都不同）无法聚合的问题。
 
@@ -15824,8 +16095,8 @@ def _sql_fingerprint_id(sql_text):
     if not sql_text:
         return '0_' + hashlib.md5(b'').hexdigest()[:16]
     text = sql_text.lower()
-    # 去除 parameters 注释尾注（fill_sql_params 追加的 -- parameters: ...）
-    text = re.sub(r'\n--\s*parameters:.*', '', text, flags=re.DOTALL)
+    # 去除 parameters 注释头注（fill_sql_params 前置的 -- parameters: 首行及其 -- 续行）
+    text = re.sub(r'^--\s*parameters:[^\n]*(?:\n--[^\n]*)*', '', text)
     # 去除单行注释与多余空白
     text = re.sub(r'--[^\n]*', ' ', text)
     text = re.sub(r'\s+', ' ', text).strip()
@@ -15927,7 +16198,7 @@ def process_single_file(file_name, args, total_elapsed_time=0):
         print(f'Error: not support type {e_type}')
         return [], [], file_size_mb, [], [], []
     
-    print(f"文件 {file_name} 处理完成，找到 {len(total_list)} 条慢SQL记录，{len(deadlock_list)} 条死锁记录，{len(lock_event_list)} 条锁事件记录，{len(lock_chain_list)} 条锁等待链记录，{len(error_list)} 条错误/警告记录")
+    print(f"处理完成，找到 {len(total_list)} 条慢SQL记录，{len(deadlock_list)} 条死锁记录，{len(lock_event_list)} 条锁事件记录，{len(lock_chain_list)} 条锁等待链记录，{len(error_list)} 条错误/警告记录")
 
     # 显式释放大内存变量
     del blocks
@@ -15941,46 +16212,61 @@ def process_single_file(file_name, args, total_elapsed_time=0):
 
     return total_list, deadlock_list, file_size_mb, lock_event_list, lock_chain_list, error_list
 
-def _filter_non_table_truncates(error_list, timeout=60, debug=False):
-    """通过 psql 连接对应库，过滤掉 TRUNCATE 记录中非普通表(relkind<>'r')的对象。
+def _filter_non_table_truncates(error_list, timeout=5, debug=False):
+    """过滤 TRUNCATE 记录中的非普通表对象。
 
     内部日志 RelationSetNewRelfilenode 会对索引/TOAST 等对象也产生记录,
-    这里按 database 分组,逐库批量执行
-      SELECT relname FROM pg_class WHERE relname IN (...) AND relkind='r'
-    只保留普通表记录;查询失败/psql 不可用时不做任何过滤(保守放行)。
-    注:对象名无 schema 前缀(如 test1),按 relname 直接匹配。
+    过滤策略按环境自动选择：
+    - 本地分析（vsql 可用）：按 database 分组逐库查询 pg_class，精确过滤 relkind<>'r' 的对象
+    - 异地分析（vsql 不可用）：回退到按对象名前缀粗略过滤（pg_toast* 等 TOAST 表直接过滤）
 
     Args:
         error_list: 错误记录列表(就地过滤)
-        timeout: 单库 psql 调用超时(秒)
+        timeout: 单库 vsql 调用超时(秒)
         debug: 是否打印调试日志
 
     Returns:
         int: 被过滤掉的 TRUNCATE 记录条数
     """
-    trunc_entries = [e for e in error_list if e.get('level') == 'TRUNCATE']
+    trunc_entries = [e for e in error_list if e.get('level') == 'TRUNCATE' and (e.get('message') or '').startswith('truncate table ')]
     if not trunc_entries:
         return 0
 
-    # 检查 psql 是否可用,不可用则放行全部
+    # 尝试本地 vsql 精确过滤
+    removed = _filter_truncates_by_vsql(error_list, trunc_entries, timeout=timeout, debug=debug)
+    if removed is not None:
+        return removed
+
+    # vsql 不可用，回退到粗略名称过滤
+    return _filter_truncates_by_name(error_list, debug=debug)
+
+
+def _filter_truncates_by_vsql(error_list, trunc_entries, timeout=5, debug=False):
+    """本地分析：通过 vsql 查询 pg_class 精确过滤非普通表对象。
+
+    Returns:
+        int: 被过滤掉的记录条数；vsql 不可用时返回 None（由调用方回退）
+    """
+    # 检查 vsql 是否可用
     try:
         test_proc = subprocess.Popen(
-            ['psql', '--version'],
+            ['vsql', '--version'],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             universal_newlines=True
         )
         test_proc.communicate()
     except FileNotFoundError:
-        print("WARNING: 未找到 psql 命令,跳过 TRUNCATE 非表对象过滤", file=sys.stderr)
-        return 0
+        if debug:
+            print("[DEBUG] 未找到 vsql 命令，回退到粗略名称过滤", file=sys.stderr)
+        return None
 
-    # 按库分组收集对象名: {db: {rel_name, ...}}
+    # 按库分组收集对象名: {db: {rel_name_lower: rel_name}}
+    # 同一对象多次 TRUNCATE 只收集一次，减少 IN 列表长度
     db_objects = {}
     for e in trunc_entries:
         db = e.get('database') or 'postgres'
         msg = e.get('message') or ''
-        # message 形如 "truncate table <rel_name>"
-        rel = msg[len('truncate table '):].strip() if msg.startswith('truncate table ') else msg.strip()
+        rel = msg[len('truncate table '):].strip()
         if not rel:
             continue
         db_objects.setdefault(db, {})[rel.lower()] = rel
@@ -15988,32 +16274,34 @@ def _filter_non_table_truncates(error_list, timeout=60, debug=False):
     if not db_objects:
         return 0
 
-    # 逐库查询,保留 relkind='r' 的对象
+    # 逐库查询，保留 relkind='r' 的对象
     valid_tables = {}  # {db: set(rel_name_lower)}
-    for db, obj_map in db_objects.items():
-        # 对象名无 schema 前缀(如 test1),按 relname 直接匹配
+    total_dbs = len(db_objects)
+    for db_idx, (db, obj_map) in enumerate(db_objects.items(), 1):
+        print(f" DDL 对象校验: 正在查询数据库 {db} ({db_idx}/{total_dbs})...", file=sys.stderr)
         names_csv = ','.join(f"'{v.replace(chr(39), chr(39) * 2)}'" for v in obj_map.values())
         query = (
             "SELECT relname FROM pg_class"
             f" WHERE relname IN ({names_csv}) AND relkind = 'r'"
         )
         if debug:
-            print(f"[DEBUG] TRUNCATE 表校验: psql -d {db}, 对象数={len(obj_map)}", file=sys.stderr)
-            print(f"[DEBUG] TRUNCATE 表校验 SQL: {query}", file=sys.stderr)
+            print(f"[DEBUG] DDL 对象校验: vsql -d {db}, 对象数={len(obj_map)}", file=sys.stderr)
         try:
             process = subprocess.Popen(
-                ['psql', '-d', db, '-X', '-q', '-A', '-t', '-c', query],
+                ['vsql', '-d', db, '-X', '-q', '-A', '-t', '-c', query],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 universal_newlines=True
             )
             stdout, stderr = process.communicate(timeout=timeout)
         except Exception as e:
-            print(f"WARNING: TRUNCATE 表校验查询失败(db={db}): {e},该库对象全部放行", file=sys.stderr)
-            valid_tables[db] = set(obj_map.keys())
+            # 任何错误都不放行:回退到名称规则(过滤 TOAST/索引等非表对象)
+            print(f"WARNING: DDL 对象校验查询失败(db={db}): {e},该库回退名称过滤", file=sys.stderr)
+            valid_tables[db] = {k for k in obj_map.keys() if not _is_likely_non_table_object(k)}
             continue
         if process.returncode != 0:
-            print(f"WARNING: TRUNCATE 表校验查询失败(db={db}): {stderr.strip()},该库对象全部放行", file=sys.stderr)
-            valid_tables[db] = set(obj_map.keys())
+            # 任何错误都不放行:回退到名称规则(过滤 TOAST/索引等非表对象)
+            print(f"WARNING: DDL 对象校验查询失败(db={db}): {stderr.strip()},该库回退名称过滤", file=sys.stderr)
+            valid_tables[db] = {k for k in obj_map.keys() if not _is_likely_non_table_object(k)}
             continue
         ok = set()
         for line in stdout.strip().split('\n'):
@@ -16021,27 +16309,89 @@ def _filter_non_table_truncates(error_list, timeout=60, debug=False):
             if line:
                 ok.add(line.lower())
         valid_tables[db] = ok
+        print(f" DDL 对象校验: 数据库 {db} 完成，有效表 {len(ok)}/{len(obj_map)}", file=sys.stderr)
 
-    # 就地过滤:删除非表 TRUNCATE 记录
+    # 构建全局无效对象集合: {(db, rel_lower), ...}
+    invalid_objects = set()
+    for db, obj_map in db_objects.items():
+        for rel_lower, rel in obj_map.items():
+            if rel_lower not in valid_tables.get(db, set()):
+                invalid_objects.add((db, rel_lower))
+
+    # 就地过滤:删除非表 TRUNCATE 记录（DROP/ALTER 记录不走 vsql 校验，直接保留）
     removed = 0
     keep = []
     for e in error_list:
         if e.get('level') != 'TRUNCATE':
             keep.append(e)
             continue
-        db = e.get('database') or 'postgres'
         msg = e.get('message') or ''
-        rel = msg[len('truncate table '):].strip() if msg.startswith('truncate table ') else msg.strip()
+        if not msg.startswith('truncate table '):
+            keep.append(e)
+            continue
+        db = e.get('database') or 'postgres'
+        rel = msg[len('truncate table '):].strip()
         if not rel:
             keep.append(e)
             continue
-        if rel.lower() in valid_tables.get(db, set()):
-            keep.append(e)
-        else:
+        if (db, rel.lower()) in invalid_objects:
             removed += 1
+        else:
+            keep.append(e)
     error_list[:] = keep
     if removed:
-        print(f"DDL: TRUNCATE 操作记录过滤, 移除 {removed} 条非普通表 对象记录")
+        print(f"DDL: 对象记录过滤(vsql), 移除 {removed} 条非普通表对象记录")
+    return removed
+
+
+def _is_likely_non_table_object(rel_lower):
+    """按对象名粗略判定是否很可能不是普通表(TOAST 表、索引等)。
+
+    规则:
+      - pg_toast*     : TOAST 表(附属存储,relkind='t')
+      - 名字中含 idx  : 很可能是索引(如 idx_xxx / xxx_idx / myidx2,relkind='i')
+
+    Args:
+        rel_lower (str): 已转小写的对象名
+    Returns:
+        bool: True 表示应过滤(很可能不是普通表)
+    """
+    if not rel_lower:
+        return False
+    if rel_lower.startswith('pg_toast'):
+        return True
+    # 名字含 'idx' 视为索引(用户规则: 宁可少放行,不能多放行)
+    if 'idx' in rel_lower:
+        return True
+    return False
+
+
+def _filter_truncates_by_name(error_list, debug=False):
+    """异地分析：按对象名前缀粗略过滤 TOAST 等非表对象。"""
+    removed = 0
+    keep = []
+    for e in error_list:
+        if e.get('level') != 'TRUNCATE':
+            keep.append(e)
+            continue
+        msg = e.get('message') or ''
+        if not msg.startswith('truncate table '):
+            keep.append(e)
+            continue
+        rel = msg[len('truncate table '):].strip()
+        if not rel:
+            keep.append(e)
+            continue
+        rel_lower = rel.lower()
+        if _is_likely_non_table_object(rel_lower):
+            removed += 1
+            if debug:
+                print(f"[DEBUG] DDL 对象记录过滤: {rel}", file=sys.stderr)
+            continue
+        keep.append(e)
+    error_list[:] = keep
+    if removed:
+        print(f"DDL: 对象记录过滤(名称), 移除 {removed} 条非表对象记录")
     return removed
 
 
@@ -16110,8 +16460,7 @@ def process_multiple_files(file_names, args):
     )
     print(f"\n{'='*60}")
 
-    # TRUNCATE 记录进一步过滤:通过 psql 校验对象必须是普通表(relkind='r'),
-    # 剔除索引/TOAST 等非表对象产生的 RelationSetNewRelfilenode 内部日志
+    # TRUNCATE 记录进一步过滤:本地分析用 vsql 精确校验,异地分析回退到名称前缀过滤
     # 仅 --mode error/all 会提取错误日志(含 TRUNCATE),query 模式无 TRUNCATE 无需过滤
     if all_error_list and args.mode.lower() in ('error', 'all'):
         _filter_non_table_truncates(all_error_list, debug=getattr(args, 'debug', False))
@@ -16442,23 +16791,36 @@ class ReportGenerator:
         """
         s = msg or ''
 
-        # TRUNCATE 消息特殊处理：拆分前缀与表名，只归一化前缀，保留表名
-        # 消息形如 "truncate table public.t1" 或 "truncate table 12345"
-        _trunc_prefix = 'truncate table '
-        if s.lower().startswith(_trunc_prefix):
-            prefix = s[:len(_trunc_prefix)]
-            table_name = s[len(_trunc_prefix):]
-            # 前缀部分正常归一化（一般不会变），表名原样保留
-            prefix_norm = re.sub(r'\s+', ' ', prefix).strip()
-            result = prefix_norm + ' ' + table_name
-            if len(result) > max_len:
-                result = result[:max_len] + ' ...'
-            return result
+        # TRUNCATE / DROP / ALTER 消息特殊处理：拆分前缀与对象名，只归一化前缀，保留对象名
+        # 消息形如 "truncate table public.t1" / "drop table public.t1" / "alter table t1" 等
+        _ddl_prefixes = ('truncate table ',)
+        # drop/alter 支持多种对象类型: drop table/view/index/... / alter table/index/...
+        _s_lower = s.lower()
+        if _s_lower.startswith('drop '):
+            # 提取 "drop <type> " 作为前缀
+            _m = re.match(r'(drop\s+\w+\s+)', s, re.IGNORECASE)
+            if _m:
+                _ddl_prefixes = (_m.group(1),)
+        elif _s_lower.startswith('alter '):
+            # 提取 "alter <type> " 作为前缀
+            _m = re.match(r'(alter\s+\w+\s+)', s, re.IGNORECASE)
+            if _m:
+                _ddl_prefixes = (_m.group(1),)
+        for _ddl_prefix in _ddl_prefixes:
+            if _s_lower.startswith(_ddl_prefix):
+                prefix = s[:len(_ddl_prefix)]
+                table_name = s[len(_ddl_prefix):]
+                # 前缀部分正常归一化（一般不会变），对象名原样保留
+                prefix_norm = _ERR_NORM_WS_RE.sub(' ', prefix).strip()
+                result = prefix_norm + ' ' + table_name
+                if len(result) > max_len:
+                    result = result[:max_len] + ' ...'
+                return result
 
-        s = re.sub(r"'[^']*'", "'xxx'", s)
-        s = re.sub(r'"[^"]*"', '"xxx"', s)
-        s = re.sub(r'\d+(\.\d+)?', 'xxx', s)
-        s = re.sub(r'\s+', ' ', s).strip()
+        s = _ERR_NORM_SQ_RE.sub("'xxx'", s)
+        s = _ERR_NORM_DQ_RE.sub('"xxx"', s)
+        s = _ERR_NORM_NUM_RE.sub('xxx', s)
+        s = _ERR_NORM_WS_RE.sub(' ', s).strip()
         if len(s) > max_len:
             s = s[:max_len] + ' ...'
         return s
@@ -16466,6 +16828,13 @@ class ReportGenerator:
     @staticmethod
     def _error_level_stats(error_list):
         """统计各级别错误数量与按小时分布,返回 (level_counter, hour_counter)。"""
+        # 类级缓存:同一 error_list 多次调用时直接复用,避免 O(N) 全量扫描
+        cache = getattr(ReportGenerator, '_err_level_stats_cache', None)
+        if cache is None:
+            cache = ReportGenerator._err_level_stats_cache = {}
+        cache_key = (id(error_list), len(error_list))
+        if cache_key in cache:
+            return cache[cache_key]
         level_counter = defaultdict(int)
         hour_counter = defaultdict(int)
         for e in error_list:
@@ -16473,11 +16842,23 @@ class ReportGenerator:
             t = e.get('time')
             if t is not None:
                 hour_counter[t.strftime('%H:00')] += 1
-        return level_counter, hour_counter
+        result = (level_counter, hour_counter)
+        # 只缓存最近 4 个不同的 error_list,避免内存膨胀
+        if len(cache) >= 4:
+            cache.clear()
+        cache[cache_key] = result
+        return result
 
     @staticmethod
     def _describe_peak_hour(error_list, peak_hour):
         """生成高峰时段的简要描述: top 错误消息(含用户)。"""
+        # 类级缓存:同一 (error_list, peak_hour) 组合直接复用
+        cache = getattr(ReportGenerator, '_err_peak_hour_cache', None)
+        if cache is None:
+            cache = ReportGenerator._err_peak_hour_cache = {}
+        cache_key = (id(error_list), len(error_list), peak_hour)
+        if cache_key in cache:
+            return cache[cache_key]
         msgs = defaultdict(int)
         users = defaultdict(int)
         for e in error_list:
@@ -16489,14 +16870,18 @@ class ReportGenerator:
             if e.get('user'):
                 users[e['user']] += 1
         if not msgs:
-            return ''
-        top_msgs = sorted(msgs.items(), key=lambda x: x[1], reverse=True)[:2]
-        parts = []
-        for m, c in top_msgs:
-            parts.append('"%s" x%d' % (m, c) if c > 1 else '"%s"' % m)
-        desc = ' + '.join(parts)
-        if len(users) == 1:
-            desc = '%s 用户 ' % list(users.keys())[0] + desc
+            desc = ''
+        else:
+            top_msgs = sorted(msgs.items(), key=lambda x: x[1], reverse=True)[:2]
+            parts = []
+            for m, c in top_msgs:
+                parts.append('"%s" x%d' % (m, c) if c > 1 else '"%s"' % m)
+            desc = ' + '.join(parts)
+            if len(users) == 1:
+                desc = '%s 用户 ' % list(users.keys())[0] + desc
+        if len(cache) >= 8:
+            cache.clear()
+        cache[cache_key] = desc
         return desc
 
     @staticmethod
@@ -16512,7 +16897,7 @@ class ReportGenerator:
             if params_text:
                 params_b64 = _gz_b64_text(params_text)
                 version_html += ('<button class="copy-btn" data-sql-b64="%s" data-filename="opt_params.txt.gz" '
-                                 'data-done-text="已下载" onclick="downloadEmbeddedText(this)">📥 下载参数配置(.gz)</button>' % params_b64)
+                                 'data-done-text="已下载" onclick="downloadEmbeddedText(this)">下载参数配置(.gz)</button>' % params_b64)
             rows.append(('数据库版本', version_html))
         elif opt_params_info.get('error'):
             rows.append(('数据库版本', '<span class="ov-na">未获取（%s）</span>' % html.escape(str(opt_params_info['error']))))
@@ -16636,7 +17021,8 @@ class ReportGenerator:
         # ---- 1. 级别统计卡片 ----
         level_meta = [('ERROR', '#e74c3c'), ('WARNING', '#f39c12'),
                       ('FATAL', '#c0392b'), ('PANIC', '#8e44ad'),
-                      ('TRUNCATE', '#16a085')]
+                      ('TRUNCATE', '#16a085'), ('DROP', '#2980b9'),
+                      ('ALTER', '#e67e22')]
         parts.append('<div class="summary-stats"><div class="stats-grid">')
         for lv, color in level_meta:
             cnt = level_counter.get(lv, 0)
@@ -16677,8 +17063,11 @@ class ReportGenerator:
         # 按次数降序,作为基础排序(后续按级别再分流)
         sorted_groups = sorted(groups.items(), key=lambda kv: kv[1]['count'], reverse=True)
 
-        # 按级别拆分:TRUNCATE / WARNING / ERROR/FATAL/PANIC 各自分流
+        # 按级别拆分:TRUNCATE / DROP / ALTER / WARNING / ERROR/FATAL/PANIC 各自分流
+        # TRUNCATE / DROP / ALTER 分开统计，但在同一聚合表中展示
         truncate_groups = [(k, v) for k, v in sorted_groups if k[0] == 'TRUNCATE']
+        drop_groups = [(k, v) for k, v in sorted_groups if k[0] == 'DROP']
+        alter_groups = [(k, v) for k, v in sorted_groups if k[0] == 'ALTER']
         warning_groups = [(k, v) for k, v in sorted_groups if k[0] == 'WARNING']
         critical_groups = [(k, v) for k, v in sorted_groups if k[0] in ('ERROR', 'FATAL', 'PANIC')]
 
@@ -16718,37 +17107,41 @@ class ReportGenerator:
                 parts_html.append(f'<p class="error-more-note">仅显示前 {limit} 类,共 {len(group_items)} 类。</p>')
             return ''.join(parts_html)
 
-        # ---- 2a. TRUNCATE 聚合表(按表名归一,全部展示,无明细) ----
-        if truncate_groups:
-            parts.append(_render_group_table(
-                truncate_groups,
-                title='TRUNCATE 语句(按表名归一聚合,无明细)',
-                limit=None,
-                more_note=False,
-            ))
-
-        # ---- 2b. ERROR/FATAL/PANIC 聚合表(全部展示,排 WARNING 前——严重度
-        #      优先, user 2026-10-20) ----
+        # ---- 2a. ERROR/FATAL/PANIC 聚合表(全部展示) ----
         if critical_groups:
             parts.append(_render_group_table(
                 critical_groups,
-                title='ERROR / FATAL / PANIC 消息聚合(全部展示)',
+                title='ERROR / FATAL / PANIC',
                 limit=None,
                 more_note=False,
             ))
 
-        # ---- 2c. WARNING 聚合表(仅前 20 类,无明细) ----
+        # ---- 2b. WARNING 聚合表(仅前 20 类) 无明细----
         if warning_groups:
             parts.append(_render_group_table(
                 warning_groups,
-                title='WARNING 消息聚合(仅显示次数最多的前 20 类,无明细)',
+                title='WARNING(仅top 20 类),无明细数据',
                 limit=20,
                 more_note=True,
             ))
 
-        # ---- 3. ERROR/FATAL/PANIC/TRUNCATE 明细表(按聚合组只保留首尾 2 条,标注执行编号) ----
-        # WARNING 不进明细表(数量过大,只在聚合卡片查看)。TRUNCATE 进明细(可按表名搜索)。
-        critical_errors = [e for e in error_list if e['level'] in ('ERROR', 'FATAL', 'PANIC', 'TRUNCATE')]
+        # ---- 2c. TRUNCATE / DROP / ALTER 聚合表(按对象名归一,全部展示) ----
+        # TRUNCATE / DROP / ALTER 分开统计级别，但合并到同一个聚合表展示，按次数统一降序排序
+        if truncate_groups or drop_groups or alter_groups:
+            _ddl_groups = sorted(
+                truncate_groups + drop_groups + alter_groups,
+                key=lambda kv: kv[1]['count'], reverse=True
+            )
+            parts.append(_render_group_table(
+                _ddl_groups,
+                title='TRUNCATE / DROP / ALTER 语句(按对象名归一聚合)',
+                limit=None,
+                more_note=False,
+            ))
+
+        # ---- 3. ERROR/FATAL/PANIC/TRUNCATE/DROP/ALTER 明细表(按聚合组只保留首尾 2 条,标注执行编号) ----
+        # WARNING 不进明细表(数量过大,只在聚合卡片查看)。TRUNCATE/DROP/ALTER 进明细(可按对象名搜索)。
+        critical_errors = [e for e in error_list if e['level'] in ('ERROR', 'FATAL', 'PANIC', 'TRUNCATE', 'DROP', 'ALTER')]
         if critical_errors:
             sorted_all_errors = sorted(critical_errors,
                                         key=lambda e: e['time'] or datetime.min,
@@ -16756,17 +17149,21 @@ class ReportGenerator:
             visible_rows = 10
 
             # 按 (level, 归一化消息) 分组,每组只保留首尾两条
-            # TRUNCATE 组也纳入（其归一消息即 truncate table <表名>，可按表名搜索）
-            detail_groups = critical_groups + truncate_groups
+            # TRUNCATE / DROP / ALTER 组也纳入（其归一消息即 truncate table <表名> / drop <type> <对象名> / alter <type> <对象名>，可按对象名搜索）
+            # 优化:一次遍历完成分组,避免 O(N×G) 全量重扫
+            _norm = ReportGenerator._normalize_error_msg
+            groups_map = {}
+            for e in critical_errors:
+                k = (e['level'], _norm(e['message']))
+                groups_map.setdefault(k, []).append(e)
+            detail_groups = critical_groups + truncate_groups + drop_groups + alter_groups
             first_last_rows = []  # [(seq_no, total, e), ...]  seq_no=该组内执行编号(1=最早,N=最近)
             for (lv, nmsg), g in detail_groups:
-                group_errors = [e for e in critical_errors
-                                if e['level'] == lv
-                                and ReportGenerator._normalize_error_msg(e['message']) == nmsg]
+                group_errors = groups_map.get((lv, nmsg), [])
+                if not group_errors:
+                    continue
                 group_errors.sort(key=lambda e: e['time'] or datetime.min)
                 total = len(group_errors)
-                if total == 0:
-                    continue
                 pick_idx = [0] if total == 1 else [0, total - 1]
                 for i in pick_idx:
                     first_last_rows.append((i + 1, total, group_errors[i]))
@@ -16776,7 +17173,7 @@ class ReportGenerator:
 
             parts.append(f"""
                 <div class="error-detail-header">
-                    <h3>错误明细(共 {len(sorted_all_errors)} 条 ERROR/FATAL/PANIC/TRUNCATE,按消息聚合后展示首尾 {len(first_last_rows)} 条)</h3>
+                    <h3>日志明细(共 {len(sorted_all_errors)} 条 按消息聚合后展示首尾 {len(first_last_rows)} 条)</h3>
                     <div class="err-group-filter">
                         <input type="text" id="error-search" placeholder="输入错误消息/表名关键词过滤..." onkeydown="if(event.key==='Enter')applyErrorSearch()" />
                         <label>级别:</label><select class="err-level-filter" data-table="error-detail-table"></select>
@@ -18253,9 +18650,7 @@ class ReportGenerator:
                 <strong>分析时间范围：</strong>{overall_min_time.strftime('%Y-%m-%d %H:%M:%S') if hasattr(overall_min_time, 'strftime') else str(overall_min_time)} 至 {overall_max_time.strftime('%Y-%m-%d %H:%M:%S') if hasattr(overall_max_time, 'strftime') else str(overall_max_time)} ｜
                 <strong>总文件大小：</strong>{total_size_mb_all:.2f} MB ｜
                 <strong>总记录数：</strong>{len(all_total_list)} 条 ｜
-                <strong>总耗时：</strong>{total_elapsed_seconds_all} 秒 ｜
-                <strong>生成时间：</strong>{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ｜
-                <strong>工具版本：</strong>{os.environ.get('VB_TOOL_VERSION', '-')}
+                <strong>总耗时：</strong>{total_elapsed_seconds_all} 秒
             </div>
         </div>
         """
@@ -19816,15 +20211,35 @@ class ReportGenerator:
                 .err-lv-FATAL {{ background: #c0392b; }}
                 .err-lv-PANIC {{ background: #8e44ad; }}
                 .err-lv-TRUNCATE {{ background: #16a085; }}
-                .error-msg-cell {{ font-size: 13px; max-width: 520px; word-break: break-all; }}
-                .error-msg-cell pre {{ margin: 0; white-space: pre-wrap; font-family: Consolas, monospace; font-size: 13px; }}
+                .err-lv-DROP {{ background: #2980b9; }}
+                .err-lv-ALTER {{ background: #e67e22; }}
+                .error-msg-cell {{
+                    font-size: 13px;
+                    max-width: 520px;
+                    word-break: break-all;
+                    position: relative;
+                }}
+                .error-msg-cell pre {{
+                    margin: 0;
+                    white-space: pre-wrap;
+                    font-family: inherit;
+                    font-size: 13px;
+                    padding-right: 120px; /* 给右侧按钮留出空间 */
+                    background: none;
+                    border: none;
+                    padding-left: 0;
+                    padding-top: 0;
+                    padding-bottom: 0;
+                }}
                 .error-action-btns {{
+                    position: absolute;
+                    right: 4px;
+                    top: 4px;
                     display: flex;
                     gap: 6px;
-                    margin-top: 6px;
                 }}
                 .error-detail-btn {{
-                    background: #3498db;
+                    background: #9b59b6;
                     color: white;
                     border: none;
                     padding: 3px 10px;
@@ -19833,11 +20248,12 @@ class ReportGenerator:
                     font-size: 12px;
                 }}
                 .error-detail-btn:hover {{
-                    background: #2980b9;
+                    background: #8e44ad;
                 }}
                 .error-context-detail {{
                     margin-top: 8px;
                     padding: 10px;
+                    padding-right: 120px; /* 与上方 pre 保持一致，避免详情内容被按钮遮挡 */
                     background: #f8f9fa;
                     border-radius: 4px;
                     border-left: 3px solid #e74c3c;
@@ -19849,6 +20265,9 @@ class ReportGenerator:
                     font-size: 12px;
                     max-height: 300px;
                     overflow: auto;
+                    background: none;
+                    border: none;
+                    padding: 0;
                 }}
                 .error-empty {{ color: #27ae60; font-weight: 600; }}
                 .error-more-note {{ color: #7f8c8d; font-size: 13px; }}
@@ -20119,6 +20538,7 @@ class ReportGenerator:
             </style>
         </head>
         <body>
+            {_rpt_badge()}
             {nav_html}
             
             <!-- 汇总统计部分 -->
@@ -20514,7 +20934,7 @@ class ReportGenerator:
                     // 解析时间标签，用于智能格式化横坐标
                     function parseTimeLabel(s) {{
                         if (typeof s !== 'string') return null;
-                        var m = s.match(/^(\d{{4}})-(\d{{2}})-(\d{{2}})(?: (\d{{2}}):(\d{{2}}))?/);
+                        var m = s.match(/^(\\d{{4}})-(\\d{{2}})-(\\d{{2}})(?: (\\d{{2}}):(\\d{{2}}))?/);
                         if (!m) return null;
                         return {{
                             year: parseInt(m[1], 10),
@@ -20699,24 +21119,54 @@ class ReportGenerator:
                         var drawLine = nonZeroCount >= 2;
 
                         if (drawLine) {{
-                            // 使用 Catmull-Rom 样条转贝塞尔，让曲线在尖峰处更圆滑
-                            // 避免整点触发的慢SQL形成突兀的尖刺
-                            let pathData = `M ${{margin.left}} ${{margin.top + chartHeight - series.data[0] * yScale}}`;
-                            for (let i = 0; i < endIndexLocal; i++) {{
-                                const p0x = margin.left + Math.max(0, i - 1) * xScale;
-                                const p0y = margin.top + chartHeight - series.data[Math.max(0, i - 1)] * yScale;
-                                const p1x = margin.left + i * xScale;
-                                const p1y = margin.top + chartHeight - series.data[i] * yScale;
-                                const p2x = margin.left + (i + 1) * xScale;
-                                const p2y = margin.top + chartHeight - series.data[i + 1] * yScale;
-                                const p3x = margin.left + Math.min(endIndexLocal, i + 2) * xScale;
-                                const p3y = margin.top + chartHeight - series.data[Math.min(endIndexLocal, i + 2)] * yScale;
-                                // Catmull-Rom to Bezier
-                                const cp1x = p1x + (p2x - p0x) / 6;
-                                const cp1y = p1y + (p2y - p0y) / 6;
-                                const cp2x = p2x - (p3x - p1x) / 6;
-                                const cp2y = p2y - (p3y - p1y) / 6;
-                                pathData += ` C ${{cp1x}} ${{cp1y}}, ${{cp2x}} ${{cp2y}}, ${{p2x}} ${{p2y}}`;
+                            // 使用单调三次插值(Monotone Cubic)转贝塞尔，保证曲线在数据点间单调
+                            // 不会下弯到横轴下方，也不会在峰值处 overshoot
+                            const n = endIndexLocal + 1;
+                            const xs = [];
+                            const ys = [];
+                            for (let i = 0; i < n; i++) {{
+                                xs.push(margin.left + i * xScale);
+                                ys.push(margin.top + chartHeight - series.data[i] * yScale);
+                            }}
+                            // Fritsch-Carlson 单调三次插值
+                            const tangents = new Array(n);
+                            const deltas = new Array(n - 1);
+                            for (let i = 0; i < n - 1; i++) {{
+                                deltas[i] = (ys[i + 1] - ys[i]) / (xs[i + 1] - xs[i]);
+                            }}
+                            tangents[0] = deltas[0];
+                            tangents[n - 1] = deltas[n - 2];
+                            for (let i = 1; i < n - 1; i++) {{
+                                if (deltas[i - 1] * deltas[i] <= 0) {{
+                                    tangents[i] = 0;
+                                }} else {{
+                                    tangents[i] = (deltas[i - 1] + deltas[i]) / 2;
+                                }}
+                            }}
+                            // 单调性约束
+                            for (let i = 0; i < n - 1; i++) {{
+                                if (deltas[i] === 0) {{
+                                    tangents[i] = 0;
+                                    tangents[i + 1] = 0;
+                                }} else {{
+                                    const a = tangents[i] / deltas[i];
+                                    const b = tangents[i + 1] / deltas[i];
+                                    const s = a * a + b * b;
+                                    if (s > 9) {{
+                                        const t = 3 / Math.sqrt(s);
+                                        tangents[i] = t * a * deltas[i];
+                                        tangents[i + 1] = t * b * deltas[i];
+                                    }}
+                                }}
+                            }}
+                            let pathData = `M ${{xs[0]}} ${{ys[0]}}`;
+                            for (let i = 0; i < n - 1; i++) {{
+                                const dx = (xs[i + 1] - xs[i]) / 3;
+                                const cp1x = xs[i] + dx;
+                                const cp1y = ys[i] + tangents[i] * dx;
+                                const cp2x = xs[i + 1] - dx;
+                                const cp2y = ys[i + 1] - tangents[i + 1] * dx;
+                                pathData += ` C ${{cp1x}} ${{cp1y}}, ${{cp2x}} ${{cp2y}}, ${{xs[i + 1]}} ${{ys[i + 1]}}`;
                             }}
 
                             svg += `<path d="${{pathData}}" fill="none" stroke="${{series.color}}" stroke-width="3"
@@ -20727,18 +21177,22 @@ class ReportGenerator:
                                       style="cursor: pointer;"/>`;
                         }}
 
+                        // 数据点超过2个时隐藏可见圆点，只保留透明热区用于悬停交互
+                        const showPoints = nonZeroCount <= 2;
                         for (let i = 0; i <= lastValidIndex; i++) {{
                             if (series.data[i] > 0) {{
                                 const x = margin.left + i * xScale;
                                 const y = margin.top + chartHeight - series.data[i] * yScale;
-                                // 可见数据点
-                                svg += `<circle cx="${{x}}" cy="${{y}}" r="4" fill="${{series.color}}"
-                                          data-uid="${{series.uid}}" data-index="${{i}}" data-value="${{series.data[i]}}"
-                                          onmouseover="showPointTooltip(event, '${{series.uid}}', '${{timeLabels[i]}}', ${{series.data[i]}}, '${{containerId}}')"
-                                          onmouseout="hidePointTooltip(); unhighlightLine('${{series.uid}}')"
-                                          onclick="clickLine('${{series.uid}}')"
-                                          style="cursor: pointer; pointer-events: all;"/>`;
-                                // 透明命中热区，覆盖更大区域以便鼠标容易命中
+                                if (showPoints) {{
+                                    // 可见数据点（点数少时显示）
+                                    svg += `<circle cx="${{x}}" cy="${{y}}" r="4" fill="${{series.color}}"
+                                              data-uid="${{series.uid}}" data-index="${{i}}" data-value="${{series.data[i]}}"
+                                              onmouseover="showPointTooltip(event, '${{series.uid}}', '${{timeLabels[i]}}', ${{series.data[i]}}, '${{containerId}}')"
+                                              onmouseout="hidePointTooltip(); unhighlightLine('${{series.uid}}')"
+                                              onclick="clickLine('${{series.uid}}')"
+                                              style="cursor: pointer; pointer-events: all;"/>`;
+                                }}
+                                // 透明命中热区，覆盖更大区域以便鼠标容易命中（始终保留）
                                 svg += `<circle cx="${{x}}" cy="${{y}}" r="10" fill="transparent"
                                           data-uid="${{series.uid}}" data-index="${{i}}" data-value="${{series.data[i]}}"
                                           onmouseover="showPointTooltip(event, '${{series.uid}}', '${{timeLabels[i]}}', ${{series.data[i]}}, '${{containerId}}')"
@@ -22292,9 +22746,24 @@ def parse_all_events(start_n, blocks, total_list, deadlock_list, lock_event_list
         return prefix.strip()
 
     def _parse_prefix(log_block):
-        """解析日志前缀，返回 (connection_key, thread_id, IP, database, user)"""
+        """解析日志前缀，返回 (connection_key, thread_id, IP, database, user)
+
+        自适应增强: 主路径解析后做合理性校验,可疑时按 IP 锚点重新分配字段。
+        保证在 log_line_prefix 与实际日志格式不匹配(如 user/database/remote_host 错位)
+        时仍能提取出正确字段。
+        """
         prefix = _prefix_key(log_block)
         parsed_line = parse_func(prefix)
+        # Layer 2 校验: 检测字段串位
+        if parsed_line and _is_parse_suspicious(parsed_line):
+            # Layer 3: 用 IP 锚点重建字段映射
+            _unique_fields = (log_format_info or {}).get('fields') or []
+            _fixed = _remap_by_token_features(prefix, _unique_fields)
+            if _fixed:
+                # 重建成功,采用修正结果(保留原 parsed_line 中未冲突的字段)
+                _merged = dict(parsed_line)
+                _merged.update(_fixed)
+                parsed_line = _merged
         if parsed_line:
             connection_key = parsed_line.get('remote_host')
             thread_id = parsed_line.get('thread_id') or parsed_line.get('session_id')
@@ -22505,6 +22974,117 @@ def parse_all_events(start_n, blocks, total_list, deadlock_list, lock_event_list
                     'full_log': '',
                 })
                 continue  # truncate 块不再走其他解析
+
+            # DROP 识别：兼容两种日志格式
+            #   1) statement: drop table xxx
+            #   2) CONTEXT:  SQL statement "drop procedure if exists ymtc.p_purge_lothist"
+            # 支持 table / view / index / sequence / schema / function / procedure / trigger 等
+            # 独立级别 'DROP'，与 TRUNCATE 分开统计，但共用同一聚合表展示
+            m_drop = None
+            if not m_err and not m_trunc and 'drop' in log_block.lower():
+                m_drop = re.search(
+                    r'statement:\s*drop\s+(\w+)\s+(?:if\s+exists\s+)?([^\s;"\']+)',
+                    log_block, re.IGNORECASE)
+                if not m_drop:
+                    # CONTEXT:  SQL statement "drop procedure if exists ymtc.xxx"
+                    m_drop = re.search(
+                        r'CONTEXT:\s*SQL\s+statement\s*"\s*drop\s+(\w+)\s+(?:if\s+exists\s+)?([^"\']+?)\s*"',
+                        log_block, re.IGNORECASE)
+            if m_drop:
+                if connection_key is None:
+                    connection_key, thread_id, IP, database, user = _get_prefix(log_block)
+                if _EVENT_FILTER_ACTIVE and not _event_passes_filter(database, user, '', _EVENT_INCLUDE, _EVENT_EXCLUDE):
+                    m_drop = None
+            if m_drop:
+                obj_type = m_drop.group(1).lower()
+                obj_name = m_drop.group(2).rstrip(';')
+                err_msg = f"drop {obj_type} {obj_name}"
+                _drop_full = log_block.strip()
+                _drop_key = ('DROP', f"drop:{obj_type}:{obj_name.lower()}")
+                _cur_idx = len(error_list)
+                _g = _error_groups.get(_drop_key)
+                if _g is None:
+                    _error_groups[_drop_key] = {
+                        'first_idx': _cur_idx, 'last_idx': _cur_idx,
+                        'first_ctx': {'context_before': [], 'context_after': [],
+                                      'full_log': _drop_full},
+                        'last_ctx': None, 'count': 1,
+                    }
+                else:
+                    _g['count'] += 1
+                    _g['last_idx'] = _cur_idx
+                    _g['last_ctx'] = {'context_before': [], 'context_after': [],
+                                      'full_log': _drop_full}
+                error_list.append({
+                    'time': timestamp,
+                    'timestamp': timestamp_str,
+                    'level': 'DROP',
+                    'user': user or '',
+                    'database': database or '',
+                    'IP': IP or '',
+                    'message': err_msg,
+                    'context_before': [],
+                    'context_after': [],
+                    'full_log': '',
+                })
+                continue  # drop 块不再走其他解析
+
+            # ALTER 识别：兼容两种日志格式
+            #   1) statement: alter table xxx
+            #   2) CONTEXT:  SQL statement "alter table ymtc.lot_hist_p truncate partition sys_p15 update global index;"
+            # 支持 table / index / view / sequence / schema / function / procedure / trigger 等
+            # 独立级别 'ALTER'，与 TRUNCATE/DROP 分开统计，但共用同一聚合表展示
+            m_alter = None
+            if not m_err and not m_trunc and not m_drop and 'alter' in log_block.lower():
+                m_alter = re.search(
+                    r'statement:\s*alter\s+(\w+)\s+(?:if\s+exists\s+)?([^\s;"\']+)',
+                    log_block, re.IGNORECASE)
+                if not m_alter:
+                    # CONTEXT:  SQL statement "alter table ymtc.xxx ..."
+                    m_alter = re.search(
+                        r'CONTEXT:\s*SQL\s+statement\s*"\s*alter\s+(\w+)\s+(?:if\s+exists\s+)?([^"\']+?)\s*"',
+                        log_block, re.IGNORECASE)
+            if m_alter:
+                if connection_key is None:
+                    connection_key, thread_id, IP, database, user = _get_prefix(log_block)
+                if _EVENT_FILTER_ACTIVE and not _event_passes_filter(database, user, '', _EVENT_INCLUDE, _EVENT_EXCLUDE):
+                    m_alter = None
+            if m_alter:
+                obj_type = m_alter.group(1).lower()
+                obj_name = m_alter.group(2).rstrip(';')
+                # 截断过长的对象名（如 alter table ... truncate partition ... 整段）
+                if len(obj_name) > 80:
+                    obj_name = obj_name[:80] + ' ...'
+                err_msg = f"alter {obj_type} {obj_name}"
+                _alter_full = log_block.strip()
+                _alter_key = ('ALTER', f"alter:{obj_type}:{obj_name.lower()}")
+                _cur_idx = len(error_list)
+                _g = _error_groups.get(_alter_key)
+                if _g is None:
+                    _error_groups[_alter_key] = {
+                        'first_idx': _cur_idx, 'last_idx': _cur_idx,
+                        'first_ctx': {'context_before': [], 'context_after': [],
+                                      'full_log': _alter_full},
+                        'last_ctx': None, 'count': 1,
+                    }
+                else:
+                    _g['count'] += 1
+                    _g['last_idx'] = _cur_idx
+                    _g['last_ctx'] = {'context_before': [], 'context_after': [],
+                                      'full_log': _alter_full}
+                error_list.append({
+                    'time': timestamp,
+                    'timestamp': timestamp_str,
+                    'level': 'ALTER',
+                    'user': user or '',
+                    'database': database or '',
+                    'IP': IP or '',
+                    'message': err_msg,
+                    'context_before': [],
+                    'context_after': [],
+                    'full_log': '',
+                })
+                continue  # alter 块不再走其他解析
             if m_err:
                 # 排除级别关键字出现在 duration/statement 正文里的误判
                 stmt_pos = head.find('statement:')
@@ -22520,6 +23100,11 @@ def parse_all_events(start_n, blocks, total_list, deadlock_list, lock_event_list
                     m_err = None
             if m_err:
                 err_msg = log_block[m_err.end():].strip()
+
+                # 归一化:去掉数值/引号内容,只保留消息骨架用于聚合
+                _err_key = (m_err.group(1), _ERR_NORM_AGG_RE.sub('?', err_msg[:200]).strip())
+                _cur_idx = len(error_list)  # 当前记录在 error_list 中的 index
+                _is_first = _err_key not in _error_groups
 
                 # 收集前后3行日志上下文,按会话ID(thread_id)过滤
                 # 默认窗口:前后各3行(按位置),在窗口内只保留匹配会话ID或无会话ID的行
@@ -22564,10 +23149,7 @@ def parse_all_events(start_n, blocks, total_list, deadlock_list, lock_event_list
 
                 # 内存优化:按 (level, 归一化消息) 聚合,每类只保留首尾 2 条完整记录,
                 # 中间记录只存轻量字段(time/level/user/database/IP),节省 90%+ 内存。
-                # 归一化:去掉数值/引号内容,只保留消息骨架用于聚合
-                _err_key = (m_err.group(1), re.sub(r'\d+|\'[^\']*\'|"[^"]*"', '?', err_msg[:200]).strip())
-                _cur_idx = len(error_list)  # 当前记录在 error_list 中的 index
-                if _err_key not in _error_groups:
+                if _is_first:
                     # 首次出现:记录 first 完整数据 + index
                     _error_groups[_err_key] = {
                         'first_idx': _cur_idx,
@@ -23051,16 +23633,23 @@ def parse_all_events(start_n, blocks, total_list, deadlock_list, lock_event_list
                 if connection_key and timestamp:
                     last_sql_time[connection_key] = timestamp
 
-                query_text, unique_id = query_content[3], query_content[2].strip()
+                query_text = query_content[3]
+                # unique_id 提取: EXECUTE_PATTERN.split 在无 unique id 时只产 3 段,
+                # 有 unique id 时产 4 段(uid 与 SQL 同段),所以直接用正则从 log_block 提取更可靠
+                _uid_m = re.search(r'unique\s+id\s+(\S+)', log_block, re.IGNORECASE)
+                unique_id = _uid_m.group(1).strip() if _uid_m else ''
                 # 记录原始 queryid（每条执行都不同，仅用于页面悬停展示，不作统计维度）
                 _qid_m = re.search(r'queryid\s+(\d+)', log_block, re.IGNORECASE)
                 queryid = _qid_m.group(1) if _qid_m else ''
+                # 若 query_content[3] 是 "uid SQL" 混合段,去掉开头的 uid 部分
+                if unique_id and query_text.lstrip().startswith(unique_id):
+                    query_text = query_text.lstrip()[len(unique_id):].lstrip()
                 query_text = query_text.strip()
                 # SQL类型打标：只取第一个有效词元判断
                 # EXPLAIN (ANALYZE ...) 前缀保留整段，按 EXPLAIN 后第一个 DML/DDL
                 # 关键字归类（如 EXPLAIN ... SELECT 归为 dml）
                 stripped_text = query_text.lstrip()
-                first_token = stripped_text.split(None, 1)[0].upper()
+                first_token = stripped_text.split(None, 1)[0].rstrip(';').upper()
                 is_explain = first_token == 'EXPLAIN'
                 type_token = first_token
                 if is_explain:
@@ -23081,14 +23670,14 @@ def parse_all_events(start_n, blocks, total_list, deadlock_list, lock_event_list
                         rest = rest[pos:].lstrip()
                     # 跳过 EXPLAIN 的裸关键字选项（ANALYZE/VERBOSE/COSTS 等）
                     while rest:
-                        tok = rest.split(None, 1)[0].upper()
+                        tok = rest.split(None, 1)[0].rstrip(';').upper()
                         if tok in ('ANALYZE', 'VERBOSE', 'COSTS', 'BUFFERS', 'TIMING',
                                    'SUMMARY', 'FORMAT', 'TRUE', 'FALSE', 'ON', 'OFF'):
                             parts = rest.split(None, 1)
                             rest = parts[1].lstrip() if len(parts) > 1 else ''
                         else:
                             break
-                    type_token = rest.split(None, 1)[0].upper() if rest else 'SELECT'
+                    type_token = rest.split(None, 1)[0].rstrip(';').upper() if rest else 'SELECT'
                 dml_keywords = frozenset((
                     'SELECT', 'INSERT', 'UPDATE', 'DELETE', 'MERGE', 'WITH', 'CALL', 'BEGIN', 'COMMIT', 'ROLLBACK',
                     'EXECUTE', 'PREPARE', 'DEALLOCATE', 'COPY', 'DECLARE'
@@ -23112,7 +23701,7 @@ def parse_all_events(start_n, blocks, total_list, deadlock_list, lock_event_list
                     else:
                         query_text = stripped_text
                     # 重新判断
-                    first_token = query_text.split(None, 1)[0].upper()
+                    first_token = query_text.split(None, 1)[0].rstrip(';').upper()
                     is_dml = first_token in dml_keywords
                     is_ddl = first_token in ddl_keywords
                     sql_type = 'ddl' if is_ddl else 'dml'
@@ -23396,14 +23985,28 @@ def parse_all_events(start_n, blocks, total_list, deadlock_list, lock_event_list
 
 # 解析日志格式
 log_format_info = parse_log_prefix_format(log_prefix)
-print(f"日志格式: {log_format_info['format_name']}")
-print(f"字段顺序: {', '.join(log_format_info['fields'])}")
+if args.debug:
+    print(f"[DEBUG] 日志格式: {log_format_info['format_name']}")
+    print(f"[DEBUG] 字段顺序: {', '.join(log_format_info['fields'])}")
 
 if __name__ == "__main__":
     import time as _time
     _script_start = _time.time()
     # 处理多个日志文件，获取所有数据
     all_total_list, all_deadlock_list, total_size_mb_all, total_elapsed_seconds_all, all_lock_event_list, all_lock_chain_list, all_error_list = process_multiple_files(file_names, args)
+
+    # --include sql_id 命中 0 条时提示：最常见原因是目标记录的时间戳
+    # 落在时间窗之外，被 -d/-b/-e 的文件级/块级过滤裁剪（文件明明存在、
+    # 不加过滤也能看到该记录，加了 --include 反而 0 条）。error 模式不采集
+    # 慢SQL，此时 0 命中是正常现象，不提示。
+    if statement_filter != 'error' and _EVENT_FILTER_ACTIVE and _EVENT_INCLUDE.get('sql_id'):
+        _inc_uids = _EVENT_INCLUDE['sql_id']
+        _uid_hit = any(str(it.get('unique_id', '')).strip() in _inc_uids
+                       for it in all_total_list)
+        if not _uid_hit:
+            print("提示: --include sql_id 条件未命中任何慢SQL记录，可能被时间窗排除"
+                  "（-d/-b/-e 会按文件名时间戳和块时间戳两级裁剪日志），"
+                  "建议显式 -f 指定目标日志文件，或加 -d 0 关闭时间过滤后重试。")
     
     # 设置分析类型
     e_type =  'slow'
@@ -23566,8 +24169,7 @@ if __name__ == "__main__":
                 wait_events_data = {}
                 wait_events_warning = f"等待事件反查失败: {e}"
                 print(f"WARNING: {wait_events_warning}", file=sys.stderr)
-            if args.debug:
-                print(f"[进度] 等待事件查询完成, 耗时 {_main_timer.time() - _t0:.1f}s", file=sys.stderr)
+            print(f"[进度] 等待事件查询完成, 耗时 {_main_timer.time() - _t0:.1f}s")
 
         # 数据库版本/优化器参数（opt params）始终查询，展示到汇总信息，不受 --detail 控制
         opt_params_info = {'version': '', 'params_text': '', 'error': None}
@@ -23582,10 +24184,9 @@ if __name__ == "__main__":
         sqlhc_data = {}
         if args.detail:
             _t0 = _main_timer.time()
-            if args.debug:
-                print(f"[进度] 开始收集 sqlhc 信息 (共 {len(uids_to_query)} 个 SQL ID, 批量模式)...", file=sys.stderr)
+            print(f"[进度] 开始收集 sqlhc 信息 (共 {len(uids_to_query)} 个 SQL ID, 批量模式)...")
             try:
-                # 批量收集：减少 psql 进程数，N 个 SQL 原本最多 4N 次 psql →
+                # 批量收集：减少 vsql 进程数，N 个 SQL 原本最多 4N 次 vsql →
                 # 1 次 postgres(sqlstat) + 每个库 1 次 schema 解析 + 每个库 1 次(tabstat+tabsize)
                 # - sqlstat 连 postgres 库批量查
                 # - schema 解析按库分组批量查
@@ -23597,8 +24198,7 @@ if __name__ == "__main__":
                 _t1 = _main_timer.time()
                 statement_stats_map = batch_query_sqlhc_statement_stats(
                     uid_list, timeout=args.detail_timeout, debug=args.debug)
-                if args.debug:
-                    print(f"[进度] sqlhc sqlstat 批量完成: {len(statement_stats_map)}/{len(uid_list)}, 耗时 {_main_timer.time() - _t1:.1f}s", file=sys.stderr)
+                print(f"[进度] sqlhc sqlstat 批量完成: {len(statement_stats_map)}/{len(uid_list)}, 耗时 {_main_timer.time() - _t1:.1f}s")
 
                 # 2. 按 uid 提取对象（表/视图/函数统一提取），按库分组批量递归展开
                 _t1 = _main_timer.time()
@@ -23620,15 +24220,13 @@ if __name__ == "__main__":
                     uid_to_tables, uid_to_db, timeout=args.detail_timeout, debug=args.debug)
                 if expand_truncated:
                     print("WARNING: sqlhc 对象递归展开达到深度上限(5)，可能存在循环依赖", file=sys.stderr)
-                if args.debug:
-                    print(f"[进度] sqlhc 对象递归展开完成: {sum(1 for v in uid_to_resolved.values() if v)} 个 SQL 有表, "
-                          f"{sum(len(v) for v in def_by_db.values())} 个定义组, 耗时 {_main_timer.time() - _t1:.1f}s", file=sys.stderr)
+                print(f"[进度] sqlhc 对象递归展开完成: {sum(1 for v in uid_to_resolved.values() if v)} 个 SQL 有表, "
+                      f"{sum(len(v) for v in def_by_db.values())} 个定义组, 耗时 {_main_timer.time() - _t1:.1f}s")
 
                 # 3. 按库批量收集视图/函数完整定义（用于 sqlhc 报告展示，block 模式）
                 _t1 = _main_timer.time()
                 _batch_collect_object_definitions(def_by_db, timeout=args.detail_timeout, debug=args.debug)
-                if def_by_db and args.debug:
-                    print(f"[进度] sqlhc 对象定义收集完成: {len(def_by_db)} 个库, 耗时 {_main_timer.time() - _t1:.1f}s", file=sys.stderr)
+                print(f"[进度] sqlhc 对象定义收集完成: {len(def_by_db)} 个库, 耗时 {_main_timer.time() - _t1:.1f}s")
 
                 # 4. 按库分组批量查 tabstat + tabsize（每库一次会话，针对递归展开后的最终表集合）
                 _t1 = _main_timer.time()
@@ -23647,8 +24245,7 @@ if __name__ == "__main__":
                         timeout=args.detail_timeout, debug=args.debug)
                     tabstats_map.update(ts)
                     tabsize_map.update(sz)
-                if args.debug:
-                    print(f"[进度] sqlhc tabstat/tabsize 批量完成: {len(tabstats_map)}/{sum(len(v) for v in db_uid_tables.values())} 块, 耗时 {_main_timer.time() - _t1:.1f}s", file=sys.stderr)
+                print(f"[进度] sqlhc tabstat/tabsize 批量完成: {len(tabstats_map)}/{sum(len(v) for v in db_uid_tables.values())} 块, 耗时 {_main_timer.time() - _t1:.1f}s")
 
                 # 5. 按 uid 组装 sqlhc 文本，批量缺失的回退单查保证容错
                 for uid_str in uid_list:
@@ -23682,8 +24279,7 @@ if __name__ == "__main__":
                 sqlhc_data = {}
                 sqlhc_warning = f"sqlhc 信息收集失败: {e}"
                 print(f"WARNING: {sqlhc_warning}", file=sys.stderr)
-            if args.debug:
-                print(f"[进度] sqlhc 信息收集完成, 耗时 {_main_timer.time() - _t0:.1f}s", file=sys.stderr)
+            print(f"[进度] sqlhc 信息收集完成, 耗时 {_main_timer.time() - _t0:.1f}s")
 
         _t0 = _main_timer.time()
         if args.debug:
@@ -23708,7 +24304,7 @@ if __name__ == "__main__":
                 opt_params_info=opt_params_info,
                 debug=args.debug
             )
-        print(f"[进度] HTML 报告生成完成, 耗时 {_main_timer.time() - _t0:.1f}s, HTML 大小 {len(full_html)/1024/1024:.1f} MB", file=sys.stderr)
+        print(f"HTML 报告生成完成, 总耗时 {_main_timer.time() - _script_start:.1f}s, HTML 大小 {len(full_html)/1024/1024:.1f} MB", file=sys.stderr)
 
             # 写入HTML文件
         _t0 = _main_timer.time()
