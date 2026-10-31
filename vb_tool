@@ -29850,8 +29850,8 @@ _awr_datadir_migrate() {
             *)  echo "Error: datadir must be an absolute path (got '$newhome')" >&2; return 1;;
         esac
         case "$newhome" in
-            *'|'*|*$'\n'*)
-                echo "Error: datadir must not contain '|' or newlines (config table format)" >&2; return 1;;
+            *'|'*|*$'\n'*|*$'\r'*)
+                echo "Error: datadir must not contain '|', newlines or carriage returns (config table format)" >&2; return 1;;
         esac
         # F5: normalize trailing slashes so /data3 and /data3/ compare equal
         while [ "${#newhome}" -gt 1 ] && [ "${newhome: -1}" = "/" ]; do
@@ -29894,9 +29894,18 @@ _awr_datadir_migrate() {
         echo "Error: cannot write the datadir config" >&2
         if [ "$had_data" -eq 1 ]; then
             # F7: roll the mv back -- config unchanged, data back in place,
-            # no split-brain window where data and config disagree
-            mv "$new_root" "$old_root" 2>/dev/null
-            echo "       (data rolled back to $old_root)" >&2
+            # no split-brain window where data and config disagree. N6: only
+            # claim success when the rollback really landed, and never blind-
+            # mv into an old_root that something (e.g. this port's cron firing
+            # in the failure window) recreated meanwhile -- that would nest
+            # the whole tree one level deep.
+            if [ -e "$old_root" ]; then
+                echo "       (rollback skipped: $old_root reappeared during the failure -- resolve manually; data is at $new_root)" >&2
+            elif mv "$new_root" "$old_root" 2>/dev/null; then
+                echo "       (data rolled back to $old_root)" >&2
+            else
+                echo "       (rollback FAILED -- data is at $new_root, config unchanged; move it manually)" >&2
+            fi
         fi
         return 1
     fi
@@ -29904,7 +29913,8 @@ _awr_datadir_migrate() {
     [ "$had_data" -eq 1 ] && note=" (existing data moved)"
     # F4: a datadir switch must not leave old-form crontab entries pointing
     # at the interval file that just moved away -- reinstall in gated form
-    _awr_cron_ensure_gated "$port" 2>/dev/null
+    # N4: a heal failure must be HEARD (warn; the switch itself succeeded)
+    _awr_cron_ensure_gated "$port" || echo "Warning: crontab entry heal failed after the datadir switch -- the old cadence may persist; run 'awr config interval <min>' to retry" >&2
     if [ -z "$newhome" ]; then
         echo "awr: port $port datadir reset to default $new_root$note"
     else
@@ -29936,7 +29946,8 @@ _awr_root() {
 }
 
 # _awr_cron_ensure_gated <port> -- (re)install THIS port's two crontab
-# entries in the path-free gated form, removing any old-form (baked interval
+# entries in the path-free gated form; rc: 0=rewritten, 3=no entries (not
+# enabled -- crontab untouched), 1=rewrite failed, removing any old-form (baked interval
 # path) or legacy port-less entries first. Under the SAME cross-port crontab
 # lock as enable/disable (independent review F10: the old inline rewriter in
 # 'config interval' was an unlocked read-check-write). Anchored marker
@@ -29949,7 +29960,10 @@ _awr_cron_ensure_gated() {
         flock -w 30 9 || { echo "Error: cannot acquire $_ctlock" >&2; exit 1; }
         crontab -l 2>/dev/null | grep -qE "# vb_tool_awr_repl_p${cport}\$" \
             || crontab -l 2>/dev/null | grep -qE "# vb_tool_awr_p${cport}\$" \
-            || crontab -l 2>/dev/null | grep -qE '# vb_tool_awr(_repl)? *$' || exit 0
+            || crontab -l 2>/dev/null | grep -qE '# vb_tool_awr(_repl)? *$' || exit 3
+        # rc: 3 = no awr entries for this port (not enabled) -- crontab
+        # untouched, callers stay silent (round-2 N1: claiming "ensured"
+        # on a disabled port misled users into thinking capture was on)
         local self; self=$(readlink -f "$0" 2>/dev/null || echo "$0")
         local entry="* * * * * /bin/bash -lc 'PGPORT=$cport $self awr _gated-create >/dev/null 2>&1'  # vb_tool_awr_p$cport"
         local rentry="* * * * * /bin/bash -lc 'PGPORT=$cport $self awr _repl-sample >/dev/null 2>&1'  # vb_tool_awr_repl_p$cport"
@@ -41038,7 +41052,7 @@ _awr_enable() {
     # application order (user 2026-10-31): datadir FIRST -- a failed
     # migration must abort before anything else changes; then retention and
     # interval via the same validators as 'awr config'; then the crontab.
-    [ -n "$Dflag" ] && { _awr_datadir_migrate "$Dflag" || return 2; }
+    [ -n "$Dflag" ] && { _awr_datadir_migrate "$Dflag" || return 1; }   # N3: state/data errors rc=1, not the help-dumping rc=2
     [ -n "$dflag" ] && { _awr_config retention "$dflag" || return 2; }
     [ -n "$iflag" ] && { _awr_config interval "$iflag" || return 2; }
     command -v crontab >/dev/null 2>&1 || { echo "Error: crontab not found on PATH" >&2; return 1; }
@@ -41560,11 +41574,13 @@ _awr_config() {
             local cport="${PGPORT:-5432}"
             # ★2026-10-11: 门控条目从 interval 文件现读节奏, 本端口正常条目不再
             #   重写; 重写只为迁移旧形(*/N 硬编码)或 legacy 无端口条目(D8)。
-            if ! _awr_cron_ensure_gated "$cport"; then
-                echo "Error: crontab rewrite failed -- interval file says ${val}min but the OLD crontab cadence may persist; re-run 'awr config interval <min>' or inspect crontab -l" >&2
-                return 1
-            fi
-            echo "awr config: crontab entry ensured in gated form -- cadence follows the interval file = ${val}min exactly (legacy/old-form entries migrated)"
+            _awr_cron_ensure_gated "$cport"
+            case $? in
+                0) echo "awr config: crontab entry ensured in gated form -- cadence follows the interval file = ${val}min exactly (legacy/old-form entries migrated)" ;;
+                1) echo "Error: crontab rewrite failed -- interval file says ${val}min but the OLD crontab cadence may persist; re-run 'awr config interval <min>' or inspect crontab -l" >&2
+                   return 1 ;;
+                3) : ;;   # not enabled: nothing to rewrite, stay silent
+            esac
             return 0
             ;;
         *)
