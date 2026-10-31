@@ -34431,7 +34431,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             "HRTIMER":       "high-res timers (background)",
             "RCU":           "call_rcu deferred reclaim -- churn thermometer",
         }
-        h = ['<h3 class="sub">Softirq Category Legend</h3>',
+        h = ['<h3 class="sub">Softirq</h3>',
              '<table class="t"><tr><th class="n">No.</th><th>Category</th>'
              '<th>Meaning</th></tr>']
         for _j, _c in enumerate(_cats, 1):
@@ -34494,13 +34494,8 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     _otherirq = _actirq[_CAP:]
     _actirq = _actirq[:_CAP]
     if _actirq and _ncpu:
-        # irqbalance flag from the collector file (mask lines in OLD snaps are
-        # ignored: affinity is dropped -- root-only files, user order 2026-10-31)
-        _ibq = ""
-        for _ln in win["os"].get(("end", "irq_affinity"), "").splitlines():
-            _f = _ln.split("|")
-            if len(_f) >= 3 and _f[0] == "irqbalance":
-                _ibq = _f[1]
+        # irqbalance/header-explainer notes dropped (user 2026-10-31); the
+        # collector still records the irqbalance line in the snap file.
         # IRQ legend (user 2026-10-31): full inventory -- every IRQ incl
         # zero-delta, kernel's own device text verbatim (system-adaptive, no
         # hardcoded name classification), total. Matrix headers below carry
@@ -34548,14 +34543,9 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         h.append(''.join(ftr) + '</tr>')
         h.append('</table>')
         parts.append(''.join(h))
-        _nl = ["matrix column = IRQ number; device / total in the legend above"]
         if _otherirq:
-            _nl.append("low-activity IRQs collapsed into 'other' (all %d listed): %s" % (
+            note("low-activity IRQs collapsed into 'other' (all %d listed): %s" % (
                 len(_otherirq), ", ".join(k for k, _d, _v in _otherirq)))
-        if _ibq == "active":
-            _nl.append("irqbalance active -- affinity masks are dynamically "
-                       "re-managed; a hand-set mask is not the last word")
-        note("\n".join(_nl))
     # DB Process: the postmaster listening on THIS awr's port (multi-instance
     # safe), its cpuset pinning and its EFFECTIVE rlimits (/proc/<pid>/limits,
     # world-readable) -- the running process's limits are the authoritative
