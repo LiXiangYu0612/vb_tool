@@ -10581,7 +10581,8 @@ run_collect_log_nodes_info() {
         mkdir -p "$nd/awr"
         if [ -n "\$vb_tool_path" ] && [ -x "\$vb_tool_path" ]; then
             _awr_port="\${PGPORT:-5432}"
-            _awr_root="\$HOME/.vb_tool/awrs/\$_awr_port"
+            _awr_root="\$(awk -F'|' -v p="\$_awr_port" '\$1==p{print \$2; exit}' "\$HOME/.vb_tool/awr_datadir" 2>/dev/null)"
+            _awr_root="\${_awr_root:-\$HOME}/.vb_tool/awrs/\$_awr_port"
             if [ -d "\$_awr_root" ]; then
                 _b_ep=\$(date -d "$begin_time" +%s 2>/dev/null)
                 _e_ep=\$(date -d "$end_time" +%s 2>/dev/null)
@@ -29754,7 +29755,9 @@ Usage: vb_tool awr <create|enable|disable|awrrpt|awrdiff|baseline|topsql|event|s
 
   create  [--root <dir>]   one snapshot now, no html
   enable | disable         start/stop the crontab sampler (snapshot every
-                           'config interval' min + per-minute OS/repl sampling)
+                           'config interval' min + per-minute OS/repl sampling);
+                           enable -d <retention_days> -i <interval_min> -D <datadir>
+                           (all optional: 8 days / 60 min / \$HOME; -D moves existing data)
   awrrpt  begin <id> end <id> [awronly]
                            AWR html; paired log analysis by default, awronly skips
   awrdiff begin <a> end <b> begin <c> end <d>
@@ -29801,8 +29804,84 @@ EOF
 # the CURRENT port points at (from $PGPORT, or -P which exports it), so several
 # instances can run awr side by side without sharing snap_ids, config or logs.
 # Migrates the pre-multi-instance flat layout once, under a lock.
+# _awr_datadir_* -- per-PORT data root overrides (user 2026-10-31, layout
+# "A"): the override dir plays the $HOME role, everything under it keeps the
+# exact default shape <dir>/.vb_tool/awrs/<port>/... The override table lives
+# OUTSIDE any datadir (it must survive its own migration):
+# $HOME/.vb_tool/awr_datadir, one "port|dir" line per override.
+_awr_datadir_get() {   # -> override dir for the current port ("" = default)
+    local f="${HOME}/.vb_tool/awr_datadir"
+    [ -r "$f" ] && awk -F'|' -v p="${PGPORT:-5432}" '$1==p{print $2; exit}' "$f" 2>/dev/null
+}
+_awr_datadir_set() {   # _awr_datadir_set <port> <dir>   ("" clears the entry)
+    local f="${HOME}/.vb_tool/awr_datadir" p="$1" d="$2"
+    mkdir -p "${HOME}/.vb_tool" 2>/dev/null || return 1
+    (
+        flock -w 5 9 || exit 1
+        # first write: the table file does not exist yet -- awk on a missing
+        # input errors out (204 live bug: data moved, config write failed,
+        # resolver left pointing at the old path); seed an empty file instead
+        [ -f "$f" ] || : > "$f"
+        awk -v p="$p" -v d="$d" 'BEGIN{FS=OFS="|"} $1!=p{print} END{if(d!="")print p "|" d}' \
+            "$f" > "$f.new" && mv "$f.new" "$f"
+    ) 9>"${f}.lock"
+}
+# _awr_datadir_migrate <dir|default> -- switch THIS port's data root. Fail
+# hard (user order 2026-10-31): existing content is MOVED, not copied; any
+# error (permission, unwritable target, non-empty target) aborts the command
+# with the raw error and leaves the config untouched.
+_awr_datadir_migrate() {
+    local newhome="$1" port="${PGPORT:-5432}"
+    [ "$newhome" = "default" ] && newhome="$HOME"
+    case "$newhome" in
+        /*) ;;
+        *)  echo "Error: datadir must be an absolute path (got '$newhome')" >&2; return 2;;
+    esac
+    local old_root; old_root=$(_awr_root)
+    local new_root="$newhome/.vb_tool/awrs/$port"
+    if [ "$old_root" = "$new_root" ]; then
+        echo "awr: datadir for port $port already $new_root"
+        return 0
+    fi
+    if [ -e "$new_root" ]; then
+        if [ -n "$(ls -A "$new_root" 2>/dev/null)" ]; then
+            echo "Error: target $new_root already exists and is not empty -- resolve it manually first" >&2
+            return 1
+        fi
+        rmdir "$new_root" 2>/dev/null || { echo "Error: cannot clear empty target $new_root" >&2; return 1; }
+    fi
+    local had_data=0
+    if [ -d "$old_root" ] && [ -n "$(ls -A "$old_root" 2>/dev/null)" ]; then
+        had_data=1
+        mkdir -p "$(dirname "$new_root")" 2>/dev/null
+        if ! mv "$old_root" "$new_root" 2>"${TMPDIR:-/tmp}/vb_tool_awr_mv.err"; then
+            echo "Error: moving $old_root -> $new_root failed: $(cat "${TMPDIR:-/tmp}/vb_tool_awr_mv.err" 2>/dev/null)" >&2
+            rm -f "${TMPDIR:-/tmp}/vb_tool_awr_mv.err"
+            return 1
+        fi
+        rm -f "${TMPDIR:-/tmp}/vb_tool_awr_mv.err"
+    else
+        mkdir -p "$new_root" 2>/dev/null || { echo "Error: cannot create $new_root (permission?)" >&2; return 1; }
+    fi
+    # reset-to-default clears the entry (empty override), it does not store
+    # $HOME as an explicit override -- 'awr config' then shows "default"
+    local _cfgval="$newhome"
+    [ "$newhome" = "$HOME" ] && _cfgval=""
+    _awr_datadir_set "$port" "$_cfgval" || { echo "Error: cannot write the datadir config" >&2; return 1; }
+    local note=""
+    [ "$had_data" -eq 1 ] && note=" (existing data moved)"
+    if [ "$newhome" = "$HOME" ]; then
+        echo "awr: port $port datadir reset to default $new_root$note"
+    else
+        echo "awr: port $port datadir -> $new_root$note"
+    fi
+    return 0
+}
 _awr_root() {
-    local base="${VB_TOOL_HOME:-$HOME/.vb_tool}/awrs"
+    local _awrh; _awrh=$(_awr_datadir_get)
+    local base
+    if [ -n "$_awrh" ]; then base="$_awrh/.vb_tool/awrs"
+    else base="${VB_TOOL_HOME:-$HOME/.vb_tool}/awrs"; fi
     local port="${PGPORT:-5432}"
     local root="$base/$port"
     if [ -d "$base" ] && [ ! -d "$root" ] && ls "$base"/snap_* >/dev/null 2>&1; then
@@ -40853,13 +40932,29 @@ PYDUR
 # snapshot interval comes from 'awr config interval <min>' (<root>/interval,
 # default 60); the replication sampler always runs every 1 minute.
 _awr_enable() {
+    # all optional with defaults (user 2026-10-31): -d retention days
+    # (default 8), -i snapshot interval minutes (default 60), -D data root
+    # dir (default $HOME; layout under it identical to the default).
+    # -P is stripped by the global parser before dispatch, default $PGPORT.
+    local dflag="" iflag="" Dflag=""
     while [ $# -gt 0 ]; do
         case "$1" in
             -h|--help) awr_help; return 0;;
-            -d)        echo "Error: 'enable' takes no -d anymore -- set the interval via 'awr config interval <min>' (default 60)" >&2; return 2;;
-            *)         echo "Error: unexpected argument '$1' (usage: enable)" >&2; return 2;;
+            -d) [ $# -lt 2 ] && { echo "Error: -d expects retention days (0 = never purge, default 8)" >&2; return 2; }
+                dflag="$2"; shift 2;;
+            -i) [ $# -lt 2 ] && { echo "Error: -i expects the snapshot interval in minutes (1-1440, default 60)" >&2; return 2; }
+                iflag="$2"; shift 2;;
+            -D) [ $# -lt 2 ] && { echo "Error: -D expects the data root directory (absolute path)" >&2; return 2; }
+                Dflag="$2"; shift 2;;
+            *)  echo "Error: unexpected argument '$1' (usage: enable [-d retention_days] [-i interval_min] [-D datadir])" >&2; return 2;;
         esac
     done
+    # application order (user 2026-10-31): datadir FIRST -- a failed
+    # migration must abort before anything else changes; then retention and
+    # interval via the same validators as 'awr config'; then the crontab.
+    [ -n "$Dflag" ] && { _awr_datadir_migrate "$Dflag" || return 2; }
+    [ -n "$dflag" ] && { _awr_config retention "$dflag" || return 2; }
+    [ -n "$iflag" ] && { _awr_config interval "$iflag" || return 2; }
     command -v crontab >/dev/null 2>&1 || { echo "Error: crontab not found on PATH" >&2; return 1; }
     local port="${PGPORT:-5432}"
     local marker="# vb_tool_awr_p$port"
@@ -41333,8 +41428,12 @@ _awr_config() {
         if [ "$r" -eq 0 ]; then echo "  retention : 0 (never purge)"
         else echo "  retention : ${r} days"; fi
         echo "  interval  : ${i} min"
+        local dd; dd=$(_awr_datadir_get)
+        if [ -n "$dd" ]; then echo "  datadir   : $dd (root: $(_awr_root))"
+        else echo "  datadir   : default (\$HOME)"; fi
         echo "usage: vb_tool awr config retention <days>   (0 = never purge, max 3650)"
         echo "       vb_tool awr config interval <min>     (1-1440)"
+        echo "       vb_tool awr config datadir <dir>|default  (moves existing data; fails hard on error)"
         return 0
     fi
     local val="${2:-}"
@@ -41342,6 +41441,10 @@ _awr_config() {
     shift 2
     [ $# -gt 0 ] && { echo "Error: unexpected argument '$1'" >&2; return 2; }
     case "$what" in
+        datadir)
+            _awr_datadir_migrate "$val"
+            return $?
+            ;;
         retention)
             case "$val" in ''|*[!0-9]*) echo "Error: retention expects a non-negative integer number of days (0 = never purge)" >&2; return 2;; esac
             [ "$val" -gt 3650 ] && { echo "Error: retention too large (max 3650 days); use 0 for keep-forever" >&2; return 2; }

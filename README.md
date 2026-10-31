@@ -110,7 +110,7 @@ vb_tool list
 
 | 版本 | 日期 | 要点 |
 |------|------|------|
-| v2.5.19 | 2026-10-31 | awr：Softirq/IRQ per CPU 分布矩阵（cpu 行×类别/IRQ 列，含 %irq/%sirq 每核时间列、Total、Top 列，默认折叠，全零项不占列）与 Softirq/IRQ 类型对应表（含 Delta；IRQ 表附内核设备原文与 NUMA Node 列）；NUMA 章节并入单表（拓扑+numastat 窗口增量+DB Pages/DB Share），新增 Auto NUMA Balancing 五指标窗口增量、DB Memory Placement（postmaster numa_maps 每节点已落页 + Top 10 映射明细）；快照 /proc 采集增加 timeout 防御；analyze_log_v2 内嵌脚本合入 v20.1 |
+| v2.5.19 | 2026-10-31 | awr：Softirq/IRQ per CPU 分布矩阵（cpu 行×类别/IRQ 列，含 %irq/%sirq 每核时间列、Total、Top 列，默认折叠，全零项不占列）与 Softirq/IRQ 类型对应表（含 Delta；IRQ 表附内核设备原文与 NUMA Node 列）；NUMA 章节并入单表（拓扑+numastat 窗口增量+DB Pages/DB Share），新增 Auto NUMA Balancing 五指标窗口增量、DB Memory Placement（postmaster numa_maps 每节点已落页 + Top 10 映射明细）；快照 /proc 采集增加 timeout 防御；analyze_log_v2 内嵌脚本合入 v20.1；awr enable 支持 -d 保留天数 / -i 采样间隔 / -D 数据根目录（可选，默认 8 天 / 60 分钟 / 家目录），awr config datadir 更换数据根（已有数据整体搬移，失败即报错） |
 | v2.5.18 | 2026-10-30 | awr：TCP Sockets / Conntrack 章节并入 DB Process 的 Per-minute detail 折叠表（默认收起）——LISTEN Recv-Q、TCP Total、四个常见 TCP 状态、FIN-WAIT-1/2（FW1/FW2 双数）、Conntrack Used/Limit、postmaster 数据目录 reg fd 三桶 DBFile/TempFile/XLog（live(deleted) 格式），罕见 TCP 状态出现非零才动态加列；采样器新增每分钟 dbfd 行；RX Missed 并入网卡表当列；Bond 空节标注；sqltext explain search_path 补 public 兜底 |
 | v2.5.17 | 2026-10-26 | awr 对象统计对全局共享目录表去重（统一归 postgres 一行）；awr topsql 新增 plan / memory / spill 三个排序维度 |
 | v2.5.16 | 2026-10-21 | pagewriter 刷脏监控：5 分钟采样、`awr pagew` 命令、报告 Pagewriter Status 节；MSSQL 兼容模式下 size 列别名报错修复 |
