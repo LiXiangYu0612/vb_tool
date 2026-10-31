@@ -34524,28 +34524,6 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         if v >= 1000:
             return '%.1fK' % (v / 1000.0)
         return '%d' % v
-    def _stat_percpu(phase):
-        # per-cpu jiffies from the stat snapshot: {name: [usr nice sys idle
-        # iowait irq softirq steal]}; name "cpu" = machine aggregate
-        out = {}
-        for ln in win["os"].get((phase, "stat"), "").splitlines():
-            f = ln.split()
-            if len(f) >= 9 and f[0].startswith("cpu") and (f[0] == "cpu" or f[0][3:].isdigit()):
-                try:
-                    out[f[0]] = [to_num(x) for x in f[1:9]]
-                except Exception:
-                    pass
-        return out
-    _pb, _pe = _stat_percpu("begin"), _stat_percpu("end")
-    def _pctpair(name):
-        # /proc/stat fields: usr nice sys idle iowait IRQ SOFTIRQ steal --
-        # irq is index 5, softirq 6 (steal is 7)
-        b, e = _pb.get(name, [0.0] * 8), _pe.get(name, [0.0] * 8)
-        d = [max(0.0, e[i] - b[i]) for i in range(8)]
-        t = sum(d)
-        return (100.0 * d[5] / t, 100.0 * d[6] / t) if t else (0.0, 0.0)
-    _irqpct = {n: _pctpair(n) for n in set(_pb) | set(_pe)
-               if n != "cpu" and n[3:].isdigit()}
     # parse BOTH ends here (user 2026-10-30: list ALL categories including
     # zero-delta ones -- the osd path drops them); category order = kernel
     # file order (HI TIMER NET_TX NET_RX BLOCK ...), stable across reports
@@ -34573,25 +34551,8 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                for i in range(_n)]
         _desc = (_ie.get(_k) or _ib.get(_k) or ([0], ""))[1]
         _idelta.append((_k, _desc, _dv))
-    _ncpu = max([len(_irqpct)] + [len(v) for v in _sq.values()] +
+    _ncpu = max([len(v) for v in _sq.values()] +
                 [len(t[2]) for t in _idelta] + [0])
-    # interrupt TIME, hot cores only (user 2026-10-31): %irq+%sirq >= 5% --
-    # quiet boxes render nothing here at all
-    _hot = sorted(((n, p[0], p[1]) for n, p in _irqpct.items()
-                   if p[0] + p[1] >= 5.0),
-                  key=lambda t: -(t[1] + t[2]))
-    if _hot:
-        h = ['<h3 class="sub">Interrupt Time (hot cores only)</h3>',
-             '<table class="t"><tr><th>CPU</th><th class="n">%irq</th>'
-             '<th class="n">%sirq</th><th class="n">%irq+%sirq</th></tr>']
-        for n, pi, ps in _hot:
-            h.append('<tr><td>%s</td><td class="n%s">%.1f</td>'
-                     '<td class="n%s">%.1f</td><td class="n%s">%.1f</td></tr>'
-                     % (esc(n), thr_cell_cls(pi, 20.0, 50.0), pi,
-                        thr_cell_cls(ps, 20.0, 50.0), ps,
-                        thr_cell_cls(pi + ps, 20.0, 50.0), pi + ps))
-        h.append('</table>')
-        parts.append(''.join(h))
     if _ncpu and _sq:
         # ---- Softirq: legend first, then cpu rows x NUMBERED category
         # columns (user 2026-10-31: names live in the legend, the matrix
