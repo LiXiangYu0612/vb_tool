@@ -10582,12 +10582,12 @@ run_collect_log_nodes_info() {
         if [ -n "\$vb_tool_path" ] && [ -x "\$vb_tool_path" ]; then
             _awr_port="\${PGPORT:-5432}"
             _awr_root="\$(awk -F'|' -v p="\$_awr_port" '\$1==p{print \$2; exit}' "\$HOME/.vb_tool/awr_datadir" 2>/dev/null)"
-            _awr_root="\${_awr_root:-\$HOME}/.vb_tool/awrs/\$_awr_port"
+            if [ -n "\$_awr_root" ]; then _awr_root="\$_awr_root/.vb_tool/awrs/\$_awr_port"; else _awr_root="\${VB_TOOL_HOME:-\$HOME/.vb_tool}/awrs/\$_awr_port"; fi
             if [ -d "\$_awr_root" ]; then
                 _b_ep=\$(date -d "$begin_time" +%s 2>/dev/null)
                 _e_ep=\$(date -d "$end_time" +%s 2>/dev/null)
                 _snap_list=""
-                for _sd in \$(ls -d "\$_awr_root"/snap_* 2>/dev/null | sort -t_ -k2 -n); do
+                while IFS= read -r _sd; do
                     [ -f "\$_sd/meta.json" ] || continue
                     _ts=\$(sed -n 's/.*"ts" *: *"\([^"]*\)".*/\1/p' "\$_sd/meta.json" 2>/dev/null)
                     _tep=\$(date -d "\$_ts" +%s 2>/dev/null)
@@ -10595,13 +10595,13 @@ run_collect_log_nodes_info() {
                     if [ "\$_tep" -ge "\$_b_ep" ] 2>/dev/null && [ "\$_tep" -le "\$_e_ep" ] 2>/dev/null; then
                         _snap_list="\$_snap_list \$(basename "\$_sd" | sed 's/snap_//')"
                     fi
-                done
+                done < <(ls -d "\$_awr_root"/snap_* 2>/dev/null | sort -t_ -k2 -n)
                 _snaps=(\$_snap_list)
                 if [ \${#_snaps[@]} -ge 2 ]; then
                     echo "[INFO ] AWR: \${#_snaps[@]} snapshots in range -> \$(( \${#_snaps[@]} - 1 )) report(s)" >&2
                     for ((i=0; i<\${#_snaps[@]}-1; i++)); do
                         "\$vb_tool_path" awr awrrpt begin "\${_snaps[\$i]}" end "\${_snaps[\$((i+1))]}" >/dev/null 2>&1
-                        _rpt=\$(ls -t "\$HOME/.vb_tool/awr_reports"/*.html 2>/dev/null | head -1)
+                        _rpt=\$(ls -t "\${VB_TOOL_HOME:-\$HOME/.vb_tool}/awr_reports"/*.html 2>/dev/null | head -1)
                         [ -n "\$_rpt" ] && [ -f "\$_rpt" ] && cp "\$_rpt" "$nd/awr/"
                     done
                     echo "[INFO ] AWR: \$(ls "$nd/awr"/*.html 2>/dev/null | wc -l) report(s) saved to $nd/awr" >&2
@@ -29757,7 +29757,7 @@ Usage: vb_tool awr <create|enable|disable|awrrpt|awrdiff|baseline|topsql|event|s
   enable | disable         start/stop the crontab sampler (snapshot every
                            'config interval' min + per-minute OS/repl sampling);
                            enable -d <retention_days> -i <interval_min> -D <datadir>
-                           (all optional: 8 days / 60 min / \$HOME; -D moves existing data)
+                           (all optional: 8 days / 60 min / $HOME; -D moves existing data)
   awrrpt  begin <id> end <id> [awronly]
                            AWR html; paired log analysis by default, awronly skips
   awrdiff begin <a> end <b> begin <c> end <d>
@@ -29830,15 +29830,42 @@ _awr_datadir_set() {   # _awr_datadir_set <port> <dir>   ("" clears the entry)
 # hard (user order 2026-10-31): existing content is MOVED, not copied; any
 # error (permission, unwritable target, non-empty target) aborts the command
 # with the raw error and leaves the config untouched.
+# Independent-review fixes (2026-10-31): F1 reject '|'/'\n' in the dir (the
+# "port|dir" table would truncate the entry and orphan the moved data); F5
+# normalize the path before comparing (trailing '/' made the same physical
+# dir look like a foreign non-empty target); F2 "default" resolves through
+# the no-override base (VB_TOOL_HOME-aware), never a raw $HOME -- and the
+# override is cleared whenever the new root EQUALS the no-override default;
+# F7 a datadir-set failure after a successful mv rolls the mv back (no
+# split-brain window); F9 relative path returns rc=1 (rc=2 dumps full help).
+_awr_default_base() {   # per-port root the resolver uses with NO override
+    echo "${VB_TOOL_HOME:-$HOME/.vb_tool}/awrs/${PGPORT:-5432}"
+}
 _awr_datadir_migrate() {
     local newhome="$1" port="${PGPORT:-5432}"
-    [ "$newhome" = "default" ] && newhome="$HOME"
-    case "$newhome" in
-        /*) ;;
-        *)  echo "Error: datadir must be an absolute path (got '$newhome')" >&2; return 2;;
-    esac
+    [ "$newhome" = "default" ] && newhome=""
+    if [ -n "$newhome" ]; then
+        case "$newhome" in
+            /*) ;;
+            *)  echo "Error: datadir must be an absolute path (got '$newhome')" >&2; return 1;;
+        esac
+        case "$newhome" in
+            *'|'*|*$'\n'*)
+                echo "Error: datadir must not contain '|' or newlines (config table format)" >&2; return 1;;
+        esac
+        # F5: normalize trailing slashes so /data3 and /data3/ compare equal
+        while [ "${#newhome}" -gt 1 ] && [ "${newhome: -1}" = "/" ]; do
+            newhome="${newhome%/}"
+        done
+    fi
     local old_root; old_root=$(_awr_root)
-    local new_root="$newhome/.vb_tool/awrs/$port"
+    local new_root
+    if [ -n "$newhome" ]; then
+        new_root="$newhome/.vb_tool/awrs/$port"
+    else
+        new_root=$(_awr_default_base)   # F2: VB_TOOL_HOME-aware default
+        newhome=""                      # clear-the-override semantics
+    fi
     if [ "$old_root" = "$new_root" ]; then
         echo "awr: datadir for port $port already $new_root"
         return 0
@@ -29863,14 +29890,22 @@ _awr_datadir_migrate() {
     else
         mkdir -p "$new_root" 2>/dev/null || { echo "Error: cannot create $new_root (permission?)" >&2; return 1; }
     fi
-    # reset-to-default clears the entry (empty override), it does not store
-    # $HOME as an explicit override -- 'awr config' then shows "default"
-    local _cfgval="$newhome"
-    [ "$newhome" = "$HOME" ] && _cfgval=""
-    _awr_datadir_set "$port" "$_cfgval" || { echo "Error: cannot write the datadir config" >&2; return 1; }
+    if ! _awr_datadir_set "$port" "$newhome"; then
+        echo "Error: cannot write the datadir config" >&2
+        if [ "$had_data" -eq 1 ]; then
+            # F7: roll the mv back -- config unchanged, data back in place,
+            # no split-brain window where data and config disagree
+            mv "$new_root" "$old_root" 2>/dev/null
+            echo "       (data rolled back to $old_root)" >&2
+        fi
+        return 1
+    fi
     local note=""
     [ "$had_data" -eq 1 ] && note=" (existing data moved)"
-    if [ "$newhome" = "$HOME" ]; then
+    # F4: a datadir switch must not leave old-form crontab entries pointing
+    # at the interval file that just moved away -- reinstall in gated form
+    _awr_cron_ensure_gated "$port" 2>/dev/null
+    if [ -z "$newhome" ]; then
         echo "awr: port $port datadir reset to default $new_root$note"
     else
         echo "awr: port $port datadir -> $new_root$note"
@@ -29900,6 +29935,30 @@ _awr_root() {
     echo "$root"
 }
 
+# _awr_cron_ensure_gated <port> -- (re)install THIS port's two crontab
+# entries in the path-free gated form, removing any old-form (baked interval
+# path) or legacy port-less entries first. Under the SAME cross-port crontab
+# lock as enable/disable (independent review F10: the old inline rewriter in
+# 'config interval' was an unlocked read-check-write). Anchored marker
+# matches only THIS port (port 5432 no longer strips 54321's entries).
+_awr_cron_ensure_gated() {
+    local cport="$1"
+    local _ctlock="${VB_TOOL_HOME:-$HOME/.vb_tool}/awr_crontab.lock"
+    mkdir -p "${VB_TOOL_HOME:-$HOME/.vb_tool}" 2>/dev/null
+    (
+        flock -w 30 9 || { echo "Error: cannot acquire $_ctlock" >&2; exit 1; }
+        crontab -l 2>/dev/null | grep -qE "# vb_tool_awr_repl_p${cport}\$" \
+            || crontab -l 2>/dev/null | grep -qE "# vb_tool_awr_p${cport}\$" \
+            || crontab -l 2>/dev/null | grep -qE '# vb_tool_awr(_repl)? *$' || exit 0
+        local self; self=$(readlink -f "$0" 2>/dev/null || echo "$0")
+        local entry="* * * * * /bin/bash -lc 'PGPORT=$cport $self awr _gated-create >/dev/null 2>&1'  # vb_tool_awr_p$cport"
+        local rentry="* * * * * /bin/bash -lc 'PGPORT=$cport $self awr _repl-sample >/dev/null 2>&1'  # vb_tool_awr_repl_p$cport"
+        if ! ( crontab -l 2>/dev/null | grep -vE "# vb_tool_awr_repl_p${cport}\$" | grep -vE "# vb_tool_awr_p${cport}\$" | grep -vE '# vb_tool_awr(_repl)? *$'; echo "$rentry"; echo "$entry" ) | crontab -; then
+            echo "Error: failed to rewrite crontab entries (permissions or disk?)" >&2
+            exit 1
+        fi
+    ) 9>"$_ctlock"
+}
 # _awr_gated_create -- crontab entry body (2026-10-31): the OLD entry baked
 # the interval file's full path into cron, so a datadir switch silently broke
 # interval changes (cron kept reading the old path, modulo fell back to 60).
@@ -40950,15 +41009,32 @@ _awr_enable() {
     while [ $# -gt 0 ]; do
         case "$1" in
             -h|--help) awr_help; return 0;;
-            -d) [ $# -lt 2 ] && { echo "Error: -d expects retention days (0 = never purge, default 8)" >&2; return 2; }
+            -d) [ $# -lt 2 ] || [ -z "$2" ] && { echo "Error: -d expects retention days (0 = never purge, default 8)" >&2; return 2; }
                 dflag="$2"; shift 2;;
-            -i) [ $# -lt 2 ] && { echo "Error: -i expects the snapshot interval in minutes (1-1440, default 60)" >&2; return 2; }
+            -i) [ $# -lt 2 ] || [ -z "$2" ] && { echo "Error: -i expects the snapshot interval in minutes (1-1440, default 60)" >&2; return 2; }
                 iflag="$2"; shift 2;;
-            -D) [ $# -lt 2 ] && { echo "Error: -D expects the data root directory (absolute path)" >&2; return 2; }
+            -D) [ $# -lt 2 ] || [ -z "$2" ] && { echo "Error: -D expects the data root directory (absolute path)" >&2; return 2; }
                 Dflag="$2"; shift 2;;
             *)  echo "Error: unexpected argument '$1' (usage: enable [-d retention_days] [-i interval_min] [-D datadir])" >&2; return 2;;
         esac
     done
+    # double-enable fails FIRST, before any -D/-d/-i side effect (user
+    # 2026-10-31: repeated enable must error regardless of flags; changes on
+    # an already-enabled instance belong to 'awr config', not 'enable')
+    if crontab -l 2>/dev/null | grep -qE "# vb_tool_awr(_repl)?_p?${PGPORT:-5432} *\$" 2>/dev/null \
+       || crontab -l 2>/dev/null | grep -qE '# vb_tool_awr(_repl)? *$' 2>/dev/null; then
+        echo "Error: awr periodic capture is already ENABLED for port ${PGPORT:-5432} -- run 'awr disable' first; to change settings use 'awr config interval|retention|datadir'" >&2
+        crontab -l 2>/dev/null | grep -F '# vb_tool_awr' >&2
+        return 1
+    fi
+    # F3-A (independent review 2026-10-31): validate -d/-i BEFORE any -D
+    # migration -- a typo like "-i 99999" must fail with NOTHING moved
+    case "$dflag" in ''|*[!0-9]*) [ -n "$dflag" ] && { echo "Error: -d expects a non-negative integer number of days" >&2; return 2; };; esac
+    [ -n "$dflag" ] && [ "$dflag" -gt 3650 ] && { echo "Error: retention too large (max 3650 days); use 0 for keep-forever" >&2; return 2; }
+    if [ -n "$iflag" ]; then
+        case "$iflag" in ''|*[!0-9]*) echo "Error: -i expects a positive integer number of minutes (1-1440)" >&2; return 2;; esac
+        { [ "$iflag" -lt 1 ] || [ "$iflag" -gt 1440 ]; } && { echo "Error: interval must be 1-1440 minutes" >&2; return 2; }
+    fi
     # application order (user 2026-10-31): datadir FIRST -- a failed
     # migration must abort before anything else changes; then retention and
     # interval via the same validators as 'awr config'; then the crontab.
@@ -41007,7 +41083,7 @@ _awr_enable() {
     #   任意 N(1-1440) 精确; interval 改动只写文件下一边界即生效, 与 crontab 解耦。
     local entry="* * * * * /bin/bash -lc 'PGPORT=$port $self awr _gated-create >/dev/null 2>&1'  $marker"
     local rentry="* * * * * /bin/bash -lc 'PGPORT=$port $self awr _repl-sample >/dev/null 2>&1'  $rmarker"
-    if ! ( crontab -l 2>/dev/null | grep -vF "$rmarker" | grep -vF "$marker"; echo "$rentry"; echo "$entry" ) | crontab -; then
+    if ! ( crontab -l 2>/dev/null | grep -vE "# vb_tool_awr_repl_p${port}\$" | grep -vE "# vb_tool_awr_p${port}\$"; echo "$rentry"; echo "$entry" ) | crontab -; then
         echo "Error: failed to install crontab entries (check cron.allow/cron.deny, permissions or disk) -- periodic capture NOT started" >&2
         exit 1
     fi
@@ -41484,19 +41560,8 @@ _awr_config() {
             local cport="${PGPORT:-5432}"
             # ★2026-10-11: 门控条目从 interval 文件现读节奏, 本端口正常条目不再
             #   重写; 重写只为迁移旧形(*/N 硬编码)或 legacy 无端口条目(D8)。
-            if crontab -l 2>/dev/null | grep -qE "# vb_tool_awr_repl_p${cport}\$" || \
-               crontab -l 2>/dev/null | grep -qE "# vb_tool_awr_p${cport}\$" || \
-               crontab -l 2>/dev/null | grep -qE '# vb_tool_awr(_repl)? *$'; then
-                local self; self=$(readlink -f "$0" 2>/dev/null || echo "$0")
-                local entry="* * * * * /bin/bash -lc 'PGPORT=$cport $self awr _gated-create >/dev/null 2>&1'  # vb_tool_awr_p$cport"
-                local rentry="* * * * * /bin/bash -lc 'PGPORT=$cport $self awr _repl-sample >/dev/null 2>&1'  # vb_tool_awr_repl_p$cport"
-                if ! ( crontab -l 2>/dev/null | grep -vE "# vb_tool_awr_repl_p${cport}\$" | grep -vE "# vb_tool_awr_p${cport}\$" | grep -vE '# vb_tool_awr(_repl)? *$'; echo "$rentry"; echo "$entry" ) | crontab -; then
-                    echo "Error: failed to rewrite crontab entry (check cron.allow/cron.deny, permissions or disk) -- interval NOT changed" >&2
-                    return 1
-                fi
+            _awr_cron_ensure_gated "$cport" && \
                 echo "awr config: crontab entry ensured in gated form -- cadence follows the interval file = ${val}min exactly (legacy/old-form entries migrated)"
-                echo "  $entry"
-            fi
             return 0
             ;;
         *)
