@@ -26075,12 +26075,14 @@ _vtop_parent_dev() {
         pp=$(basename "$(readlink -f "/sys/class/block/$1/.." 2>/dev/null)")
         [ -n "$pp" ] && [ "$pp" != "block" ] && { echo "$pp"; return; }
     fi
-    case "$1" in
-        dm-*|md[0-9]*|loop[0-9]*) echo "$1"; return;;
-        *p[0-9]) echo "${1%p*}"; return;;
-        *[0-9])  local p="${1%[0-9]}"; [ -n "$p" ] && echo "$p" || echo "$1"; return;;
-        *) echo "$1"; return;;
-    esac
+    # not a partition (no sysfs partition file): whole disk / dm / md / loop
+    # keeps its name as-is. The old name-heuristic fallback (strip a trailing
+    # digit / *p[0-9]) MANGLED whole disks ending in a digit -- nvme0n1 ->
+    # nvme0n, mmcblk0 -> mmcblk, ram0 -> ram (2026-11-01, removed): sysfs is
+    # the only partition authority, and if sysfs is unreadable the queue
+    # attributes _vtop_devinfo wants are unreadable too, so the fallback
+    # bought nothing.
+    echo "$1"
 }
 
 # "<parent> <size> <rot> <sched> <qd>" for the device holding PGDATA
