@@ -30145,6 +30145,14 @@ _awr_collect() {
                 gtot += tot
                 desc = $0
                 gsub(/ N[0-9]+=[0-9]+/, "", desc)
+                # front the page-size token: the renderer weights DB Share by
+                # it, and a long file path would push it past the 90-char
+                # truncation below (2026-11-01: on 204 the /SYSV shared
+                # segment lost it exactly this way)
+                if (match($0, /kernelpagesize_kB=[0-9]+/))
+                    desc = substr($0, RSTART, RLENGTH) " " desc
+                else
+                    desc = "kernelpagesize_kB=4 " desc
                 ml = "map|" tot
                 for (n in lnode) ml = ml "|" n "=" lnode[n]
                 printf "%s|%s\n", ml, substr(desc, 1, 90)
@@ -30649,7 +30657,7 @@ _awr_collect() {
             _ntx=$(ls -d "$_p/queues/tx-"* 2>/dev/null | wc -l)
             _rmax=-; _rcur=-; _tmax=-; _tcur=-
             if command -v ethtool >/dev/null 2>&1; then
-                _ring=$(ethtool -g "$_if" 2>/dev/null | awk '
+                _ring=$(timeout -k 2 10 ethtool -g "$_if" 2>/dev/null | awk '
                     /Pre-set maximums:/         {sec="max"; next}
                     /Current hardware settings:/{sec="cur"; next}
                     sec=="max" && /^RX:/ {rmax=$2}
@@ -33567,11 +33575,19 @@ def numa_html_table(topology, stats_delta_factory, placement=None):
     parts = []
     nodes = topology.get("nodes", {})
     _pl = {}
+    _plk = {}
     _pltot = 0.0
     if placement:
+        # two denominators (2026-11-01): the DB Pages COLUMN prints the raw
+        # page counts; the DB SHARE column is kernelpagesize_kB-weighted
+        # (pages x kernelpagesize_kB) so a 2M hugepage mapping weighs what it
+        # weighs -- raw-page shares lie on mixed-page-size boxes (the call
+        # site adds a note when the instance mixes page sizes)
         for _k, _v in placement.get("nodes", {}).items():
             _pl[_k[1:] if _k.startswith("N") else _k] = _v
-        _pltot = placement.get("total", 0.0)
+        for _k, _v in placement.get("kb", {}).items():
+            _plk[_k[1:] if _k.startswith("N") else _k] = _v
+        _pltot = placement.get("kb_total", 0.0)
     parts.append('<table class="t"><tr><th>NUMA Nodes</th><th class="n">%d</th></tr></table>'
                  % len(nodes))
     parts.append('<table class="t"><tr><th>Node</th><th>CPU List</th><th class="n">MemTotal</th>'
@@ -33606,7 +33622,7 @@ def numa_html_table(topology, stats_delta_factory, placement=None):
                          ratio,
                          (('<td class="n">%s</td><td class="n">%s</td>'
                             % (fmt_int(_pl[nid]) if nid in _pl else "-",
-                               '%.1f%%' % (100.0 * _pl[nid] / _pltot) if nid in _pl and _pltot > 0 else "-"))
+                               '%.1f%%' % (100.0 * _plk[nid] / _pltot) if nid in _plk and _pltot > 0 else "-"))
                           if placement else '')))
     parts.append('</table>')
     return "".join(parts)
@@ -33656,9 +33672,14 @@ def _vmstat_keys(txt, keys):
 def parse_db_numa_maps(txt):
     """Parse the db_numa_maps snapshot (format in _awr_collect): a
     "pages|<total>|N0=<n>|...|unfaulted=<n>" aggregate line plus
-    "map|<pages>|<desc>" rows. {"total","nodes","unfaulted","maps"} or {}
-    when the file is absent (pre-2026-10-31 snaps degrade silently)."""
-    out = {"total": 0.0, "nodes": {}, "unfaulted": 0, "maps": []}
+    "map|<pages>|N0=..|..|<desc>" rows. Returns {"total","nodes","unfaulted",
+    "maps","kb","kb_total","kbs"} or {} when the file is absent
+    (pre-2026-10-31 snaps degrade silently). "kb"/"kb_total" are the
+    kernelpagesize_kB-WEIGHTED per-node / total page-KB sums -- the share
+    denominators; "kbs" = distinct page sizes among faulted mappings (mixed
+    4K/hugepage boxes make raw-page shares lie: a 2M hugepage is ONE page)."""
+    out = {"total": 0.0, "nodes": {}, "unfaulted": 0, "maps": [],
+           "kb": {}, "kb_total": 0.0, "kbs": set()}
     seen = False
     for line in (txt or "").splitlines():
         f = line.split("|")
@@ -33690,7 +33711,23 @@ def parse_db_numa_maps(txt):
                     _k, _v = f[_j].split("=", 1)
                     _nd[_k] = to_num(_v)
                     _j += 1
-                out["maps"].append((_pv, _nd, "|".join(f[_j:])))
+                desc = "|".join(f[_j:])
+                # the collector fronts kernelpagesize_kB in the desc (the
+                # 90-char truncation used to eat it behind long paths);
+                # absent (old snaps) -> 4 kB
+                _kb = 4
+                _m = re.search(r"kernelpagesize_kB=(\d+)", desc)
+                if _m:
+                    try:
+                        _kb = int(_m.group(1)) or 4
+                    except Exception:
+                        pass
+                for _nk, _nv in _nd.items():
+                    out["kb"][_nk] = out["kb"].get(_nk, 0.0) + _nv * _kb
+                out["kb_total"] += _pv * _kb
+                if _pv > 0:
+                    out["kbs"].add(_kb)
+                out["maps"].append((_pv, _nd, desc, _kb))
             except Exception:
                 pass
     return out if seen else {}
@@ -35305,6 +35342,10 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         parts.append(numa_html_table(_ntop,
                      lambda nid, key: _numa_stat_delta(_nbeg, _nend, nid, key),
                      placement=(_dnm if _dnm and _dnm["total"] > 0 else None)))
+        if _dnm and _dnm.get("total", 0) > 0 and len(_dnm.get("kbs", set())) > 1:
+            note("DB Share is kernelpagesize_kB-weighted (this instance mixes "
+                 "page sizes: %s kB); the DB Pages column counts raw pages"
+                 % "/".join(str(x) for x in sorted(_dnm["kbs"])))
         # kernel auto-NUMA balancing activity (2026-10-31): the numa_* family
         # from the ALREADY-collected /proc/vmstat, window delta -- fault-scan
         # and migration churn; counters absent (feature off / kernel without
@@ -35334,7 +35375,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                   '<table class="t"><tr><th class="n">Pages</th>'
                   + ''.join('<th class="n">%s</th>' % esc(x) for x in _mn)
                   + '<th>Mapping</th></tr>']
-            for pv, mnd, desc in _dnm["maps"][:10]:
+            for pv, mnd, desc, _kbm in _dnm["maps"][:10]:
                 if pv <= 0:
                     continue
                 h2.append('<tr><td class="n">%s</td>%s<td>%s</td></tr>'
@@ -35911,26 +35952,36 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                  "memory.limit", "memsw.limit", "pids.max",
                  "cpuset.cpus", "cpuset.effective", "cpuset.mems")
         _CUMQ = ("cpuacct.usage", "memory.usage", "memory.failcnt", "pids.current")
+        def _cfg_cell(k, raw):
+            # normalize ONE side's raw value; M-1 (round-4): a truncated
+            # snapshot (ENOSPC/copy cut) can leave "cpu.max|" EMPTY --
+            # (v.split() or [""])[0] must not IndexError the whole report;
+            # L-4: v2 writes the literal "max" for memory/pids limits too --
+            # one table, one word
+            if raw is None:
+                return None
+            v = str(raw)
+            if k in ("cpu.quota", "cpu.max") and (v.split() or [""])[0] in ("-1", "max"):
+                return "unlimited"
+            if v == "max":
+                return "unlimited"
+            if k.endswith("limit") and to_num(v) >= 9e18:
+                return "unlimited"
+            return v
         for k in _CFGQ:
             vb_ = _cgb2.get("kv", {}).get(k)
             ve_ = _cge2.get("kv", {}).get(k)
             if vb_ is None and ve_ is None:
                 continue
-            v = ve_ if ve_ is not None else vb_
-            v = str(v)
-            # M-1 (round-4): a truncated snapshot (ENOSPC/copy cut) can leave
-            # "cpu.max|" with an EMPTY value -- v.split()[0] would IndexError
-            # and kill the WHOLE report; () or [""] keeps it alive as ""
-            if k in ("cpu.quota", "cpu.max") and (v.split() or [""])[0] in ("-1", "max"):
-                v = "unlimited"
-            # L-4: v2 writes the literal "max" for memory/pids limits too --
-            # one table, one word
-            if v == "max":
-                v = "unlimited"
-            if k.endswith("limit") and to_num(v) >= 9e18:
-                v = "unlimited"
+            # (user 2026-11-01: Begin shows the BEGIN snapshot's own value,
+            # End the END snapshot's -- printing one side's value in both
+            # cells masked mid-window config changes)
+            cb = _cfg_cell(k, vb_)
+            ce = _cfg_cell(k, ve_)
             h.append('<tr><td>%s</td><td class="n">%s</td><td class="n">%s</td>'
-                     '<td class="n">-</td></tr>' % (esc(k), esc(trunc(v, 40)), esc(trunc(v, 40))))
+                     '<td class="n">-</td></tr>' % (esc(k),
+                     esc(trunc(cb, 40)) if cb is not None else "-",
+                     esc(trunc(ce, 40)) if ce is not None else "-"))
         for k in _CUMQ:
             vb_ = _cgb2.get("kv", {}).get(k)
             ve_ = _cge2.get("kv", {}).get(k)
@@ -35964,6 +36015,29 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                 _fd = ("+" + fmt_int(_dv2)) if _dv2 else ("-" if _dv2 is None else fmt_int(_dv2))
                 h.append('<tr><td>cpu.%s</td><td class="n">%s</td><td class="n">%s</td>'
                          '<td class="n">%s</td></tr>' % (k2, _fb, _fe, _fd))
+        # memory.events (v2): ABSOLUTE per-snapshot counters, never a plain
+        # window delta (user 2026-11-01: an OOM kill takes the DB down -- no
+        # end snap gets taken; and after the restart the cgroup is RECREATED
+        # and its counters restart at zero, so end-begin would read 0 and
+        # bury the kill. The absolute values are the record; the delta column
+        # only carries a number while the counter ran MONOTONICALLY through
+        # the window -- end < begin means cgroup recreated = restart marker.)
+        _meb, _mee = _statmap(_cgb2, "memory.events"), _statmap(_cge2, "memory.events")
+        for k2 in ("low", "high", "max", "oom", "oom_kill"):
+            if k2 not in _meb and k2 not in _mee:
+                continue
+            _fb = fmt_int(_meb[k2]) if k2 in _meb else "-"
+            _fe = fmt_int(_mee[k2]) if k2 in _mee else "-"
+            if k2 in _meb and k2 in _mee:
+                if _mee[k2] < _meb[k2]:
+                    _fd = "reset"
+                else:
+                    _dv5 = _mee[k2] - _meb[k2]
+                    _fd = ("+" + fmt_int(_dv5)) if _dv5 else fmt_int(0)
+            else:
+                _fd = "-"
+            h.append('<tr><td>memory.events %s</td><td class="n">%s</td><td class="n">%s</td>'
+                     '<td class="n">%s</td></tr>' % (k2, _fb, _fe, _fd))
         # blkio service bytes: per-device Read/Write rows, window delta =
         # the group's IO throughput ("Total N" line -> io.total row)
         def _iomap(d):
@@ -35991,11 +36065,16 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             h.append('<tr><td>io %s %s</td><td class="n">%s</td><td class="n">%s</td>'
                      '<td class="n">%s</td></tr>' % (esc(_dk[0]), esc(_dk[1]), _fb, _fe, _fd))
         # io throttle config (v1): static config rows when present
+        # (per-side values, same as _CFGQ -- user 2026-11-01)
         for k in ("io.throttle.r", "io.throttle.w"):
+            _vb = _cgb2.get("kv", {}).get(k) if _cgb2 else None
             _ve = _cge2.get("kv", {}).get(k) if _cge2 else None
-            if _ve:
-                h.append('<tr><td>%s</td><td class="n">%s</td><td class="n">%s</td>'
-                         '<td class="n">-</td></tr>' % (esc(k), esc(trunc(_ve, 40)), esc(trunc(_ve, 40))))
+            if _vb is None and _ve is None:
+                continue
+            h.append('<tr><td>%s</td><td class="n">%s</td><td class="n">%s</td>'
+                     '<td class="n">-</td></tr>' % (esc(k),
+                     esc(trunc(_vb, 40)) if _vb is not None else "-",
+                     esc(trunc(_ve, 40)) if _ve is not None else "-"))
         # hugetlb: limit = static config, usage = cumulative row
         for k in sorted(set(_cgb2.get("kv", {})) | set(_cge2.get("kv", {}))):
             if not k.startswith("hugetlb."):
@@ -36003,9 +36082,13 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             vb_ = _cgb2.get("kv", {}).get(k)
             ve_ = _cge2.get("kv", {}).get(k)
             if k.endswith(".limit"):
-                _v = "unlimited" if to_num(ve_ or vb_) >= 9e18 else str(ve_ or vb_)
+                # per-side normalization (user 2026-11-01: no End-value echo)
+                _cb = "unlimited" if (vb_ is not None and to_num(vb_) >= 9e18) else (str(vb_) if vb_ is not None else None)
+                _ce = "unlimited" if (ve_ is not None and to_num(ve_) >= 9e18) else (str(ve_) if ve_ is not None else None)
                 h.append('<tr><td>%s</td><td class="n">%s</td><td class="n">%s</td>'
-                         '<td class="n">-</td></tr>' % (esc(k), esc(_v), esc(_v)))
+                         '<td class="n">-</td></tr>' % (esc(k),
+                         esc(trunc(_cb, 40)) if _cb is not None else "-",
+                         esc(trunc(_ce, 40)) if _ce is not None else "-"))
             elif k.endswith(".usage"):
                 _fb = fmt_int(to_num(vb_)) if vb_ is not None else "-"
                 _fe = fmt_int(to_num(ve_)) if ve_ is not None else "-"
