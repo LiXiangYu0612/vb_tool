@@ -26015,6 +26015,52 @@ _vtop_diskstats() {
     timeout 3 awk -v d="$1" '$3==d{print $4, $6, $7, $8, $10, $11, $13, $14; exit}' /proc/diskstats 2>/dev/null
 }
 
+# _vtop_slaves_leaves <dev> <depth> -- recursive sysfs slave walk: dm/md can
+# stack (multipath dm over lvm dm over sd partitions), so follow slaves/ until
+# the leaves. Depth-capped and loop-safe; a device with no slaves is a leaf.
+_vtop_slaves_leaves() {
+    local cur="$1" depth=$2 s d
+    [ "$depth" -ge 8 ] && { echo "$cur"; return; }
+    s=""
+    for d in /sys/class/block/$cur/slaves/*; do [ -e "$d" ] && s="$s ${d##*/}"; done
+    [ -z "$s" ] && { echo "$cur"; return; }
+    for d in $s; do _vtop_slaves_leaves "$d" $((depth+1)); done
+}
+
+# _vtop_disk_expand <dev> -- the PHYSICAL disks behind dev: dm/md resolved via
+# the slave walk, leaf PARTITIONS lifted to their parent disk and deduped
+# (sda1+sdb1 -> "sda sdb"; two partitions of one disk = ONE physical disk, not
+# two). Unresolved -> dev itself.
+_vtop_disk_expand() {
+    local d p out=""
+    for d in $(_vtop_slaves_leaves "$1" 0); do
+        # lift ONLY real partitions (sysfs partition file): _vtop_parent_dev's
+        # name heuristic mangles whole disks whose name ends in a digit
+        # (nvme0n1 -> nvme0n) -- keep whole-disk leaves as-is
+        if [ -f "/sys/class/block/$d/partition" ]; then
+            p=$(_vtop_parent_dev "$d"); [ -n "$p" ] && d="$p"
+        fi
+        case " $out " in *" $d "*) ;; *) out="$out $d";; esac
+    done
+    out="${out# }"; [ -n "$out" ] || out="$1"
+    printf '%s\n' "$out"
+}
+
+# same 8 fields as _vtop_diskstats but for EVERY candidate at once, one line
+# per device ("name:f1 f2 .. f8") -- the worst-disk picker keys off the name.
+# A device absent from a sample simply has no line = no baseline, so it is
+# excluded from picking that frame (2026-09-28 rule: empty is NOT zero).
+_vtop_diskstats_m() {
+    timeout 3 awk -v devs="$1" 'BEGIN{n=split(devs,D," ");for(i=1;i<=n;i++)w[D[i]]=1}
+        $3 in w{print $3 ":" $4,$6,$7,$8,$10,$11,$13,$14}' /proc/diskstats 2>/dev/null
+}
+
+# per-frame sample dispatch: multi-disk fs -> all candidates; single -> the
+# legacy single-device line (bit-identical single-disk behaviour).
+_vtop_dsample() {
+    if [ "${ndev:-1}" -gt 1 ]; then _vtop_diskstats_m "$devs"; else _vtop_diskstats "$dev"; fi
+}
+
 # parent disk for sysfs queue attributes (vda1 -> vda, nvme0n1p2 -> nvme0n1)
 _vtop_parent_dev() {
     # ★分区号 >= 10 也要正确 (2026-09-28 修): 老代码 `*[0-9]) ${1%[0-9]}` 只剥**一位**
@@ -26436,10 +26482,20 @@ _vtop_print_os() { # main-screen OS block; reads caller-scope vars (dynamic scop
         "last-ack|${t_la:-?}" "closing|${t_cl:-?}" "other|${t_oth:-?}"
     # ---- DSK: only the data_dir filesystem's disk, metadata in lsds columns ----
     if [ -n "$dev" ]; then
-        local dsz dtype dsch drot dmodel dqd dnrq dwc dfua dhws
-        IFS='|' read -r dsz dtype dsch drot dmodel dqd dnrq dwc dfua dhws <<< "$devinfo"
+        local dsz dtype dsch drot dmodel dqd dnrq dwc dfua dhws rdev rinfo
+        rdev="$dev"; rinfo="$devinfo"
+        if [ "${ndev:-1}" -gt 1 ]; then
+            # worst-latency disk of the set (user 2026-11-01); "-" = no window
+            # yet / both samples lost -> show the first candidate's metadata
+            rdev="${d_pick:-${devs%% *}}"
+            { [ -z "$rdev" ] || [ "$rdev" = "-" ]; } && rdev="${devs%% *}"
+            rinfo=$(printf '%s\n' "$devinfos" | awk -v n="$rdev" -F'|' '$1==n{sub(/^[^|]*\|/,""); print; exit}')
+            rdev="$rdev (worst of $ndev)"
+            [ -n "$rinfo" ] || rinfo="$devinfo"
+        fi
+        IFS='|' read -r dsz dtype dsch drot dmodel dqd dnrq dwc dfua dhws <<< "$rinfo"
         _vtop_lv DSK "" \
-            "device|$dev" "size|$dsz" "type|$dtype" "sched|$dsch" "rot|$drot" \
+            "device|$rdev" "size|$dsz" "type|$dtype" "sched|$dsch" "rot|$drot" \
             "model|$dmodel" "qdepth|$dqd" "nr_rq|$dnrq" "wcache|$dwc" \
             "fua|$dfua" "hwsec|$dhws"
         # I/O rates: its own section (was the DSK table), named r_*/w_* per spec
@@ -28425,6 +28481,23 @@ run_vtop() {
     if [ -n "$datadir" ] && [ -d "$datadir" ]; then
         dev=$(_vtop_disk_dev "$datadir")
     fi
+    # ★multi-disk filesystem (user 2026-11-01): the data fs spanning several
+    # physical disks (LVM/RAID) used to show ONE averaged dm/md line, which
+    # hides the straggler -- DSK/I-O rows now follow the WORST disk by read+
+    # write service time. Single physical disk behind the fs (incl. dm on one
+    # disk): unchanged view.
+    local devs ndev=1 devinfos="" d_pick=""
+    devs="$dev"; d_pick="$dev"
+    if [ -n "$dev" ] ; then
+        local _xdevs _vd
+        _xdevs=$(_vtop_disk_expand "$dev")
+        if [ "$(printf '%s\n' "$_xdevs" | wc -w)" -gt 1 ]; then
+            devs="$_xdevs"; ndev=$(printf '%s\n' "$devs" | wc -w); d_pick="${devs%% *}"
+            for _vd in $devs; do
+                devinfos=$(printf '%s%s|%s\n' "$devinfos" "$_vd" "$(_vtop_devinfo "$_vd")")
+            done
+        fi
+    fi
     datadir="${datadir:-unknown}"
     devinfo=""
     [ -n "$dev" ] && devinfo=$(_vtop_devinfo "$dev")
@@ -28919,7 +28992,7 @@ order by s.sz desc;"
     local d_rops d_rmb d_rms d_wops d_wmb d_wms d_util n_rp n_tp n_re n_te n_rd n_td n_rb n_tb
     local mt ma mst msf
     t0=$(date +%s%3N)
-    d0=$(_vtop_diskstats "$dev"); c0=$(_vtop_cpustat); n0=$(_vtop_net); p0=$(_vtop_procs); g0=$(_vtop_pgc)
+    d0=$(_vtop_dsample); c0=$(_vtop_cpustat); n0=$(_vtop_net); p0=$(_vtop_procs); g0=$(_vtop_pgc)
     local first=1 sub_first=0
     while :; do
         if [ "$once" = "1" ]; then
@@ -28988,7 +29061,7 @@ order by s.sz desc;"
                         # fresh sampling baseline: without this the first main frame
                         # after coming back would average over the whole sub-screen
                         # stay (tps / iops / EVENT would show a bogus value)
-                        t0=$(date +%s%3N); d0=$(_vtop_diskstats "$dev"); c0=$(_vtop_cpustat); n0=$(_vtop_net); p0=$(_vtop_procs); g0=$(_vtop_pgc)
+                        t0=$(date +%s%3N); d0=$(_vtop_dsample); c0=$(_vtop_cpustat); n0=$(_vtop_net); p0=$(_vtop_procs); g0=$(_vtop_pgc)
                         prev_xc=""; prev_xr=""; prev_br=""; prev_bh=""; prev_tb=""; prev_lsn=""; ist_qps=""; ist_cm=""; ist_roll=""; ist_tps=""; ist_lg=""; ist_ph=""; ist_pw=""; ist_rd=""; ist_tp=""; ist_dl=""
                         # ★REPL 每帧复位:显示值 + 基线。基线一并清 ⇒ 备库消失/重连后的首帧显示 '-'(不会跨空档算出一个巨大的假增量)
                         r_app=""; r_state=""; r_sync=""; r_sent=""; r_wr=""; r_fl=""; r_rp=""; r_slot=""
@@ -29075,7 +29148,7 @@ order by s.sz desc;"
             # branch, which is skipped when once=1, so this path is interactive-only
             continue
         fi
-        t1=$(date +%s%3N); d1=$(_vtop_diskstats "$dev"); c1=$(_vtop_cpustat); n1=$(_vtop_net)
+        t1=$(date +%s%3N); d1=$(_vtop_dsample); c1=$(_vtop_cpustat); n1=$(_vtop_net)
         dt=$(( t1 - t0 )); [ "$dt" -le 0 ] && dt=1
         read -r a_user a_nice a_sys a_idle a_iowait a_irq a_softirq a_steal <<< "$(awk -v a="$c0" -v b="$c1" 'BEGIN{split(a,x);split(b,y);d=y[1]-x[1];if(d<=0)d=1;
             # ★逐状态钳非负 (2026-09-28): 累计值变小只有一种来源 —— CPU 热插拔/下线
@@ -29096,7 +29169,33 @@ order by s.sz desc;"
         # 差值前的空值自愈: 本帧 d0=$d1 落盘, 下一帧就有真基线了。
         if [ -z "$d0" ] || [ -z "$d1" ]; then
             d_rops="-" d_rmb="-" d_rms="-" d_wops="-" d_wmb="-" d_wms="-" d_aqu="-" d_util="-"
+            [ "${ndev:-1}" -gt 1 ] && d_pick="-"
+        elif [ "${ndev:-1}" -gt 1 ]; then
+            # worst-disk pick (user 2026-11-01): max read+write service time
+            # over the window, among disks present in BOTH samples; a disk
+            # missing from either sample has no baseline and is EXCLUDED, not
+            # zero-filled (2026-09-28 rule: empty is NOT zero). Flat X[d,j]
+            # subscripts on purpose -- mawk has no arrays of arrays.
+            read -r d_pick d_rops d_rmb d_rms d_wops d_wmb d_wms d_aqu d_util <<< "$(awk -v a="$d0" -v b="$d1" -v ms="$dt" 'BEGIN{
+                n=split(a,LA,"\n"); m=split(b,LB,"\n")
+                for(i=1;i<=n;i++){ if(LA[i]=="")continue; split(LA[i],pa,":"); dd=pa[1]; split(pa[2],v," "); for(j=1;j<=8;j++){ if(v[j]=="")v[j]=0; X[dd,j]=v[j] } hx[dd]=1 }
+                for(i=1;i<=m;i++){ if(LB[i]=="")continue; split(LB[i],pb,":"); dd=pb[1]; split(pb[2],v," "); for(j=1;j<=8;j++){ if(v[j]=="")v[j]=0; Y[dd,j]=v[j] } hy[dd]=1 }
+                best=""; bv=-1
+                for(d in hy){
+                    if(!(d in hx)) continue
+                    ro=Y[d,1]-X[d,1]; rt=Y[d,3]-X[d,3]; wo=Y[d,4]-X[d,4]; wt=Y[d,6]-X[d,6]
+                    if(ro<0)ro=0; if(rt<0)rt=0; if(wo<0)wo=0; if(wt<0)wt=0
+                    rl=(ro>0)?rt/ro:0; wl=(wo>0)?wt/wo:0; sc=rl+wl
+                    if(sc>bv){bv=sc; best=d}
+                }
+                if(best==""){ printf "- - - - - - - - -"; exit }
+                ro=Y[best,1]-X[best,1]; rs=(Y[best,2]-X[best,2])*512; rt=Y[best,3]-X[best,3]; wo=Y[best,4]-X[best,4]; ws=(Y[best,5]-X[best,5])*512; wt=Y[best,6]-X[best,6]; it=Y[best,7]-X[best,7]; tq=Y[best,8]-X[best,8];
+                if(ro<0)ro=0; if(rs<0)rs=0; if(rt<0)rt=0; if(wo<0)wo=0; if(ws<0)ws=0; if(wt<0)wt=0; if(it<0)it=0; if(tq<0)tq=0;
+                s=ms/1000; rl=(ro>0)?rt/ro:0; wl=(wo>0)?wt/wo:0; u=(it*100/ms); if(u>100)u=100;
+                dq=tq/ms;
+                printf "%s %.0f %.1f %.1f %.0f %.1f %.1f %.2f %.0f", best, ro/s, rs/1048576/s, rl, wo/s, ws/1048576/s, wl, dq, u}')"
         else
+            d_pick="$dev"
         read -r d_rops d_rmb d_rms d_wops d_wmb d_wms d_aqu d_util <<< "$(awk -v a="$d0" -v b="$d1" -v ms="$dt" 'BEGIN{split(a,x);split(b,y);for(i=1;i<=8;i++){if(x[i]=="")x[i]=0;if(y[i]=="")y[i]=0}
             ro=y[1]-x[1]; rs=(y[2]-x[2])*512; rt=y[3]-x[3]; wo=y[4]-x[4]; ws=(y[5]-x[5])*512; wt=y[6]-x[6]; it=y[7]-x[7]; tq=y[8]-x[8];
             if(ro<0)ro=0; if(rs<0)rs=0; if(rt<0)rt=0; if(wo<0)wo=0; if(ws<0)ws=0; if(wt<0)wt=0; if(it<0)it=0; if(tq<0)tq=0;
