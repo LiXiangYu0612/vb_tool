@@ -31023,12 +31023,16 @@ PSQL4
     fi
     # ---- object stats across all databases (cumulative counters; renderer computes end-begin).
     # Per-db psql carries the SAME connect/statement timeouts as the rest: a hung
-    # database or a huge pg_class must not stretch one create into hours. ----
+    # database or a huge pg_class must not stretch one create into hours.
+    # System catalogs INCLUDED (user 2026-11-01: statement_history can grow huge
+    # and slow -- its row counts and DML must be visible to tabstat), matching
+    # the object_dead/iostat siblings; pg_toast excluded -- toast chunk DML
+    # would double-count the owning table. ----
     local _odbs _odb
     _odbs=$(PGCONNECT_TIMEOUT=$_ct PGOPTIONS="$_st" psql -d postgres -tAc "select datname from pg_database where datallowconn and not datistemplate order by 1" 2>/dev/null)
     { echo "dbname,schema,object,seq_scan,seq_tup_read,idx_scan,idx_tup_fetch,n_tup_ins,n_tup_upd,n_tup_del,n_tup_hot_upd,n_live_tup,n_dead_tup"
       for _odb in $_odbs; do
-          PGCONNECT_TIMEOUT=$_ct PGOPTIONS="$_st" psql -d "$_odb" -v odb="$_odb" -tAF',' -c "select :'odb',schemaname,relname,coalesce(seq_scan,0),coalesce(seq_tup_read,0),coalesce(idx_scan,0),coalesce(idx_tup_fetch,0),coalesce(n_tup_ins,0),coalesce(n_tup_upd,0),coalesce(n_tup_del,0),coalesce(n_tup_hot_upd,0),coalesce(n_live_tup,0),coalesce(n_dead_tup,0) from pg_stat_user_tables" 2>/dev/null
+          PGCONNECT_TIMEOUT=$_ct PGOPTIONS="$_st" psql -d "$_odb" -v odb="$_odb" -tAF',' -c "select :'odb',schemaname,relname,coalesce(seq_scan,0),coalesce(seq_tup_read,0),coalesce(idx_scan,0),coalesce(idx_tup_fetch,0),coalesce(n_tup_ins,0),coalesce(n_tup_upd,0),coalesce(n_tup_del,0),coalesce(n_tup_hot_upd,0),coalesce(n_live_tup,0),coalesce(n_dead_tup,0) from pg_stat_all_tables where schemaname <> 'pg_toast'" 2>/dev/null
       done; } > "$dbd/object_tables.csv"
     # object_dead walks pg_class so global relisshared catalogs land here too;
     # postgres-pass-only, same rule as object_iostat below (2026-10-26).
