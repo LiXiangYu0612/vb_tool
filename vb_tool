@@ -30120,7 +30120,7 @@ _awr_collect() {
     # DB user's name is irrelevant and need not be guessed). First line =
     # "user <name>" for context; the rest is the proc file verbatim.
     if [ -n "$_dpid" ] && [ -r "/proc/$_dpid/limits" ]; then
-        { echo "user $(id -un 2>/dev/null)"; cat "/proc/$_dpid/limits"; } > "$osd/limits" 2>/dev/null
+        { echo "user $(id -un 2>/dev/null)"; timeout -k 2 10 cat "/proc/$_dpid/limits"; } > "$osd/limits" 2>/dev/null
     fi
     # db_numa_maps (2026-10-31): the POSTMASTER's numa_maps aggregated per
     # node -- WHERE the DB's memory actually faulted. numactl not required:
@@ -30196,8 +30196,11 @@ _awr_collect() {
                 _v=$(_cg_rd "$_D/memory.current"); [ -n "$_v" ] && echo "memory.usage|$_v"
                 _v=$(_cg_rd "$_D/memory.events" | awk '{printf "%s=%s;",$1,$2}'); [ -n "$_v" ] && echo "memory.events|$_v"
                 echo "io|$_REL"
-                _v=$(_cg_rd "$_D/io.max"); [ -n "$_v" ] && echo "io.max|$_v"
-                _v=$(_cg_rd "$_D/io.stat"); [ -n "$_v" ] && echo "io.stat|$_v"
+                # io.max/io.stat are PER-DEVICE (multi-line): join with ';' so
+                # every device survives the "k|v" single-line format (raw
+                # lines 2+ used to land unprefixed and be dropped by the parser)
+                _v=$(_cg_rd "$_D/io.max" | awk '{printf "%s;",$0}'); [ -n "$_v" ] && echo "io.max|$_v"
+                _v=$(_cg_rd "$_D/io.stat" | awk '{printf "%s;",$0}'); [ -n "$_v" ] && echo "io.stat|$_v"
                 echo "pids|$_REL"
                 _v=$(_cg_rd "$_D/pids.max"); [ -n "$_v" ] && echo "pids.max|$_v"
                 _v=$(_cg_rd "$_D/pids.current"); [ -n "$_v" ] && echo "pids.current|$_v"
@@ -30343,7 +30346,7 @@ _awr_collect() {
                 _tblist="$_tblist|$_tt"
             done
         fi
-        ls -l "/proc/$_dpid/fd" 2>/dev/null | awk -v pd="$_pd" -v gh="$_gh" -v baseids="$_baseids" -v ghcfg="$_ghcfg" -v tblist="$_tblist" -v pref="$_pref" '
+        timeout -k 2 10 ls -l "/proc/$_dpid/fd" 2>/dev/null | awk -v pd="$_pd" -v gh="$_gh" -v baseids="$_baseids" -v ghcfg="$_ghcfg" -v tblist="$_tblist" -v pref="$_pref" '
             BEGIN { np = split(pref, prefarr, "|")
                     for (j = 1; j <= np; j++) {
                         it = prefarr[j]
@@ -30634,10 +30637,10 @@ _awr_collect() {
         if [ -d "$_nd" ]; then
             for _n in $(ls "$_nd" 2>/dev/null | grep '^node[0-9]*$' | sort -V); do
                 echo "node ${_n#node}"
-                [ -r "$_nd/$_n/cpulist" ] && echo "cpulist $(cat "$_nd/$_n/cpulist")"
-                [ -r "$_nd/$_n/meminfo" ] && grep -E 'MemTotal|MemFree' "$_nd/$_n/meminfo" | sed 's/^Node [0-9]* //'
-                [ -r "$_nd/$_n/distance" ] && echo "distance $(cat "$_nd/$_n/distance")"
-                [ -r "$_nd/$_n/numastat" ] && sed 's/^/stat /' "$_nd/$_n/numastat"
+                [ -r "$_nd/$_n/cpulist" ] && echo "cpulist $(timeout -k 2 10 cat "$_nd/$_n/cpulist")"
+                [ -r "$_nd/$_n/meminfo" ] && timeout -k 2 10 grep -E 'MemTotal|MemFree' "$_nd/$_n/meminfo" | sed 's/^Node [0-9]* //'
+                [ -r "$_nd/$_n/distance" ] && echo "distance $(timeout -k 2 10 cat "$_nd/$_n/distance")"
+                [ -r "$_nd/$_n/numastat" ] && timeout -k 2 10 sed 's/^/stat /' "$_nd/$_n/numastat"
                 echo ""
             done
         fi
@@ -30674,7 +30677,7 @@ _awr_collect() {
     } > "$osd/netdev_meta" 2>/dev/null
     # dmi: arch/vendor/product lines (world-readable; absent on some ARM/containers -> empty file)
     {
-        _a=$(lscpu 2>/dev/null | awk -F: '$1=="Architecture"{gsub(/^[ \t]+/,"",$2); print $2; exit}')
+        _a=$(timeout -k 2 10 lscpu 2>/dev/null | awk -F: '$1=="Architecture"{gsub(/^[ \t]+/,"",$2); print $2; exit}')
         [ -n "$_a" ] && echo "arch $_a" || { command -v uname >/dev/null 2>&1 && echo "arch $(uname -m)"; }
         [ -r /sys/class/dmi/id/sys_vendor ]   && echo "vendor $(cat /sys/class/dmi/id/sys_vendor)"
         [ -r /sys/class/dmi/id/product_name ] && echo "product $(cat /sys/class/dmi/id/product_name)"
@@ -33557,14 +33560,16 @@ def parse_numa(txt):
     return out
 
 def _numa_stat_delta(numa_a, numa_b, nid, key):
-    """Window delta of one numastat counter (end - begin); missing -> None."""
+    """Window delta of one numastat counter (end - begin); missing on EITHER
+    side -> None (2026-11-01: a begin side lacking the counter must render
+    "?" -- unknown -- not a fabricated 0 delta)."""
     if not numa_a or not numa_b:
         return None
     sa = numa_a.get("nodes", {}).get(nid, {}).get("stats", {})
     sb = numa_b.get("nodes", {}).get(nid, {}).get("stats", {})
-    if key not in sb:
+    if key not in sa or key not in sb:
         return None
-    return sb[key] - sa.get(key, sb[key])
+    return sb[key] - sa[key]
 
 def numa_html_table(topology, stats_delta_factory, placement=None):
     """Emit the awrrpt NUMA table -- ONE table, one row per
@@ -33713,10 +33718,13 @@ def parse_db_numa_maps(txt):
                     _j += 1
                 desc = "|".join(f[_j:])
                 # the collector fronts kernelpagesize_kB in the desc (the
-                # 90-char truncation used to eat it behind long paths);
-                # absent (old snaps) -> 4 kB
+                # 90-char truncation used to eat it behind long paths).
+                # Trust ONLY the leading token: an old-snapshot desc that was
+                # cut mid-digit ("...kernelpagesize_kB=204") must not be
+                # parsed as a real 204 kB page size; old snaps without the
+                # fronted token degrade to the 4 kB default
                 _kb = 4
-                _m = re.search(r"kernelpagesize_kB=(\d+)", desc)
+                _m = re.match(r"kernelpagesize_kB=(\d+)", desc)
                 if _m:
                     try:
                         _kb = int(_m.group(1)) or 4
@@ -34282,48 +34290,72 @@ def proc_interrupts(txt):
     """/proc/interrupts -> {irq_label: (per_cpu_counts, desc)} (user
     2026-10-30: the per-CPU DISTRIBUTION is the signal -- which core serves
     the NIC/disk IRQ decides the affinity story a summed total hides).
-    First line holds the CPU column headers -- its width is the per-IRQ cpu
-    count. Rows: '<label>: <cnt per cpu>... <type...> <device...>'. Counts are
-    cumulative since boot; consumers take end-begin deltas."""
+    per_cpu_counts is {cpu_id: count} keyed by the header's OWN cpu ids
+    (2026-11-01: the header lists ONLINE cpus only and drops/reshuffles
+    columns on hotplug -- positional matching misattributed cores across a
+    begin/end window when the online set changed mid-window). Rows:
+    '<label>: <cnt per cpu>... <type...> <device...>'. Counts are cumulative
+    since boot; consumers take end-begin deltas.
+    Second return value: machine-wide single-counter rows (x86 ERR:/MIS: --
+    spurious/unhandled IRQ, the failing-IRQ-line signature), which carry no
+    per-cpu vector and must never become matrix columns."""
     out = {}
+    mw = {}
     lines = (txt or "").splitlines()
     if not lines:
-        return out
-    ncpu = len(lines[0].split())
+        return out, mw
+    ids = [int(h[3:]) for h in lines[0].split()
+           if h.startswith("CPU") and h[3:].isdigit()]
+    ncpu = len(ids)
     if ncpu <= 0:
-        return out
+        return out, mw
     for ln in lines[1:]:
         f = ln.split(None, 1)
         if not f or not f[0].endswith(":"):
             continue
         label = f[0][:-1]
         rest = (f[1] or "").split()
+        if label in ("ERR", "MIS"):
+            if rest and rest[0].isdigit():
+                mw[label] = int(rest[0])
+            continue
         if len(rest) < ncpu:
             continue
         try:
-            cnts = [int(x) for x in rest[:ncpu] if x.isdigit()]
+            cnts = {}
+            for k in range(ncpu):
+                if not rest[k].isdigit():
+                    raise ValueError(rest[k])
+                cnts[ids[k]] = int(rest[k])
         except Exception:
             continue
-        if len(cnts) != ncpu:
-            continue
         out[label] = (cnts, " ".join(rest[ncpu:]))
-    return out
+    return out, mw
 
 def proc_softirqs(txt):
     """Per-category softirq PER-CPU counts (user 2026-10-30: which CPU runs
     the softirq is the signal -- a single hot NET_RX core is the RPS/multi-
     queue argument a summed total hides). /proc/softirqs lines: '<CAT>: c0 c1..'.
-    Returns {cat: [per_cpu counts]}. Callers that want totals sum() it."""
+    Returns {cat: {cpu_id: count}} keyed by the header's OWN cpu ids (2026-
+    11-01: same hotplug-proofing as proc_interrupts; header-less/odd input
+    degrades to positional 0..n-1 ids). Callers that want totals sum the
+    dict values."""
     out = {}
-    for line in (txt or "").splitlines():
+    lines = (txt or "").splitlines()
+    ids = []
+    if lines:
+        ids = [int(h[3:]) for h in lines[0].split()
+               if h.startswith("CPU") and h[3:].isdigit()]
+    for line in lines[1:]:
         f = line.split()
         if not f or not f[0].endswith(":"):
             continue
         cat = f[0][:-1]
-        try:
-            out[cat] = [to_num(x) for x in f[1:]]
-        except Exception:
-            pass
+        vals = [to_num(x) for x in f[1:]]
+        if not vals:
+            continue
+        _ids = ids if len(ids) == len(vals) else list(range(len(vals)))
+        out[cat] = dict(zip(_ids, vals))
     return out
 
 def _tcp_window_stats(bsnmp, esnmp, dur):
@@ -34435,14 +34467,14 @@ def os_window_deltas(win):
     es = proc_softirqs(win["os"].get(("end", "softirqs"), ""))
     softirqs = {}
     for cat in set(bs) | set(es):
-        # per-CPU vectors -> per-CPU delta; keep the full vector for the
-        # renderer (which-CPU distribution), sum is derived where needed
-        vb, ve = bs.get(cat, []), es.get(cat, [])
-        n = max(len(vb), len(ve))
-        if n:
-            d = [max(0, (ve[i] if i < len(ve) else 0) - (vb[i] if i < len(vb) else 0))
-                 for i in range(n)]
-            if any(d):
+        # per-CPU dicts -> per-CPU delta (id-joined, same hotplug-proofing
+        # as the interrupt chapter); keep the full map for the renderer
+        # (which-CPU distribution), sum is derived where needed
+        vb, ve = bs.get(cat, {}), es.get(cat, {})
+        ids = set(vb) | set(ve)
+        if ids:
+            d = {i: max(0, ve.get(i, 0) - vb.get(i, 0)) for i in ids}
+            if any(d.values()):
                 softirqs[cat] = d
 
     return {
@@ -35359,9 +35391,15 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             h = ['<h3 class="sub">Auto NUMA Balancing</h3>',
                  '<table class="t"><tr><th>Metric</th><th class="n">Delta</th></tr>']
             for k in _nk:
-                if k in _ve2:
-                    h.append('<tr><td>%s</td><td class="n">%s</td></tr>'
-                             % (esc(k), fmt_int(max(0.0, _ve2[k] - _vb2.get(k, _ve2[k])))))
+                if k in _ve2 and k in _vb2:
+                    _val = fmt_int(max(0.0, _ve2[k] - _vb2[k]))
+                elif k in _ve2 or k in _vb2:
+                    # one side lacks the counter -> unknown, never a zero
+                    _val = "?"
+                else:
+                    continue
+                h.append('<tr><td>%s</td><td class="n">%s</td></tr>'
+                         % (esc(k), _val))
             h.append('</table>')
             parts.append(''.join(h))
         # DB memory placement, per-VMA part (2026-10-31): top 10 mappings by
@@ -35496,8 +35534,13 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     _pb, _pe = _stat_percpu("begin"), _stat_percpu("end")
     def _pct(name, idx):
         # /proc/stat fields: usr nice sys idle iowait IRQ SOFTIRQ steal --
-        # irq is index 5, softirq 6 (steal is 7); None when no data
-        b, e = _pb.get(name, [0.0] * 8), _pe.get(name, [0.0] * 8)
+        # irq is index 5, softirq 6 (steal is 7); None when no data.
+        # 2026-11-01: a side missing that cpu's line must NOT fabricate a
+        # zero baseline -- since-boot counters would then render as window
+        # values (same rule as the L-6 half-file discipline: degrade, don't lie)
+        if name not in _pb or name not in _pe:
+            return None
+        b, e = _pb[name], _pe[name]
         d = [max(0.0, e[i] - b[i]) for i in range(8)]
         t = sum(d)
         return (100.0 * d[idx] / t) if t else None
@@ -35510,29 +35553,41 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     _sb = proc_softirqs(win["os"].get(("begin", "softirqs"), ""))
     _se = proc_softirqs(win["os"].get(("end", "softirqs"), ""))
     _sq = {}
-    for _c in list(_se) + [k for k in _sb if k not in _se]:
-        _vb, _ve = _sb.get(_c, []), _se.get(_c, [])
-        _n = max(len(_vb), len(_ve))
-        if _n:
-            _sq[_c] = [max(0, (_ve[i] if i < len(_ve) else 0) - (_vb[i] if i < len(_vb) else 0))
-                       for i in range(_n)]
+    for _c in set(_se) | set(_sb):
+        _vb, _ve = _sb.get(_c, {}), _se.get(_c, {})
+        _ids = set(_vb) | set(_ve)
+        if _ids:
+            _sq[_c] = {i: max(0, _ve.get(i, 0) - _vb.get(i, 0)) for i in _ids}
     # IRQ deltas: ALL irqs incl zero-delta (a silent IRQ is information --
     # dead queue / affinity pinned to an offline core); complete listing
     # lives on, zero-delta ones just don't get a COLUMN in the transposed
     # table (a column costs width, the note below costs a line)
-    _ib = proc_interrupts(win["os"].get(("begin", "interrupts"), ""))
-    _ie = proc_interrupts(win["os"].get(("end", "interrupts"), ""))
+    _ib, _ibm = proc_interrupts(win["os"].get(("begin", "interrupts"), ""))
+    _ie, _iem = proc_interrupts(win["os"].get(("end", "interrupts"), ""))
     _idelta = []
     for _k in set(_ib) | set(_ie):
-        _vb = (_ib.get(_k) or ([0], ""))[0]
-        _ve = (_ie.get(_k) or ([0], ""))[0]
-        _n = max(len(_vb), len(_ve))
-        _dv = [max(0, (_ve[i] if i < len(_ve) else 0) - (_vb[i] if i < len(_vb) else 0))
-               for i in range(_n)]
-        _desc = (_ie.get(_k) or _ib.get(_k) or ([0], ""))[1]
+        _vb = (_ib.get(_k) or ({}, ""))[0]
+        _ve = (_ie.get(_k) or ({}, ""))[0]
+        _ids = set(_vb) | set(_ve)
+        _dv = {i: max(0, _ve.get(i, 0) - _vb.get(i, 0)) for i in _ids}
+        _desc = (_ie.get(_k) or _ib.get(_k) or ({}, ""))[1]
         _idelta.append((_k, _desc, _dv))
-    _ncpu = max([len(_cores)] + [len(v) for v in _sq.values()] +
-                [len(t[2]) for t in _idelta] + [0])
+    # machine-wide irq error counters (ERR:/MIS:) -- legend only, never a
+    # matrix column (they carry no per-cpu vector)
+    _mwdelta = {}
+    for _k in set(_ibm) | set(_iem):
+        _mwdelta[_k] = max(0, _iem.get(_k, 0) - _ibm.get(_k, 0))
+    # rows are driven by the UNION of cpu ids seen anywhere (stat keys,
+    # softirq vectors, irq vectors) -- ids, not positions: a cpu that went
+    # offline mid-window keeps its own row instead of stealing its
+    # neighbour's counts
+    _idset = {int(n[3:]) for n in _cores}
+    for _v in _sq.values():
+        _idset |= set(_v)
+    for _t in _idelta:
+        _idset |= set(_t[2])
+    _allids = sorted(_idset)
+    _ncpu = len(_allids)
     if _ncpu and _sq:
         # ---- Softirq: legend first, then cpu rows x NUMBERED category
         # columns (user 2026-10-31: names live in the legend, the matrix
@@ -35561,25 +35616,25 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         for _j, _c in enumerate(_cats, 1):
             h.append('<tr><td class="n">%d</td><td>%s</td><td>%s</td>'
                      '<td class="n">%s</td></tr>'
-                     % (_j, esc(_c), esc(_smean.get(_c, "")), _km(sum(_sq[_c]))))
+                     % (_j, esc(_c), esc(_smean.get(_c, "")), _km(sum(_sq[_c].values()))))
         h.append('</table>')
         parts.append(''.join(h))
         # matrix columns = only categories with activity (user 2026-10-31):
         # an all-zero category stays in the legend above (Delta 0) but gets
         # no column -- same rule as the IRQ matrix; each column keeps its
         # legend number so the mapping stays stable (numbers may skip)
-        _mcols = [(_j, _c) for _j, _c in enumerate(_cats, 1) if sum(_sq[_c]) > 0]
+        _mcols = [(_j, _c) for _j, _c in enumerate(_cats, 1) if sum(_sq[_c].values()) > 0]
         if _mcols:
             _hdr = (['<th>CPU</th>', '<th class="n">%sirq</th>']
                     + ['<th class="n">%d</th>' % _j for _j, _c in _mcols]
                     + ['<th class="n">Total</th>', '<th class="n">Top Softirq</th>'])
             h = ['<table class="t"><tr>' + ''.join(_hdr) + '</tr>']
-            for i in range(_ncpu):
+            for i in _allids:
                 ps = _psirq.get("cpu%d" % i)
                 row = ['<td>cpu%d</td>' % i,
                        '<td class="n%s">%s</td>' % (thr_cell_cls(ps, 20.0, 50.0),
                                                     '-' if ps is None else '%.1f' % ps)]
-                vec = [_sq[c][i] if i < len(_sq[c]) else 0 for _j, c in _mcols]
+                vec = [_sq[c].get(i, 0) for _j, c in _mcols]
                 row += ['<td class="n">%s</td>' % _km(v) for v in vec]
                 tot = sum(vec)
                 row.append('<td class="n">%s</td>' % _km(tot))
@@ -35594,8 +35649,8 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             _ag = _pct("cpu", 6)
             ftr = ['<tr><td>Total</td>',
                    '<td class="n">%s</td>' % ('-' if _ag is None else '%.1f' % _ag)]
-            ftr += ['<td class="n">%s</td>' % _km(sum(_sq[c])) for _j, c in _mcols]
-            ftr.append('<td class="n">%s</td>' % _km(sum(sum(_sq[c]) for _j, c in _mcols)))
+            ftr += ['<td class="n">%s</td>' % _km(sum(_sq[c].values())) for _j, c in _mcols]
+            ftr.append('<td class="n">%s</td>' % _km(sum(sum(_sq[c].values()) for _j, c in _mcols)))
             ftr.append('<td class="n">-</td>')
             h.append(''.join(ftr) + '</tr>')
             h.append('</table>')
@@ -35603,8 +35658,8 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             # the per-minute detail tables; the legend above carries the keys
             parts.append(_fold('Softirq per CPU', ''.join(h)))
     # ---- IRQ: cpu rows x active-IRQ columns (user 2026-10-31) ----
-    _idelta.sort(key=lambda t: (-sum(t[2]), 0 if t[0].isdigit() else 1, int(t[0]) if t[0].isdigit() else t[0]))
-    _actirq = [t for t in _idelta if sum(t[2]) > 0]
+    _idelta.sort(key=lambda t: (-sum(t[2].values()), 0 if t[0].isdigit() else 1, int(t[0]) if t[0].isdigit() else t[0]))
+    _actirq = [t for t in _idelta if sum(t[2].values()) > 0]
     _CAP = 48
     _otherirq = _actirq[_CAP:]
     _actirq = _actirq[:_CAP]
@@ -35634,8 +35689,16 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
              + ('<th class="n">Node</th>' if _inode else '') + '</tr>']
         for k, dv, vec in _idelta:
             h.append('<tr><td class="n">%s</td><td>%s</td><td class="n">%s</td>%s</tr>'
-                     % (esc(k), esc(trunc(dv, 44)), _km(sum(vec)),
+                     % (esc(k), esc(trunc(dv, 44)), _km(sum(vec.values())),
                         ('<td class="n">%s</td>' % esc(_inode.get(k, "-"))) if _inode else ''))
+        # ERR:/MIS: machine-wide rows -- spurious/unhandled IRQ counters,
+        # legend-only (no per-cpu vector, so no matrix column); zero stays
+        # written (confirmed-clean), nonzero is the failing-line signature
+        for k in sorted(_mwdelta):
+            h.append('<tr><td class="n">%s</td><td>%s</td><td class="n">%s</td>%s</tr>'
+                     % (esc(k), "spurious/unhandled IRQ (machine-wide)",
+                        _km(_mwdelta[k]),
+                        ('<td class="n">-</td>') if _inode else ''))
         h.append('</table>')
         parts.append(''.join(h))
         if _actirq:
@@ -35646,14 +35709,14 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                 _hdr.append('<th class="n">other (%d irq)</th>' % len(_otherirq))
             _hdr += ['<th class="n">Total</th>', '<th class="n">Top IRQ</th>']
             h = ['<table class="t"><tr>' + ''.join(_hdr) + '</tr>']
-            for i in range(_ncpu):
+            for i in _allids:
                 pi = _pirq.get("cpu%d" % i)
                 row = ['<td>cpu%d</td>' % i,
                        '<td class="n%s">%s</td>' % (thr_cell_cls(pi, 20.0, 50.0),
                                                     '-' if pi is None else '%.1f' % pi)]
-                vec = [v[i] if i < len(v) else 0 for (_, _, v) in _actirq]
+                vec = [v.get(i, 0) for (_, _, v) in _actirq]
                 row += ['<td class="n">%s</td>' % _km(x) for x in vec]
-                oth = sum(v[i] if i < len(v) else 0 for (_, _, v) in _otherirq)
+                oth = sum(v.get(i, 0) for (_, _, v) in _otherirq)
                 if _otherirq:
                     row.append('<td class="n">%s</td>' % _km(oth))
                 tot = sum(vec) + oth
@@ -35937,8 +36000,10 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         # see dbproc_minute_table.
         parts.append(_fold("Per-minute detail", dbproc_minute_table(os_smp, m.get("begin_ts", ""))))
     # Cgroup chapter (user 2026-10-31): standalone, right under DB Process,
-    # ONE plain table -- config rows static (Begin==End), cumulative counters
-    # (cpuacct.usage / usage / failcnt / pids.current) as window deltas;
+    # ONE plain table -- config rows show EACH side's own snapshot value
+    # (2026-11-01: a mid-window change must stay visible), cumulative
+    # counters as window deltas; a MONOTONIC counter running backwards means
+    # the cgroup was recreated (restart) and the delta prints "reset";
     # "unlimited"/"max" written explicitly (confirmed absence, not blank)
     _cgb2 = parse_db_cgroup(win["os"].get(("begin", "db_cgroup"), ""))
     _cge2 = parse_db_cgroup(win["os"].get(("end", "db_cgroup"), ""))
@@ -35989,8 +36054,18 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                 continue
             fb = fmt_int(to_num(vb_)) if vb_ is not None else "-"
             fe = fmt_int(to_num(ve_)) if ve_ is not None else "-"
-            _dv = max(0, to_num(ve_) - to_num(vb_)) if (vb_ is not None and ve_ is not None) else None
-            fd = ("+" + fmt_int(_dv)) if _dv else ("-" if _dv is None else fmt_int(_dv))
+            if vb_ is not None and ve_ is not None:
+                # gauges (memory.usage / pids.current) may legitimately fall;
+                # only MONOTONIC counters running backwards mean "cgroup
+                # recreated" (2026-11-01: a clamped 0 delta contradicted the
+                # row's own cells in exactly the restart scenario)
+                if to_num(ve_) < to_num(vb_) and k in ("cpuacct.usage", "memory.failcnt"):
+                    fd = "reset"
+                else:
+                    _dv = max(0, to_num(ve_) - to_num(vb_))
+                    fd = ("+" + fmt_int(_dv)) if _dv else fmt_int(0)
+            else:
+                fd = "-"
             h.append('<tr><td>%s</td><td class="n">%s</td><td class="n">%s</td>'
                      '<td class="n">%s</td></tr>' % (esc(k), fb, fe, fd))
         # cpu.stat: split into per-counter rows (user 2026-10-31: every row
@@ -36011,8 +36086,15 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             if k2 in _bcs or k2 in _ecs:
                 _fb = fmt_int(_bcs[k2]) if k2 in _bcs else "-"
                 _fe = fmt_int(_ecs[k2]) if k2 in _ecs else "-"
-                _dv2 = max(0, _ecs[k2] - _bcs[k2]) if (k2 in _bcs and k2 in _ecs) else None
-                _fd = ("+" + fmt_int(_dv2)) if _dv2 else ("-" if _dv2 is None else fmt_int(_dv2))
+                if k2 in _bcs and k2 in _ecs:
+                    # cpu.stat counters are monotonic -- backwards = recreated
+                    if _ecs[k2] < _bcs[k2]:
+                        _fd = "reset"
+                    else:
+                        _dv2 = _ecs[k2] - _bcs[k2]
+                        _fd = ("+" + fmt_int(_dv2)) if _dv2 else fmt_int(0)
+                else:
+                    _fd = "-"
                 h.append('<tr><td>cpu.%s</td><td class="n">%s</td><td class="n">%s</td>'
                          '<td class="n">%s</td></tr>' % (k2, _fb, _fe, _fd))
         # memory.events (v2): ABSOLUTE per-snapshot counters, never a plain
@@ -36062,6 +36144,51 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             _fe = fmt_int(_eio[_dk]) if _dk in _eio else "-"
             _dv3 = max(0, _eio[_dk] - _bio[_dk]) if (_dk in _bio and _dk in _eio) else None
             _fd = ("+" + fmt_int(_dv3)) if _dv3 else ("-" if _dv3 is None else fmt_int(_dv3))
+            h.append('<tr><td>io %s %s</td><td class="n">%s</td><td class="n">%s</td>'
+                     '<td class="n">%s</td></tr>' % (esc(_dk[0]), esc(_dk[1]), _fb, _fe, _fd))
+        # v2 io (2026-11-01): io.max = per-device throttle CONFIG ("maj:min
+        # rbps=.. wbps=.."), io.stat = per-device cumulative "maj:min
+        # rbytes=.. wbytes=.. [dbytes=.. ios=..]" -- collected since 10-31
+        # but never rendered, so every v2 host showed an empty IO block that
+        # read as "no io limit". Config rows per-side; stat rows carry the
+        # monotonic reset rule.
+        def _v2io(d, key, numeric):
+            out = {}
+            for item in ((d or {}).get("kv", {}).get(key) or "").split(";"):
+                f = item.split()
+                if len(f) < 2:
+                    continue
+                for _pr in f[1:]:
+                    if "=" not in _pr:
+                        continue
+                    _kk, _vv = _pr.split("=", 1)
+                    if numeric:
+                        try:
+                            out[(f[0], _kk)] = to_num(_vv)
+                        except Exception:
+                            pass
+                    else:
+                        out[(f[0], _kk)] = _vv
+            return out
+        _bmx, _emx = _v2io(_cgb2, "io.max", False), _v2io(_cge2, "io.max", False)
+        for _dk in sorted(set(_bmx) | set(_emx)):
+            _cb = _bmx.get(_dk) or "-"
+            _ce = _emx.get(_dk) or "-"
+            h.append('<tr><td>io.max %s %s</td><td class="n">%s</td><td class="n">%s</td>'
+                     '<td class="n">-</td></tr>' % (esc(_dk[0]), esc(_dk[1]),
+                     esc(trunc(_cb, 40)), esc(trunc(_ce, 40))))
+        _bst, _est = _v2io(_cgb2, "io.stat", True), _v2io(_cge2, "io.stat", True)
+        for _dk in sorted(set(_bst) | set(_est)):
+            _fb = fmt_int(_bst[_dk]) if _dk in _bst else "-"
+            _fe = fmt_int(_est[_dk]) if _dk in _est else "-"
+            if _dk in _bst and _dk in _est:
+                if _est[_dk] < _bst[_dk]:
+                    _fd = "reset"
+                else:
+                    _dv6 = _est[_dk] - _bst[_dk]
+                    _fd = ("+" + fmt_int(_dv6)) if _dv6 else fmt_int(0)
+            else:
+                _fd = "-"
             h.append('<tr><td>io %s %s</td><td class="n">%s</td><td class="n">%s</td>'
                      '<td class="n">%s</td></tr>' % (esc(_dk[0]), esc(_dk[1]), _fb, _fe, _fd))
         # io throttle config (v1): static config rows when present
@@ -40352,7 +40479,7 @@ _awr_repl_sample() {
     # One awk over seven /proc files; dsk/net rows carry the raw line (fields
     # are space-separated, never contain commas), cpu/pg/mem carry numbers.
     of="$root/os_$(date +%Y%m%d).log"
-    awk -v ts="$ts" -v pgkb="$(( $(getconf PAGE_SIZE 2>/dev/null || echo 4096) / 1024 ))" '
+    timeout -k 2 10 awk -v ts="$ts" -v pgkb="$(( $(getconf PAGE_SIZE 2>/dev/null || echo 4096) / 1024 ))" '
         /^cpu /           { if (!cudone) { cu=$2","$3","$4","$5","$6","$7","$8","$9; cudone=1 } }
         /^procs_running / { pr=$2 }
         /^procs_blocked / { pb=$2 }
@@ -40416,7 +40543,15 @@ _awr_repl_sample() {
             if (tcpok) print "tcp," ts "," taop+0 "," tpop+0 "," tces+0 "," tosg+0 "," trsg+0
             if (extok) print "tcpext," ts "," tld+0 "," tlo+0 "," tto+0 "," tsr+0
         }
-    ' /proc/stat /proc/vmstat /proc/meminfo /proc/zoneinfo /proc/diskstats /proc/net/dev /proc/net/snmp /proc/net/netstat >> "$of" 2>/dev/null
+    ' /proc/stat /proc/vmstat /proc/meminfo /proc/zoneinfo /proc/diskstats /proc/net/dev /proc/net/snmp /proc/net/netstat > "$of.part" 2>/dev/null \
+        && cat "$of.part" >> "$of" 2>/dev/null
+    rm -f "$of.part"
+    # (2026-11-01: the read is timeout-bounded and stage-filed -- a wedged
+    # seq_file used to park this awk forever WITH the sampler flock held, so
+    # every later minute hit 'flock -n' and skipped: the whole per-minute OS
+    # series silently stopped exactly during the storm being diagnosed. A
+    # timed-out minute now simply contributes no rows; a partial write can
+    # never merge into the next minute's first line.)
     # ---- conntrack count (firewall/nat only; file absent = no conntrack module) ----
     if [ -r /proc/sys/net/netfilter/nf_conntrack_count ]; then
         ccount=$(cat /proc/sys/net/netfilter/nf_conntrack_count 2>/dev/null)
@@ -40442,7 +40577,7 @@ _awr_repl_sample() {
         # dual stack on purpose: the snapshot-level socket table counts v4+v6,
         # so the per-minute series must too. A dual-stack listener binds two
         # sockets sharing one backlog -> report the largest queue seen.
-        lstn=$("$_ssbin" -lnt sport = :"${PGPORT:-5432}" 2>/dev/null | \
+        lstn=$(timeout -k 2 10 "$_ssbin" -lnt sport = :"${PGPORT:-5432}" 2>/dev/null | \
                awk 'BEGIN { rq = 0; sq = 0 }
                     NR>1 && $1=="LISTEN" { if ($2+0 > rq) rq=$2+0; if ($3+0 > sq) sq=$3+0; n++ }
                     END { if (n) print rq "," sq }')
@@ -40455,7 +40590,7 @@ _awr_repl_sample() {
         # but the canonical list lacks still gets its own row.
         # ss failing (missing, bad port filter) must yield NO rows: all-zero
         # rows would read as "measured: none", which is a different claim.
-        _sout=$("$_ssbin" -tan sport = :"${PGPORT:-5432}" 2>/dev/null)
+        _sout=$(timeout -k 2 10 "$_ssbin" -tan sport = :"${PGPORT:-5432}" 2>/dev/null)
         [ -n "$_sout" ] && printf '%s\n' "$_sout" | \
             awk -v ts="$ts" '
                 BEGIN { n = split("LISTEN ESTAB SYN-SENT SYN-RECV FIN-WAIT-1 FIN-WAIT-2 TIME-WAIT CLOSE-WAIT CLOSING LAST-ACK CLOSED", S, " ");
@@ -40512,7 +40647,7 @@ _awr_repl_sample() {
     # (portable awk -- no asort); top-k via repeated max-extraction.
     sscmd=$(command -v ss 2>/dev/null || echo /usr/sbin/ss)
     if [ -x "$sscmd" ]; then
-        "$sscmd" -tin state established 2>/dev/null | awk -v ts="$ts" '
+        timeout -k 2 10 "$sscmd" -tin state established 2>/dev/null | head -c 524288 | awk -v ts="$ts" '
             function flushconn() {
                 if (peer != "" && keep && gotrtt) {
                     n++; sum += rttv; v[n] = rttv
