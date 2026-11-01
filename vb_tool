@@ -26086,6 +26086,28 @@ _vtop_parent_dev() {
 }
 
 # "<parent> <size> <rot> <sched> <qd>" for the device holding PGDATA
+# lsds TYPE refined for the vtop DSK row (user 2026-11-01: "应该不是 part 就是
+# lvm"): part / lvm / mpath / crypt / dm / <md level, raid1|raid5|linear...> /
+# disk. dm flavor comes from the dm/uuid prefix, md level from md/level --
+# both world-readable sysfs files, no root needed.
+_vtop_blk_type() {
+    local d="/sys/class/block/$1"
+    [ -f "$d/partition" ] && { echo "part"; return; }
+    case "$1" in
+        dm-*)
+            case "$(cat "$d/dm/uuid" 2>/dev/null)" in
+                LVM-*)   echo "lvm";;
+                mpath-*) echo "mpath";;
+                CRYPT-*) echo "crypt";;
+                *)       echo "dm";;
+            esac;;
+        md[0-9]*)
+            local lv; lv=$(cat "$d/md/level" 2>/dev/null)
+            [ -n "$lv" ] && echo "$lv" || echo "md";;
+        *) echo "disk";;
+    esac
+}
+
 _vtop_devinfo() { # $1=dev -> size|type|sched|rot|model|qdepth|nr_rq|wcache|fua|hwsec
     # metadata in lsds' column set. Size/type belong to the queried device
     # (a partition keeps its own size); sched/rot/model/queue_depth/nr_requests/
@@ -26098,7 +26120,7 @@ _vtop_devinfo() { # $1=dev -> size|type|sched|rot|model|qdepth|nr_rq|wcache|fua|
     [ -d "$base" ] || { p="$1"; base="/sys/class/block/$p"; }
     dbase="/sys/class/block/$1"
     [ -d "$dbase" ] || dbase="$base"
-    if [ -f "$dbase/partition" ]; then typ="part"; else typ="disk"; fi   # lsds TYPE
+    typ=$(_vtop_blk_type "$1")   # lsds TYPE + dm/md refinement (vtop DSK row)
     sz=$(awk -v s="$(cat "$dbase/size" 2>/dev/null)" 'BEGIN{if(s>0) printf "%.0fG", s*512/1000000000; else printf "?"}')
     rot=$(cat "$base/queue/rotational" 2>/dev/null); [ -n "$rot" ] || rot="?"
     sch=$(cat "$base/queue/scheduler" 2>/dev/null | sed 's/.*\[//;s/\].*//')
