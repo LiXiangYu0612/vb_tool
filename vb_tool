@@ -32214,6 +32214,10 @@ def loadprofile_wal_pw_rows(win, duration):
 #   ts|be|thread_name|tid|wait_status|wait_event|chain
 #   ts|fe|wait_event|pid|unique_sql_id|chain
 #   ts|be|error / ts|fe|error   (that group's query failed)
+#   ts|st|error|msg             the ONE gs_stack fetch psql failed (it covers
+#          the chains of this sample's be+av+fe rows); msg = first stderr
+#          line, '|' and tabs stripped, 180 chars. Rows still go out with
+#          empty chains -- the msg says why they are empty
 
 def _iter_lt_stack_logs(repl_dir, prefix, begin_ts, end_ts, files):
     """Shared day-log reader for the lt_/stack_ samplers: yields lines of every
@@ -32275,8 +32279,11 @@ def load_stack_samples(repl_dir, begin_ts, end_ts):
     """Read stack_*.log[.gz] rows with ts in [begin_ts, end_ts] (inclusive).
     Returns {"be":[(ts,thread,tid,wait_status,wait_event,chain)],
     "fe":[(ts,wait_event,pid,unique_sql_id,chain)], "be_err":N, "fe_err":N,
+    "st_err":N, "st_last":"msg" (the ONE gs_stack fetch psql covers be+av+fe
+    chains; its failure used to hide behind 2>/dev/null and empty Stack cells),
     "files":[names]}."""
-    out = {"be": [], "av": [], "fe": [], "be_err": 0, "fe_err": 0, "files": []}
+    out = {"be": [], "av": [], "fe": [], "be_err": 0, "fe_err": 0,
+           "st_err": 0, "st_last": "", "files": []}
     for ln in _iter_lt_stack_logs(repl_dir, "stack_", begin_ts, end_ts, out["files"]):
         ln = ln.strip()
         if not ln: continue
@@ -32299,6 +32306,12 @@ def load_stack_samples(repl_dir, begin_ts, end_ts):
         elif p[0] == "fe" and len(p) == 5:
             # older sampler rows carry no event_cnt field
             out["fe"].append((ts, p[1], p[2], p[3], "", p[4]))
+        elif len(p) >= 2 and p[0] == "st" and p[1] == "error":
+            # stack-fetch failure row (gs_stack psql): counts every failed
+            # 5-min fetch; st_last keeps the newest sanitized message
+            out["st_err"] += 1
+            if len(p) > 2 and p[2]:
+                out["st_last"] = p[2]
         elif p == ["be", "error"]:
             out["be_err"] += 1
         elif p == ["fe", "error"]:
@@ -32780,6 +32793,11 @@ def callstack_section_html(st, sql_ids=None):
     if st["be_err"]:
         h.append('<tr><td colspan="7" class="muted">%d backend sample error(s) (query failed)</td></tr>'
                  % st["be_err"])
+    if st["st_err"]:
+        _m = ('; last error: %s' % esc(st["st_last"])) if st["st_last"] else ''
+        h.append('<tr><td colspan="7" class="muted">%d stack-fetch error(s) -- the gs_stack query '
+                 'failed, every Stack cell from those samples is empty%s</td></tr>'
+                 % (st["st_err"], _m))
     h.append('</table>')
     be_html = "".join(h)
     # autovacuum workers: their OWN sub-section -- worker count, the SUM of
@@ -40459,11 +40477,31 @@ _awr_lt_stack_sample() {
     while IFS='|' read -r wev pid usi ecnt; do
         [ -n "$wev" ] && tids+=",(${pid}::bigint)"
     done < <(printf '%s\n' "$fe_list")
-    local stacks=""
+    local stacks="" stk_tf=""
     if [ -n "$tids" ]; then
         tids="${tids#,}"
+        # stderr goes to a scratch file, NOT /dev/null: a failed fetch (auth /
+        # privilege / statement timeout / OOM) must leave a trace -- otherwise
+        # the rows below ship empty chains with no hint WHY (vdb1 2026-11-01:
+        # a full hour of '-' stacks, the cause was invisible in the day log)
+        stk_tf=$(mktemp /tmp/vb_stk.XXXXXX) || stk_tf=""
         stacks=$(PGCONNECT_TIMEOUT=15 PGOPTIONS='-c statement_timeout=30000' \
-              psql -d postgres -tAF'|' -c "select v.tid::text || '|' || coalesce((select replace(gs_stack, chr(10), ' <- ') from gs_stack(v.tid)), '') from (values ${tids}) v(tid)" 2>/dev/null)
+              psql -d postgres -tAF'|' -c "select v.tid::text || '|' || coalesce((select replace(gs_stack, chr(10), ' <- ') from gs_stack(v.tid)), '') from (values ${tids}) v(tid)" 2>${stk_tf:-/dev/null})
+        if [ "$?" -ne 0 ] || [ -z "$stacks" ]; then
+            # tids were pending, so a successful fetch ALWAYS prints >= 1 row;
+            # empty output counts as failure too. Message sanitized to ONE
+            # line with no '|' (pipe is the row separator) / no tabs.
+            printf '%s|st|error|%s\n' "$ts" \
+                "$(head -1 "$stk_tf" 2>/dev/null | tr '\t|' ' /' | cut -c1-180)" >> "$sf"
+        elif [ "$(printf '%s\n' "$stacks" | awk -F'|' '{sub(/^[^|]*\|/,""); if ($0 != "") c++} END{print c+0}')" -eq 0 ]; then
+            # fetch SUCCEEDED but every chain came back empty (gs_stack returned
+            # NULL/'' for all tids, rc=0, nothing in pg_log) -- the signature
+            # seen on a G100 V2.2 Build 19 box (V3.0 Build 8 returns full
+            # chains). Rows below will all show '-'; leave the telltale.
+            printf '%s|st|error|%s\n' "$ts" \
+                "gs_stack returned empty chain for every tid (rc=0; kernel build behavior?)" >> "$sf"
+        fi
+        [ -n "$stk_tf" ] && rm -f "$stk_tf"
     fi
     # ---- emit rows: chain looked up by tid from the stacks output ----
     while IFS='|' read -r name tid ws we cpup; do
