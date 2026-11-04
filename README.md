@@ -110,6 +110,7 @@ vb_tool list
 
 | 版本 | 日期 | 要点 |
 |------|------|------|
+| v2.5.22 | 2026-11-05 | awr：OS Memory 表补 KernelStack/AnonPages/Unevictable/AnonHugePages/Committed_AS/VmallocUsed 六键；进程段新增 Page Tables(VmPTE)/Swapped(VmSwap) 行（旧快照自动隐藏）——内存构成逐项判读 |
 | v2.5.21 | 2026-11-04 | awr：Load Profile 每秒列格式统一（千级以上 K/M/B 换算，不足千保两位小数，各数据行同一规则）；awr topsql 屏显总耗时列单位改为毫秒并与表头标注对齐（与报告内 SQL 统计表同单位）；采样器抓栈失败/空返回留痕 |
 | v2.5.20 | 2026-11-01 | awr：数据根目录（datadir）功能多轮独立复核修复（整体搬移失败路径、迁移并发安全等数十项）；enable -i 采样间隔最小 10 分钟；cron 门控条目去路径化（更换数据根目录后间隔设置不再静默失效）；数据级清理全面消除 rm（改 mv），迁移 / 采集 / baseline / purge 补共享端口锁 |
 | v2.5.19 | 2026-10-31 | awr：Softirq/IRQ per CPU 分布矩阵（cpu 行×类别/IRQ 列，含 %irq/%sirq 每核时间列、Total、Top 列，默认折叠，全零项不占列）与 Softirq/IRQ 类型对应表（含 Delta；IRQ 表附内核设备原文与 NUMA Node 列）；NUMA 章节并入单表（拓扑+numastat 窗口增量+DB Pages/DB Share），新增 Auto NUMA Balancing 五指标窗口增量、DB Memory Placement（postmaster numa_maps 每节点已落页 + Top 10 映射明细）；快照 /proc 采集增加 timeout 防御；analyze_log_v2 内嵌脚本合入 v20.1；awr enable 支持 -d 保留天数 / -i 采样间隔 / -D 数据根目录（可选，默认 8 天 / 60 分钟 / 家目录），awr config datadir 更换数据根（已有数据整体搬移，失败即报错） |
