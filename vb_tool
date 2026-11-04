@@ -1186,6 +1186,8 @@ flamegraph_help() {
     echo "  Output: /tmp/perf_<timestamp>.tar.gz containing:"
     echo "    perf_<timestamp>.svg        - interactive flame graph"
     echo "    perf_<timestamp>.script.txt - detailed call stacks (perf script)"
+    echo "    perf_<timestamp>.report.txt - per-symbol overhead with call chains"
+    echo "                                   (perf report, Children/Self %)"
     echo "  perf.data is removed after the package is created."
     echo ""
 }
@@ -1197,6 +1199,7 @@ run_flamegraph() {
     local TS=$(date +'%Y%m%d_%H%M%S')
     local SVG_FILE="$OUTPUT_DIR/perf_$TS.svg"
     local SCRIPT_FILE="$OUTPUT_DIR/perf_$TS.script.txt"
+    local REPORT_FILE="$OUTPUT_DIR/perf_$TS.report.txt"
     local TAR_FILE="$OUTPUT_DIR/perf_$TS.tar.gz"
     local FLAMEGRAPH_DIR
     FLAMEGRAPH_DIR=$(mktemp -d /tmp/flamegraph_tools_XXXXXX)
@@ -3017,27 +3020,33 @@ FLAMEGRAPH_PL_EOF
 
     # ---------- generate flame graph ----------
     echo "Generating detailed call stacks (perf script)..."
-    perf script -i "$OUTPUT_DIR/perf.data" > "$SCRIPT_FILE" || { echo "Error: perf script failed" >&2; rm -f "$OUTPUT_DIR/perf.data"; return 1; }
-    perl "$FLAMEGRAPH_DIR/stackcollapse-perf.pl" --all "$SCRIPT_FILE" > "$OUTPUT_DIR/perf.folded" || { echo "Error: stackcollapse-perf.pl failed" >&2; rm -f "$OUTPUT_DIR/perf.data" "$SCRIPT_FILE"; return 1; }
+    perf script -F comm,pid,tid,cpu,time,period,event,ip,sym,dso,symoff -i "$OUTPUT_DIR/perf.data" > "$SCRIPT_FILE" 2>/dev/null || \
+        perf script -i "$OUTPUT_DIR/perf.data" > "$SCRIPT_FILE" || \
+        { echo "Error: perf script failed" >&2; rm -f "$OUTPUT_DIR/perf.data"; return 1; }
+    echo "Generating overhead report (perf report)..."
+    perf report --stdio --header --children -i "$OUTPUT_DIR/perf.data" > "$REPORT_FILE" 2>/dev/null || \
+        { echo "Error: perf report failed" >&2; rm -f "$OUTPUT_DIR/perf.data" "$SCRIPT_FILE"; return 1; }
+    perl "$FLAMEGRAPH_DIR/stackcollapse-perf.pl" --all "$SCRIPT_FILE" > "$OUTPUT_DIR/perf.folded" || { echo "Error: stackcollapse-perf.pl failed" >&2; rm -f "$OUTPUT_DIR/perf.data" "$SCRIPT_FILE" "$REPORT_FILE"; return 1; }
 
     echo "Generating flame graph..."
     perl "$FLAMEGRAPH_DIR/flamegraph.pl" "$OUTPUT_DIR/perf.folded" > "$SVG_FILE"
     local _vb_fg_rc=$?
     if [ $_vb_fg_rc -ne 0 ] || [ ! -s "$SVG_FILE" ]; then
         echo "Error: flamegraph.pl failed (empty folded stacks?)" >&2
-        rm -f "$OUTPUT_DIR/perf.data" "$OUTPUT_DIR/perf.folded" "$SCRIPT_FILE"
+        rm -f "$OUTPUT_DIR/perf.data" "$OUTPUT_DIR/perf.folded" "$SCRIPT_FILE" "$REPORT_FILE"
         return 1
     fi
 
     # ---------- package SVG + detailed stacks, then drop perf.data ----------
     echo "Packaging output..."
-    tar -czf "$TAR_FILE" -C "$OUTPUT_DIR" "$(basename "$SVG_FILE")" "$(basename "$SCRIPT_FILE")" || { echo "Error: tar failed" >&2; rm -f "$OUTPUT_DIR/perf.data" "$OUTPUT_DIR/perf.folded"; return 1; }
-    rm -f "$OUTPUT_DIR/perf.data" "$OUTPUT_DIR/perf.unfolded" "$OUTPUT_DIR/perf.folded" "$SCRIPT_FILE" "$SVG_FILE"
+    tar -czf "$TAR_FILE" -C "$OUTPUT_DIR" "$(basename "$SVG_FILE")" "$(basename "$SCRIPT_FILE")" "$(basename "$REPORT_FILE")" || { echo "Error: tar failed" >&2; rm -f "$OUTPUT_DIR/perf.data" "$OUTPUT_DIR/perf.folded" "$REPORT_FILE"; return 1; }
+    rm -f "$OUTPUT_DIR/perf.data" "$OUTPUT_DIR/perf.unfolded" "$OUTPUT_DIR/perf.folded" "$SCRIPT_FILE" "$REPORT_FILE" "$SVG_FILE"
 
     echo "====================================================================="
     echo "Flame graph package generated at $TAR_FILE"
     echo "  perf_$TS.svg        : interactive flame graph"
     echo "  perf_$TS.script.txt : detailed call stacks (perf script)"
+    echo "  perf_$TS.report.txt : per-symbol overhead + call chains (perf report)"
     echo "====================================================================="
     return 0
 }
