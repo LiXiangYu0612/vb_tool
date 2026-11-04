@@ -31367,6 +31367,18 @@ def fmt_num(v):
         return "%.2fK" % (v / 1_000)
     return "%.0f" % v
 
+def fmt_rate(v):
+    """Per-second rate: same K/M/B tiers as fmt_num, but sub-1000 keeps 2
+    decimals (fmt_num's %.0f floors sub-1 rates like QPS 0.35 to 0)."""
+    v = to_num(v)
+    if abs(v) >= 1_000_000_000:
+        return "%.2fB" % (v / 1_000_000_000)
+    if abs(v) >= 1_000_000:
+        return "%.2fM" % (v / 1_000_000)
+    if abs(v) >= 1_000:
+        return "%.2fK" % (v / 1_000)
+    return "%.2f" % v
+
 def fmt_int(v):
     return "{:,.0f}".format(to_num(v))
 
@@ -32154,7 +32166,7 @@ def loadprofile_iostat_rows(win, duration):
     ONE cumulative row captured from pg_catalog.get_local_rel_iostat() (the
     kernel fileIOStat DIRECT counters, uncapped; replaced the 2000-slot-LRU
     gs_file_stat per-file capture on 2026-09-16). mode 'count' = IO operations
-    (fmt_int/fmt_num), 'blocks' = 8K pages (fmt_blocks/fmt_blocks_ps composites,
+    (fmt_int/fmt_rate), 'blocks' = 8K pages (fmt_blocks/fmt_blocks_ps composites,
     Begin/End stay raw page counts). ok False on pre-change snaps (no csv) ->
     callers print '-' cells."""
     def _sum(phase, col):
@@ -37026,7 +37038,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                      % (esc(label), fmt_int(_b), fmt_int(_e),
                         fmt_blocks(_d) if blocks else fmt_int(_d),
                         fmt_blocks_ps((_d / duration) if duration else 0.0) if blocks
-                        else fmt_num((_d / duration) if duration else 0.0)))
+                        else fmt_rate((_d / duration) if duration else 0.0)))
     # logical reads = buffer hits + disk reads (the combined convention);
     # physical reads = blocks read off disk. Bare professional labels, no raw
     # counter suffixes; SQL calls sits directly under rollbacks (user 2026-10-15)
@@ -37038,7 +37050,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                      % (esc(label), fmt_int(_b), fmt_int(_e),
                         fmt_blocks(_d) if blocks else fmt_int(_d),
                         fmt_blocks_ps((_d / duration) if duration else 0.0) if blocks
-                        else fmt_num((_d / duration) if duration else 0.0)))
+                        else fmt_rate((_d / duration) if duration else 0.0)))
     lp2("logical reads", ("blks_hit", "blks_read"), blocks=True)
     lp2("physical reads", ("blks_read",), blocks=True)
     lp("rows returned", "tup_returned")
@@ -37060,8 +37072,9 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                  % (fmt_int(_sc_b) if _sc_ok else "-",
                     fmt_int(_sc_e) if _sc_ok else "-",
                     fmt_int(_sc_d) if _sc_ok else "-",
-                    # QPS needs decimals (fmt_num floors sub-1 rates to 0)
-                    ("%.2f" % (_sc_d / duration)) if (_sc_ok and duration) else "-"))
+                    # fmt_rate: K/M/B tiers like the lp() rows, sub-1 QPS
+                    # keeps its decimals
+                    fmt_rate(_sc_d / duration) if (_sc_ok and duration) else "-"))
     if _sc_d < 0:
         note("WARNING: negative SQL calls delta — possible unique-SQL stats reset "
              "(instr_unique_sql_count change / reset).")
@@ -37099,7 +37112,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         if not _by and not _pg and "physical standby" in (m.get("db_role") or ""):
             _lbl = _lbl + " (primary only)"
         _cf = fmt_blocks if _pg else (fmt_bytes if _by else fmt_int)
-        _pf = fmt_blocks_ps if _pg else (fmt_bytes if _by else fmt_num)
+        _pf = fmt_blocks_ps if _pg else (fmt_bytes if _by else fmt_rate)
         parts.append('<tr><td>%s</td><td class="n">%s</td><td class="n">%s</td>'
                      '<td class="n">%s</td><td class="n">%s</td></tr>'
                      % (esc(_lbl),
@@ -37113,7 +37126,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         note("WARNING: negative delta in WAL/pagewriter counters — possible counter reset (switchover/promote); these rows may be unreliable.")
     for _lbl, _b, _e, _d, _ps, _md, _ok in loadprofile_iostat_rows(win, duration):
         _cf = (fmt_blocks if _md == "blocks" else fmt_int) if _ok else (lambda v: "-")
-        _pf = (fmt_blocks_ps if _md == "blocks" else fmt_num) if _ok else (lambda v: "-")
+        _pf = (fmt_blocks_ps if _md == "blocks" else fmt_rate) if _ok else (lambda v: "-")
         parts.append('<tr><td>%s</td><td class="n">%s</td><td class="n">%s</td>'
                      '<td class="n">%s</td><td class="n">%s</td></tr>'
                      % (esc(_lbl), fmt_int(_b) if _ok else "-", fmt_int(_e) if _ok else "-",
@@ -38310,7 +38323,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         if col == "blks_read":
             fb, fn = fmt_blocks, fmt_blocks_ps
         else:
-            fb = fn = fmt_int
+            fb, fn = fmt_int, fmt_rate
         _lrow(lbl, v1, v2, fb, fn)
     # SQL calls (QPS) P1 vs P2: dbe_perf.statement n_calls window deltas
     _scd1 = (sum(to_num(r.get("n_calls", 0) or 0) for r in win1["db"].get(("end", "statement"), []))
@@ -38321,8 +38334,8 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     parts.append('<tr><td>SQL calls%s</td><td class="n">%s</td><td class="n">%s</td><td class="n">%s</td>'
                  '<td class="n">%s</td><td class="n">%s</td></tr>'
                  % (_scd_neg, fmt_int(_scd1), fmt_int(_scd2), fmt_int(_scd2 - _scd1),
-                    ("%.2f" % (_scd1 / dur1)) if dur1 else "-",
-                    ("%.2f" % (_scd2 / dur2)) if dur2 else "-"))
+                    fmt_rate(_scd1 / dur1) if dur1 else "-",
+                    fmt_rate(_scd2 / dur2) if dur2 else "-"))
     for lbl, col in [("deadlocks", "deadlocks"),
                      ("conflicts", "conflicts"), ("temp bytes", "temp_bytes")]:
         v1 = _dbsum(db1, col); v2 = _dbsum(db2, col)
