@@ -3033,13 +3033,13 @@ FLAMEGRAPH_PL_EOF
     local _vb_fg_rc=$?
     if [ $_vb_fg_rc -ne 0 ] || [ ! -s "$SVG_FILE" ]; then
         echo "Error: flamegraph.pl failed (empty folded stacks?)" >&2
-        rm -f "$OUTPUT_DIR/perf.data" "$OUTPUT_DIR/perf.folded" "$SCRIPT_FILE" "$REPORT_FILE"
+        rm -f "$OUTPUT_DIR/perf.data" "$OUTPUT_DIR/perf.folded" "$SCRIPT_FILE" "$REPORT_FILE" "$SVG_FILE"
         return 1
     fi
 
     # ---------- package SVG + detailed stacks, then drop perf.data ----------
     echo "Packaging output..."
-    tar -czf "$TAR_FILE" -C "$OUTPUT_DIR" "$(basename "$SVG_FILE")" "$(basename "$SCRIPT_FILE")" "$(basename "$REPORT_FILE")" || { echo "Error: tar failed" >&2; rm -f "$OUTPUT_DIR/perf.data" "$OUTPUT_DIR/perf.folded" "$REPORT_FILE"; return 1; }
+    tar -czf "$TAR_FILE" -C "$OUTPUT_DIR" "$(basename "$SVG_FILE")" "$(basename "$SCRIPT_FILE")" "$(basename "$REPORT_FILE")" || { echo "Error: tar failed (SVG/call stacks kept loose in $OUTPUT_DIR)" >&2; rm -f "$OUTPUT_DIR/perf.data" "$OUTPUT_DIR/perf.folded"; return 1; }
     rm -f "$OUTPUT_DIR/perf.data" "$OUTPUT_DIR/perf.unfolded" "$OUTPUT_DIR/perf.folded" "$SCRIPT_FILE" "$REPORT_FILE" "$SVG_FILE"
 
     echo "====================================================================="
