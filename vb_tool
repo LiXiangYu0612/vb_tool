@@ -38958,7 +38958,7 @@ def _topsql_rows(win, metric, top_n):
         pct = 100.0 * v / total if total > 0 else 0.0
         rows_delta = to_num(d.get("n_returned_rows", 0))
         rows_per = rows_delta / calls if (calls > 0 and rows_delta >= 0) else None
-        total_cell = ("%.1f" % (v / 1e6)) if metric in ("dbtime", "cpu", "io", "plan") else ("%d" % v)
+        total_cell = ("%.1f" % (v / 1e3)) if metric in ("dbtime", "cpu", "io", "plan") else ("%d" % v)
         rows.append([row.get("user_name", ""), str(k), "%d" % calls,
                      total_cell,                               # total of the -m dimension
                      "%d" % pr if pr >= 0 else "-",
@@ -38993,17 +38993,19 @@ def text_topsql(win, metric, top_n, detail_wins=None):
     if rows is None:
         lines.append("(no rows: window has no statement deltas on dimension '%s')" % metric)
         return 0, "\n".join(lines)
-    # the total column FOLLOWS the -m dimension (total_cputime under -m cpu,
-    # ...); time dimensions print seconds, count dimensions print integers.
-    # avg_dbtime / avg_rows stay dimension-independent.
-    dim_total_headers = {"dbtime": "total_dbtime", "cpu": "total_cputime",
-                         "io": "total_iotime", "plan": "total_plantime",
+    # the total column FOLLOWS the -m dimension (total_cputime_ms under -m
+    # cpu, ...); time dimensions print ms -- same unit as the awrrpt SQL
+    # tables and workload's total_dbtime (µs/1e3; was seconds, unlabeled,
+    # 2026-11-04) -- count dimensions print integers. avg_* stay
+    # dimension-independent and carry their own _ms suffix now.
+    dim_total_headers = {"dbtime": "total_dbtime_ms", "cpu": "total_cputime_ms",
+                         "io": "total_iotime_ms", "plan": "total_plantime_ms",
                          "calls": "total_calls", "lreads": "total_lreads",
                          "preads": "total_preads", "rows": "total_rows",
                          "memory": "total_mem", "spill": "total_spill"}
     headers = ["uname", "sql_id", "calls", dim_total_headers[metric],
-               "total_pr", "avg_dbtime", "avg_et", "avg_cpu", "avg_io",
-               "avg_cr", "avg_pr", "avg_rows", "pct%"]
+               "total_pr", "avg_dbtime_ms", "avg_et_ms", "avg_cpu_ms",
+               "avg_io_ms", "avg_cr", "avg_pr", "avg_rows", "pct%"]
     lines.append(_text_table(headers, rows, align="l" + "r" * 12))
     if detail_wins:
         lines += _text_snapshot_table("awr topsql snapshot", headers, "l" + "r" * 13,
