@@ -1,13 +1,13 @@
 #!/bin/bash
 #--------------------------------------------------------------------------------
 #-- File name:   vb_tool
-#-- Version  ：  v2.5.21
+#-- Version  ：  v2.5.22
 #-- Commit at： 2026-10-11 17:25:00
 #-- Purpose:     Vastbase Script Tool
 #-- Author:      MVS & Second-line Team 
 #--------------------------------------------------------------------------------
 set -o pipefail
-export VB_TOOL_VERSION="v2.5.21"
+export VB_TOOL_VERSION="v2.5.22"
 show_help() {
     echo "Vastbase Script Tool (vb_tool)"
     echo ""
@@ -30233,7 +30233,8 @@ _awr_collect() {
         timeout -k 2 10 awk -v p="$_dpid" '/^VmSize:/{v=$2} /^VmRSS:/{r=$2} /^Threads:/{t=$2} \
                 /^Cpus_allowed_list:/{c=$2} \
                 /^nonvoluntary_ctxt_switches:/{nv=$2} /^voluntary_ctxt_switches:/{vl=$2} \
-                END{print p"|"v+0"|"r+0"|"t+0; if (c != "") print "cpuset " c; if (nv != "") print "nvcswch " nv+0"|"vl+0}' \
+                /^VmPTE:/{pte=$2} /^VmSwap:/{swp=$2} \
+                END{print p"|"v+0"|"r+0"|"t+0; if (c != "") print "cpuset " c; if (nv != "") print "nvcswch " nv+0"|"vl+0; if (pte != "") print "vmpte " pte; if (swp != "") print "vmswap " swp}' \
                 "/proc/$_dpid/status" > "$osd/db_proc" 2>/dev/null
     fi
     # limits: the POSTMASTER's ACTUAL rlimits (/proc/<pid>/limits, world-
@@ -35950,6 +35951,13 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                     except ValueError:
                         return None
         return None
+    def _dbkv(phase, key):
+        # db_proc 行式键值（vmpte/vmswap 等新键，旧快照缺省返回 None）
+        for ln in win["os"].get((phase, "db_proc"), "").splitlines():
+            if ln.startswith(key + " "):
+                try: return int(ln[len(key)+1:].strip())
+                except ValueError: return None
+        return None
     _dbp, _dbe = _dbproc("begin"), _dbproc("end")
     if _dbp and _dbe:
         sub("DB Process")
@@ -35982,6 +35990,20 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             parts.append('<tr><td>ctx switch involuntary</td><td class="n">%s</td>'
                          '<td class="n">%s</td><td class="n">%s</td></tr>'
                          % (_bv, _ev, _dv))
+        _ptb, _pte2 = _dbkv("begin", "vmpte"), _dbkv("end", "vmpte")
+        if _ptb is not None or _pte2 is not None:
+            parts.append('<tr><td>Page Tables (VmPTE)</td><td class="n">%s</td><td class="n">%s</td>'
+                         '<td class="n">%s</td></tr>'
+                         % (fmt_bytes(_ptb*1024) if _ptb is not None else "-",
+                            fmt_bytes(_pte2*1024) if _pte2 is not None else "-",
+                            fmt_bytes((_pte2-_ptb)*1024) if (_ptb is not None and _pte2 is not None) else "-"))
+        _swb, _swe = _dbkv("begin", "vmswap"), _dbkv("end", "vmswap")
+        if _swb is not None or _swe is not None:
+            parts.append('<tr><td>Swapped (VmSwap)</td><td class="n">%s</td><td class="n">%s</td>'
+                         '<td class="n">%s</td></tr>'
+                         % (fmt_bytes(_swb*1024) if _swb is not None else "-",
+                            fmt_bytes(_swe*1024) if _swe is not None else "-",
+                            fmt_bytes((_swe-_swb)*1024) if (_swb is not None and _swe is not None) else "-"))
         # effective rlimits as ROWS in the same table (name tagged
         # "(soft)"/"(hard)", reusing the Begin/End columns); static per
         # process lifetime -> delta '-'. Unit-less rows ("Max nice priority 0
@@ -36438,7 +36460,8 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                  "Active","Active(file)","Active(anon)",
                  "Inactive","Inactive(file)","Inactive(anon)",
                  "Slab","SReclaimable","SUnreclaim","Shmem","Dirty","Writeback",
-                 "PageTables","Mapped","SwapTotal","SwapFree"):
+                 "PageTables","Mapped","KernelStack","AnonPages","Unevictable",
+                 "AnonHugePages","Committed_AS","VmallocUsed","SwapTotal","SwapFree"):
         _bv = _bm.get(_lbl, 0) // 1024
         _ev = _em.get(_lbl, 0) // 1024
         parts.append('<tr><td>%s</td><td class="n">%d</td><td class="n">%d</td><td class="n">%+d</td></tr>'
