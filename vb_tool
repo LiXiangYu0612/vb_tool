@@ -26698,6 +26698,50 @@ _vtop_q_warn() { # print the LAST query's error (if any) as one red line, then c
     : >"$_wf" 2>/dev/null
     return 0
 }
+_vtop_db_collect() { # $1 = the combined VT_SQL+VT_TOP text -> the ===MARK-annotated stream
+    # ★v2.5.22 修复 (2026-11-05, 客户环境 2.2.10 实锤复现): 主屏原来把 ~15 段查询塞进
+    # 一条 psql 管线, 共用一个 `timeout 12` 总预算 (5s connect + 每段 5s statement_timeout
+    # 原样保留)。任何三段各吃 4-5 秒 (大实例的 session_memory_detail / 锁链 / 线程 join
+    # 都是这个量级) 总和即超 12s -> psql 整个被杀 -> 尾部 ===EOD 哨兵丢失 -> 按下方
+    # 2026-09-26 的 all-or-nothing 设计整帧渲染成 "(db unreachable)"。而完全相同的每一段
+    # 在子屏语义下 (_vtop_q: 单条独享 12s) 都能正常出数 -- "主屏不可达、子屏都好"即此。
+    # 修法: 传输层逐段走 _vtop_q (与子屏逐字节同语义), 拼回解析端本来消费的 ===MARK 流;
+    # 慢段/死段只损失自己那一段 (该区无行 -> 帧首复位渲染成 '-'), 不再放大成整帧不可达。
+    # \echo 是 psql 客户端命令, 拆开执行后各段标记由本函数按原顺序补发; ===EOD 哨兵在
+    # >=1 段出数时补发, 全段皆无数据则不补发 -> 调用端哨兵判死, 走 (db unreachable) 路径。
+    # ★前置探活 (select 1): 库不可达时逐段空跑会让每帧烧 15 x 5s connect 超时, 画面
+    # 冻 75s -- 探针一次失败 (<5s) 即整帧判不可达, 与旧单管线行为的 5s 同阶。
+    [ -n "$(_vtop_q "select 1" 2>/dev/null)" ] || return 0
+    local _nl=$'\n' _mark="" _sql="" _ln _out _rc _n=0
+    while IFS= read -r _ln; do
+        case "$_ln" in
+        '\echo ===EOD') break ;;           # tail sentinel: re-emitted below, not a section
+        '\echo ==='*)
+            if [ -n "$_mark" ]; then
+                printf '===%s\n' "$_mark"
+                _out=$(_vtop_q "$_sql" 2>/dev/null); _rc=$?
+                if [ "$_rc" -ne 0 ]; then
+                    # a killed psql can leave a HALF-WRITTEN last line; drop it (a
+                    # statement error leaves _out empty, so this only bites the kill)
+                    _out=${_out%$_nl*}
+                fi
+                if [ -n "$_out" ]; then printf '%s\n' "$_out"; _n=$((_n+1)); fi
+            fi
+            _mark=${_ln:9}                  # strip the 9-char '\echo ===' prefix
+            _sql=""
+            ;;
+        *) _sql="$_sql$_nl$_ln" ;;
+        esac
+    done <<< "$1"
+    if [ -n "$_mark" ]; then                # flush the last section (===TOP)
+        printf '===%s\n' "$_mark"
+        _out=$(_vtop_q "$_sql" 2>/dev/null); _rc=$?
+        [ "$_rc" -ne 0 ] && _out=${_out%$_nl*}
+        if [ -n "$_out" ]; then printf '%s\n' "$_out"; _n=$((_n+1)); fi
+    fi
+    [ "$_n" -gt 0 ] && printf '===EOD\n'
+    return 0
+}
 _vtop_pg() { # $1=key $2=title $3=subtitle -- $2/$3 unused now (user's call
     # 2026-09-27: "改成[SESS] 就行 其他子页面也是这样 后面跟refresh 15s"): the
     # header is just the bracketed section name -- the SAME convention as the
@@ -29384,11 +29428,17 @@ order by cpu desc, rn desc, ns desc, et desc nulls last
 -- 的 limit 1, bash 真去执行它并每帧往终端打一行 limit: command not found)。引用一律用 「」。
 limit 1;
 \\echo ===EOD"
-        db=$(printf '%s\n%s\n' "$VT_SQL" "$VT_TOP" | PGCONNECT_TIMEOUT=5 PGOPTIONS='-c statement_timeout=5000' timeout 12 psql -d postgres -X -At -F'|' 2>/dev/null)
-        # ★完整性哨兵 (2026-09-26): 尾部必须有 ===EOD。被 timeout 砍掉的**半截输出比没有
-        # 更危险** —— bash 的 read 不会覆盖没读到的变量 ⇒ 后面没解析到的区会静默沿用
-        # **上一帧的旧值**(看着像"实时", 其实是陈旧数据)。缺哨兵就整帧走"DB 不可用"路径
-        # (头部 (db unreachable) + OS 块), 宁可明确说不知道, 也不显示半真半假的数据。
+        # ★传输层 v2.5.22 改版 (2026-11-05): 原来是 15 段共用一条 `timeout 12` 管线,
+        # 慢段之和超预算就整帧 (db unreachable) -- 客户环境主屏恒不可达而子屏全好的
+        # 根因 (见 _vtop_db_collect 头注释)。现在逐段走 _vtop_q, 每段独享子屏同款
+        # 12s 预算; 段级失败只损失该段 (帧首复位渲染 '-'), 只有全部段落都无数据
+        # (库真不可达) 才输出空串走下面的不可达路径。
+        db=$(_vtop_db_collect "$(printf '%s\n%s\n' "$VT_SQL" "$VT_TOP")")
+        # ★完整性哨兵 (2026-09-26 设计, 2026-11-05 语义更新): ===EOD 由收集器在
+        # >=1 段出数时补发; 空 db = 一段都没出数 = 库不可达 -> 整帧走"DB 不可用"路径
+        # (头部 (db unreachable) + OS 块)。段内不再有"被砍的半截流": 每段要么完整
+        # 要么缺席 (缺席区由每帧开头的变量复位渲染成 '-'), 陈旧数据上屏的老风险
+        # 由复位块继续兜底。
         case "$db" in *"===EOD"*) ;; *) db="";; esac
         {
         if [ -z "$db" ]; then
