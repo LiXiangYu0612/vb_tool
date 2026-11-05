@@ -26712,6 +26712,10 @@ _vtop_db_collect() { # $1 = the combined VT_SQL+VT_TOP text -> the ===MARK-annot
     # ★前置探活 (select 1): 库不可达时逐段空跑会让每帧烧 15 x 5s connect 超时, 画面
     # 冻 75s -- 探针一次失败 (<5s) 即整帧判不可达, 与旧单管线行为的 5s 同阶。
     [ -n "$(_vtop_q "select 1" 2>/dev/null)" ] || return 0
+    # ★帧级 12s 截止: 逐段顺序跑会把主屏帧耗时变成 Σ(各段), 慢实例上比旧单管线的 12s
+    # 上限还慢 (用户 2026-11-05 抱怨切换慢, 帧时即体感). 截止后剩余区只发标记 -> 该区
+    # 渲染 '-' (帧首复位保证不是旧值), 帧墙钟被钉在旧版同阶; 排在前面的区优先出数。
+    local _dl=$(( SECONDS + 12 ))
     local _nl=$'\n' _mark="" _sql="" _ln _out _rc _n=0
     while IFS= read -r _ln; do
         case "$_ln" in
@@ -26719,13 +26723,15 @@ _vtop_db_collect() { # $1 = the combined VT_SQL+VT_TOP text -> the ===MARK-annot
         '\echo ==='*)
             if [ -n "$_mark" ]; then
                 printf '===%s\n' "$_mark"
-                _out=$(_vtop_q "$_sql" 2>/dev/null); _rc=$?
-                if [ "$_rc" -ne 0 ]; then
-                    # a killed psql can leave a HALF-WRITTEN last line; drop it (a
-                    # statement error leaves _out empty, so this only bites the kill)
-                    _out=${_out%$_nl*}
+                if [ "$SECONDS" -lt "$_dl" ]; then
+                    _out=$(_vtop_q "$_sql" 2>/dev/null); _rc=$?
+                    if [ "$_rc" -ne 0 ]; then
+                        # a killed psql can leave a HALF-WRITTEN last line; drop it (a
+                        # statement error leaves _out empty, so this only bites the kill)
+                        _out=${_out%$_nl*}
+                    fi
+                    if [ -n "$_out" ]; then printf '%s\n' "$_out"; _n=$((_n+1)); fi
                 fi
-                if [ -n "$_out" ]; then printf '%s\n' "$_out"; _n=$((_n+1)); fi
             fi
             _mark=${_ln:9}                  # strip the 9-char '\echo ===' prefix
             _sql=""
@@ -26735,9 +26741,11 @@ _vtop_db_collect() { # $1 = the combined VT_SQL+VT_TOP text -> the ===MARK-annot
     done <<< "$1"
     if [ -n "$_mark" ]; then                # flush the last section (===TOP)
         printf '===%s\n' "$_mark"
-        _out=$(_vtop_q "$_sql" 2>/dev/null); _rc=$?
-        [ "$_rc" -ne 0 ] && _out=${_out%$_nl*}
-        if [ -n "$_out" ]; then printf '%s\n' "$_out"; _n=$((_n+1)); fi
+        if [ "$SECONDS" -lt "$_dl" ]; then
+            _out=$(_vtop_q "$_sql" 2>/dev/null); _rc=$?
+            [ "$_rc" -ne 0 ] && _out=${_out%$_nl*}
+            if [ -n "$_out" ]; then printf '%s\n' "$_out"; _n=$((_n+1)); fi
+        fi
     fi
     [ "$_n" -gt 0 ] && printf '===EOD\n'
     return 0
