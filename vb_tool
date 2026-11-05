@@ -7847,7 +7847,7 @@ run_asp_cnt_query() {
 #   3 - identified by the presence of both `cur_event` and `state` columns (and gs_asp.state).
 #   4 - identified by the presence of an `event` column and the absence of a `state` column.
 #   * - Reserved for future schema definitions; currently unuse	
-    local las_flag=$(psql -qAtXc "select is_event + is_curevent + is_state as las_flag from (
+    local las_flag=$(psql -d postgres -qAtXc "select is_event + is_curevent + is_state as las_flag from (
                             select coalesce(sum(case when attname='event' then 4 else 0 end),0) is_event, 
                                    coalesce(sum(case when attname='cur_event' then 2 else 0 end),0)  is_curevent,
                                    coalesce(sum(case when attname='state' then 1 else 0 end),0)  is_state 
@@ -8092,7 +8092,7 @@ run_asp_sql_query() {
 #   3 - identified by the presence of both `cur_event` and `state` columns (and gs_asp.state).
 #   4 - identified by the presence of an `event` column and the absence of a `state` column.
 #   * - Reserved for future schema definitions; currently unuse	
-    local las_flag=$(psql -qAtXc "select is_event + is_curevent + is_state as las_flag from (
+    local las_flag=$(psql -d postgres -qAtXc "select is_event + is_curevent + is_state as las_flag from (
                             select coalesce(sum(case when attname='event' then 4 else 0 end),0) is_event, 
                                    coalesce(sum(case when attname='cur_event' then 2 else 0 end),0)  is_curevent,
                                    coalesce(sum(case when attname='state' then 1 else 0 end),0)  is_state 
@@ -8308,7 +8308,7 @@ run_asp_event_query() {
 #   3 - identified by the presence of both `cur_event` and `state` columns (and gs_asp.state).
 #   4 - identified by the presence of an `event` column and the absence of a `state` column.
 #   * - Reserved for future schema definitions; currently unuse	
-   local las_flag=$(psql -qAtXc "select is_event + is_curevent + is_state as las_flag from (
+   local las_flag=$(psql -d postgres -qAtXc "select is_event + is_curevent + is_state as las_flag from (
                             select coalesce(sum(case when attname='event' then 4 else 0 end),0) is_event, 
                                    coalesce(sum(case when attname='cur_event' then 2 else 0 end),0)  is_curevent,
                                    coalesce(sum(case when attname='state' then 1 else 0 end),0)  is_state 
@@ -8500,7 +8500,7 @@ run_asp_waitchain_query() {
 #   3 - identified by the presence of both `cur_event` and `state` columns (and gs_asp.state).
 #   4 - identified by the presence of an `event` column and the absence of a `state` column.
 #   * - Reserved for future schema definitions; currently unuse	
-    local las_flag=$(psql -qAtXc "select is_event + is_curevent + is_state as las_flag from (
+    local las_flag=$(psql -d postgres -qAtXc "select is_event + is_curevent + is_state as las_flag from (
                             select coalesce(sum(case when attname='event' then 4 else 0 end),0) is_event, 
                                    coalesce(sum(case when attname='cur_event' then 2 else 0 end),0)  is_curevent,
                                    coalesce(sum(case when attname='state' then 1 else 0 end),0)  is_state 
@@ -8539,6 +8539,27 @@ run_asp_waitchain_query() {
 		condition8="a.xact_start_time::timestamp(0)"
 		condition9="las.xact_start_time::timestamp(0)"
     fi   
+
+    # root-blocker annotation: 'a'=active / 'iit'=idle in transaction, inner
+    # value = the blocker's xact start. Printed only when the source table
+    # carries BOTH columns (probed per source): G100 2.2.10 has neither
+    # state nor xact_start_time on local_active_session/gs_asp -> bare
+    # sessionid there. The old flag!=3 substitution hardcoded 1=1 as the
+    # tag predicate, printing a constant 'a' + a blank in the same
+    # scaffolding -- '(a( ))' -- which read like data but was none.
+    [[ "$las_flag" =~ ^[0-9]+$ ]] || las_flag=0
+    local las_state=$(( las_flag & 1 ))
+    local las_xact=$(psql -d postgres -qAtXc "select 1 from pg_attribute a,pg_class b,pg_namespace c where a.attrelid=b.oid and b.relnamespace=c.oid and b.relname='local_active_session' and c.nspname='dbe_perf' and a.attname='xact_start_time' limit 1")
+    local gs_state=$(psql -d postgres -qAtXc "select 1 from pg_attribute a,pg_class b,pg_namespace c where a.attrelid=b.oid and b.relnamespace=c.oid and b.relname='gs_asp' and c.nspname='pg_catalog' and a.attname='state' limit 1")
+    local gs_xact=$(psql -d postgres -qAtXc "select 1 from pg_attribute a,pg_class b,pg_namespace c where a.attrelid=b.oid and b.relnamespace=c.oid and b.relname='gs_asp' and c.nspname='pg_catalog' and a.attname='xact_start_time' limit 1")
+    local _vb_wc_las="las.sessionid::text"
+    local _vb_wc_gs="las.sessionid::text"
+    if [[ "$las_state" -eq 1 && "$las_xact" = 1 ]]; then
+        _vb_wc_las="CONCAT(las.sessionid::text, '(', case when $condition7 then 'a' else 'iit' end, '(', las.xact_start_time::timestamp(0)::text, '))')"
+    fi
+    if [[ "$gs_state" = 1 && "$gs_xact" = 1 ]]; then
+        _vb_wc_gs="CONCAT(las.sessionid::text, '(', case when las.state='active' then 'a' else 'iit' end, '(', las.xact_start_time::timestamp(0)::text, '))')"
+    fi
 
     # standby mode (3rd arg): gs_asp rows on a standby are the PRIMARY's
     # physically-replicated history -- source local_active_session only
@@ -8604,7 +8625,7 @@ blocker_stats AS (
            las.sample_time::timestamp(0) without time zone AS sample_time,
            DATE_TRUNC('hour', las.sample_time::timestamp(0) without time zone)
              + FLOOR(EXTRACT(MINUTE FROM las.sample_time::timestamp(0) without time zone) / 5) * INTERVAL '5 min' AS interval_start,
-           CONCAT(las.sessionid::text, '(', case when $condition7 then 'a' else 'iit' end, '(', $condition9::text, '))') root_block_sessid,
+           ${_vb_wc_gs} root_block_sessid,
            bs.blocked_count as b_cnt,
            substr(las.unique_query,1,50) h_sql,
            substr(blocked_las.unique_query,1,50) w_sql
@@ -8691,7 +8712,7 @@ blocker_stats AS (
 )
 SELECT /*+set(enable_mergejoin off) set(enable_nestloop off) set(enable_index_nestloop off)*/ 
     las.sample_time::timestamp(0) without time zone sample_time,
-    CONCAT(las.sessionid::text, '(', case when $condition7 then 'a' else 'iit' end, '(', $condition9::text, '))') root_block_sessid,
+    ${_vb_wc_gs} root_block_sessid,
     bs.blocked_count as b_cnt,
     substr(las.unique_query,1,50) h_sql,
     substr(blocked_las.unique_query,1,50) w_sql
@@ -8776,7 +8797,7 @@ local_part AS (
            las.sample_time::timestamp(0) without time zone AS sample_time,
            DATE_TRUNC('hour', las.sample_time::timestamp(0) without time zone)
              + FLOOR(EXTRACT(MINUTE FROM las.sample_time::timestamp(0) without time zone) / 5) * INTERVAL '5 min' AS interval_start,
-           CONCAT(las.sessionid::text, '(', case when $condition7 then 'a' else 'iit' end, '(', $condition9::text, '))') root_block_sessid,
+           ${_vb_wc_las} root_block_sessid,
            bs.blocked_count as b_cnt,
            substr(las.unique_query,1,50) h_sql,
            substr(blocked_las.unique_query,1,50) w_sql
@@ -30911,6 +30932,25 @@ _awr_collect() {
     gs_c6="1=1"; gs_c6u="1=1"; gs_ce="a.cur_event"
     [ $((gs_flag & 4)) -ne 0 ] && { gs_c6="a.state='active'"; gs_c6u="state='active'"; }
     [ $((gs_flag & 2)) -ne 0 ] && gs_ce="a.event"
+
+    # waitchain root-blocker annotation, same rule as `asp waitchain`: full
+    # sessid(a/iit(xact_start)) only when the source carries BOTH columns
+    # (probed per source); G100 2.2.10 (neither column on gs_asp nor
+    # local_active_session) gets the bare sessionid. Per-source expressions
+    # also unbreak the merged variant's gs_part on mixed kernels, which
+    # used the las-side column refs unconditionally.
+    case "$ash_las_flag" in ''|*[!0-9]*) ash_las_flag=0;; esac
+    local ash_xact_l ash_xact_g
+    ash_xact_l=$(PGCONNECT_TIMEOUT=$_ct PGOPTIONS="$_st" psql -d postgres -qAtXc "select 1 from pg_attribute a,pg_class b,pg_namespace c where a.attrelid=b.oid and b.relnamespace=c.oid and b.relname='local_active_session' and c.nspname='dbe_perf' and a.attname='xact_start_time' limit 1" 2>/dev/null)
+    ash_xact_g=$(PGCONNECT_TIMEOUT=$_ct PGOPTIONS="$_st" psql -d postgres -qAtXc "select 1 from pg_attribute a,pg_class b,pg_namespace c where a.attrelid=b.oid and b.relnamespace=c.oid and b.relname='gs_asp' and c.nspname='pg_catalog' and a.attname='xact_start_time' limit 1" 2>/dev/null)
+    local ash_wcsuf_l="las.sessionid::text"
+    local ash_wcsuf_g="las.sessionid::text"
+    if [[ "$ash_xact_l" = 1 && $((ash_las_flag & 1)) -ne 0 ]]; then
+        ash_wcsuf_l="CONCAT(las.sessionid::text, '(', case when $ash_c7 then 'a' else 'iit' end, '(', las.xact_start_time::timestamp(0)::text, '))')"
+    fi
+    if [[ "$ash_xact_g" = 1 && $((gs_flag & 4)) -ne 0 ]]; then
+        ash_wcsuf_g="CONCAT(las.sessionid::text, '(', case when las.state='active' then 'a' else 'iit' end, '(', las.xact_start_time::timestamp(0)::text, '))')"
+    fi
     # ---- pg_replication_slots confirmed_flush probe (user 2026-10-20, G100
     # 2.2.10): that kernel's view ends at dummy_standby -- no confirmed_flush.
     # Placeholder keeps the 10-column csv/log grammar (and the renderer)
@@ -30978,16 +31018,16 @@ PSQL
         # the missing csv hides the section in the report.
         if [ "$ash_las_flag" != "0" ]; then
             PGCONNECT_TIMEOUT=$_ct PGOPTIONS="$_st" psql -d postgres 2>&1 <<PSQL2 | grep -vE '^(COPY [0-9]+)?$' >&2 || true
-\copy (WITH RECURSIVE lasg AS (SELECT * FROM get_local_active_session() WHERE sample_time > '$ash_b' AND sample_time <= '$ash_e'), blocking_chain AS (SELECT sampleid, sessionid AS blocked_sessionid, block_sessionid AS blocker_sessionid, 1 AS level, ARRAY[sessionid] AS path FROM lasg WHERE block_sessionid IS NOT NULL AND block_sessionid <> 0 AND sessionid <> block_sessionid AND $ash_c1 UNION ALL SELECT bc.sampleid, bc.blocked_sessionid, a.block_sessionid, bc.level + 1, bc.path || a.sessionid FROM blocking_chain bc JOIN lasg a ON bc.sampleid = a.sampleid AND bc.blocker_sessionid = a.sessionid WHERE a.block_sessionid IS NOT NULL AND a.block_sessionid <> 0 AND NOT a.sessionid = ANY(bc.path)), root_blockers AS (SELECT sampleid, blocked_sessionid, blocker_sessionid AS root_blocker FROM blocking_chain WHERE NOT EXISTS (SELECT 1 FROM lasg a WHERE a.sampleid = blocking_chain.sampleid AND a.sessionid = blocking_chain.blocker_sessionid AND a.block_sessionid IS NOT NULL)), blocker_stats AS (SELECT sampleid, root_blocker, count(blocked_sessionid) AS blocked_count, max(blocked_sessionid) AS example_blocked_sessionid FROM root_blockers GROUP BY sampleid, root_blocker), raw AS (SELECT DATE_TRUNC('hour', las.sample_time) + FLOOR(EXTRACT(MINUTE FROM las.sample_time) / 5) * INTERVAL '5 min' AS interval_start, CONCAT(las.sessionid::text, '(', case when $ash_c7 then 'a' else 'iit' end, '(', $ash_c9::text, '))') AS root_block_sessid, bs.blocked_count AS b_cnt, substr(las.unique_query, 1, 50) AS h_sql, substr(blocked_las.unique_query, 1, 50) AS w_sql FROM blocker_stats bs JOIN lasg las ON bs.sampleid = las.sampleid AND bs.root_blocker = las.sessionid JOIN lasg blocked_las ON bs.sampleid = blocked_las.sampleid AND bs.example_blocked_sessionid = blocked_las.sessionid), bucketed AS (SELECT p.*, row_number() OVER (PARTITION BY p.interval_start, p.root_block_sessid ORDER BY p.b_cnt DESC) AS rn FROM raw p) SELECT '[local_active_session] ' || to_char(interval_start, 'YYYY-MM-DD HH24:MI:SS') || '-' || to_char(interval_start + INTERVAL '5 minutes', 'HH24:MI:SS') AS date_time, root_block_sessid, b_cnt AS max_b_cnt, h_sql, w_sql FROM bucketed WHERE rn = 1 ORDER BY interval_start, max_b_cnt DESC LIMIT 1000) TO '$dbd/ash_waitchain.csv' WITH CSV HEADER
+\copy (WITH RECURSIVE lasg AS (SELECT * FROM get_local_active_session() WHERE sample_time > '$ash_b' AND sample_time <= '$ash_e'), blocking_chain AS (SELECT sampleid, sessionid AS blocked_sessionid, block_sessionid AS blocker_sessionid, 1 AS level, ARRAY[sessionid] AS path FROM lasg WHERE block_sessionid IS NOT NULL AND block_sessionid <> 0 AND sessionid <> block_sessionid AND $ash_c1 UNION ALL SELECT bc.sampleid, bc.blocked_sessionid, a.block_sessionid, bc.level + 1, bc.path || a.sessionid FROM blocking_chain bc JOIN lasg a ON bc.sampleid = a.sampleid AND bc.blocker_sessionid = a.sessionid WHERE a.block_sessionid IS NOT NULL AND a.block_sessionid <> 0 AND NOT a.sessionid = ANY(bc.path)), root_blockers AS (SELECT sampleid, blocked_sessionid, blocker_sessionid AS root_blocker FROM blocking_chain WHERE NOT EXISTS (SELECT 1 FROM lasg a WHERE a.sampleid = blocking_chain.sampleid AND a.sessionid = blocking_chain.blocker_sessionid AND a.block_sessionid IS NOT NULL)), blocker_stats AS (SELECT sampleid, root_blocker, count(blocked_sessionid) AS blocked_count, max(blocked_sessionid) AS example_blocked_sessionid FROM root_blockers GROUP BY sampleid, root_blocker), raw AS (SELECT DATE_TRUNC('hour', las.sample_time) + FLOOR(EXTRACT(MINUTE FROM las.sample_time) / 5) * INTERVAL '5 min' AS interval_start, ${ash_wcsuf_l} AS root_block_sessid, bs.blocked_count AS b_cnt, substr(las.unique_query, 1, 50) AS h_sql, substr(blocked_las.unique_query, 1, 50) AS w_sql FROM blocker_stats bs JOIN lasg las ON bs.sampleid = las.sampleid AND bs.root_blocker = las.sessionid JOIN lasg blocked_las ON bs.sampleid = blocked_las.sampleid AND bs.example_blocked_sessionid = blocked_las.sessionid), bucketed AS (SELECT p.*, row_number() OVER (PARTITION BY p.interval_start, p.root_block_sessid ORDER BY p.b_cnt DESC) AS rn FROM raw p) SELECT '[local_active_session] ' || to_char(interval_start, 'YYYY-MM-DD HH24:MI:SS') || '-' || to_char(interval_start + INTERVAL '5 minutes', 'HH24:MI:SS') AS date_time, root_block_sessid, b_cnt AS max_b_cnt, h_sql, w_sql FROM bucketed WHERE rn = 1 ORDER BY interval_start, max_b_cnt DESC LIMIT 1000) TO '$dbd/ash_waitchain.csv' WITH CSV HEADER
 PSQL2
         fi
     elif [ "$ash_las_flag" = "0" ]; then
         PGCONNECT_TIMEOUT=$_ct PGOPTIONS="$_st" psql -d postgres 2>&1 <<PSQL2 | grep -vE '^(COPY [0-9]+)?$' >&2 || true
-\copy (WITH RECURSIVE g AS (SELECT * FROM gs_asp WHERE sample_time > '$ash_b' AND sample_time <= '$ash_e'), blocking_chain AS (SELECT sampleid, sessionid AS blocked_sessionid, block_sessionid AS blocker_sessionid, 1 AS level, ARRAY[sessionid] AS path FROM g WHERE block_sessionid IS NOT NULL UNION ALL SELECT bc.sampleid, bc.blocked_sessionid, a.block_sessionid, bc.level + 1, bc.path || a.sessionid FROM blocking_chain bc JOIN g a ON bc.sampleid = a.sampleid AND bc.blocker_sessionid = a.sessionid WHERE a.block_sessionid IS NOT NULL AND NOT a.sessionid = ANY(bc.path)), root_blockers AS (SELECT sampleid, blocked_sessionid, blocker_sessionid AS root_blocker FROM blocking_chain WHERE NOT EXISTS (SELECT 1 FROM g a WHERE a.sampleid = blocking_chain.sampleid AND a.sessionid = blocking_chain.blocker_sessionid AND a.block_sessionid IS NOT NULL)), blocker_stats AS (SELECT sampleid, root_blocker, count(blocked_sessionid) AS blocked_count, min(blocked_sessionid) AS example_blocked_sessionid FROM root_blockers GROUP BY sampleid, root_blocker), raw AS (SELECT DATE_TRUNC('hour', las.sample_time) + FLOOR(EXTRACT(MINUTE FROM las.sample_time) / 5) * INTERVAL '5 min' AS interval_start, CONCAT(las.sessionid::text, '(', case when $ash_c7 then 'a' else 'iit' end, '(', $ash_c9::text, '))') AS root_block_sessid, bs.blocked_count AS b_cnt, substr(las.unique_query, 1, 50) AS h_sql, substr(blocked_las.unique_query, 1, 50) AS w_sql FROM blocker_stats bs JOIN g las ON bs.sampleid = las.sampleid AND bs.root_blocker = las.sessionid JOIN g blocked_las ON bs.sampleid = blocked_las.sampleid AND bs.example_blocked_sessionid = blocked_las.sessionid), bucketed AS (SELECT r.*, row_number() OVER (PARTITION BY interval_start, root_block_sessid ORDER BY b_cnt DESC) AS rn FROM raw r) SELECT '[gs_asp] ' || to_char(interval_start, 'YYYY-MM-DD HH24:MI:SS') || '-' || to_char(interval_start + INTERVAL '5 minutes', 'HH24:MI:SS') AS date_time, root_block_sessid, b_cnt AS max_b_cnt, h_sql, w_sql FROM bucketed WHERE rn = 1 ORDER BY interval_start, max_b_cnt DESC LIMIT 1000) TO '$dbd/ash_waitchain.csv' WITH CSV HEADER
+\copy (WITH RECURSIVE g AS (SELECT * FROM gs_asp WHERE sample_time > '$ash_b' AND sample_time <= '$ash_e'), blocking_chain AS (SELECT sampleid, sessionid AS blocked_sessionid, block_sessionid AS blocker_sessionid, 1 AS level, ARRAY[sessionid] AS path FROM g WHERE block_sessionid IS NOT NULL UNION ALL SELECT bc.sampleid, bc.blocked_sessionid, a.block_sessionid, bc.level + 1, bc.path || a.sessionid FROM blocking_chain bc JOIN g a ON bc.sampleid = a.sampleid AND bc.blocker_sessionid = a.sessionid WHERE a.block_sessionid IS NOT NULL AND NOT a.sessionid = ANY(bc.path)), root_blockers AS (SELECT sampleid, blocked_sessionid, blocker_sessionid AS root_blocker FROM blocking_chain WHERE NOT EXISTS (SELECT 1 FROM g a WHERE a.sampleid = blocking_chain.sampleid AND a.sessionid = blocking_chain.blocker_sessionid AND a.block_sessionid IS NOT NULL)), blocker_stats AS (SELECT sampleid, root_blocker, count(blocked_sessionid) AS blocked_count, min(blocked_sessionid) AS example_blocked_sessionid FROM root_blockers GROUP BY sampleid, root_blocker), raw AS (SELECT DATE_TRUNC('hour', las.sample_time) + FLOOR(EXTRACT(MINUTE FROM las.sample_time) / 5) * INTERVAL '5 min' AS interval_start, ${ash_wcsuf_g} AS root_block_sessid, bs.blocked_count AS b_cnt, substr(las.unique_query, 1, 50) AS h_sql, substr(blocked_las.unique_query, 1, 50) AS w_sql FROM blocker_stats bs JOIN g las ON bs.sampleid = las.sampleid AND bs.root_blocker = las.sessionid JOIN g blocked_las ON bs.sampleid = blocked_las.sampleid AND bs.example_blocked_sessionid = blocked_las.sessionid), bucketed AS (SELECT r.*, row_number() OVER (PARTITION BY interval_start, root_block_sessid ORDER BY b_cnt DESC) AS rn FROM raw r) SELECT '[gs_asp] ' || to_char(interval_start, 'YYYY-MM-DD HH24:MI:SS') || '-' || to_char(interval_start + INTERVAL '5 minutes', 'HH24:MI:SS') AS date_time, root_block_sessid, b_cnt AS max_b_cnt, h_sql, w_sql FROM bucketed WHERE rn = 1 ORDER BY interval_start, max_b_cnt DESC LIMIT 1000) TO '$dbd/ash_waitchain.csv' WITH CSV HEADER
 PSQL2
     else
         PGCONNECT_TIMEOUT=$_ct PGOPTIONS="$_st" psql -d postgres 2>&1 <<PSQL2 | grep -vE '^(COPY [0-9]+)?$' >&2 || true
-\copy (WITH RECURSIVE lasg AS (SELECT * FROM get_local_active_session() WHERE sample_time > '$ash_b' AND sample_time <= '$ash_e'), lchain AS (SELECT sampleid, sessionid AS blocked_sessionid, block_sessionid AS blocker_sessionid, 1 AS level, ARRAY[sessionid] AS path FROM lasg WHERE block_sessionid IS NOT NULL AND block_sessionid <> 0 AND sessionid <> block_sessionid AND $ash_c1 UNION ALL SELECT bc.sampleid, bc.blocked_sessionid, a.block_sessionid, bc.level + 1, bc.path || a.sessionid FROM lchain bc JOIN lasg a ON bc.sampleid = a.sampleid AND bc.blocker_sessionid = a.sessionid WHERE a.block_sessionid IS NOT NULL AND a.block_sessionid <> 0 AND NOT a.sessionid = ANY(bc.path)), lroot AS (SELECT sampleid, blocked_sessionid, blocker_sessionid AS root_blocker FROM lchain WHERE NOT EXISTS (SELECT 1 FROM lasg a WHERE a.sampleid = lchain.sampleid AND a.sessionid = lchain.blocker_sessionid AND a.block_sessionid IS NOT NULL)), lstats AS (SELECT sampleid, root_blocker, count(blocked_sessionid) AS blocked_count, min(blocked_sessionid) AS example_blocked_sessionid FROM lroot GROUP BY sampleid, root_blocker), local_part AS (SELECT DATE_TRUNC('hour', las.sample_time) + FLOOR(EXTRACT(MINUTE FROM las.sample_time) / 5) * INTERVAL '5 min' AS interval_start, CONCAT(las.sessionid::text, '(', case when $ash_c7 then 'a' else 'iit' end, '(', $ash_c9::text, '))') AS root_block_sessid, bs.blocked_count AS b_cnt, substr(las.unique_query, 1, 50) AS h_sql, substr(blocked_las.unique_query, 1, 50) AS w_sql FROM lstats bs JOIN lasg las ON bs.sampleid = las.sampleid AND bs.root_blocker = las.sessionid JOIN lasg blocked_las ON bs.sampleid = blocked_las.sampleid AND bs.example_blocked_sessionid = blocked_las.sessionid), gs_asp_1 AS (SELECT gs.* FROM gs_asp gs WHERE gs.sample_time > '$ash_b' AND gs.sample_time <= '$ash_e' AND NOT EXISTS (SELECT 1 FROM lasg l WHERE l.sample_time::timestamp(0) = gs.sample_time::timestamp(0))), blocking_chain AS (SELECT sampleid, sessionid AS blocked_sessionid, block_sessionid AS blocker_sessionid, 1 AS level, ARRAY[sessionid] AS path FROM gs_asp_1 WHERE block_sessionid IS NOT NULL UNION ALL SELECT bc.sampleid, bc.blocked_sessionid, a.block_sessionid, bc.level + 1, bc.path || a.sessionid FROM blocking_chain bc JOIN gs_asp_1 a ON bc.sampleid = a.sampleid AND bc.blocker_sessionid = a.sessionid WHERE a.block_sessionid IS NOT NULL AND NOT a.sessionid = ANY(bc.path)), root_blockers AS (SELECT sampleid, blocked_sessionid, blocker_sessionid AS root_blocker FROM blocking_chain WHERE NOT EXISTS (SELECT 1 FROM gs_asp_1 a WHERE a.sampleid = blocking_chain.sampleid AND a.sessionid = blocking_chain.blocker_sessionid AND a.block_sessionid IS NOT NULL)), blocker_stats AS (SELECT sampleid, root_blocker, count(blocked_sessionid) AS blocked_count, min(blocked_sessionid) AS example_blocked_sessionid FROM root_blockers GROUP BY sampleid, root_blocker), gs_part AS (SELECT DATE_TRUNC('hour', las.sample_time) + FLOOR(EXTRACT(MINUTE FROM las.sample_time) / 5) * INTERVAL '5 min' AS interval_start, CONCAT(las.sessionid::text, '(', case when $ash_c7 then 'a' else 'iit' end, '(', $ash_c9::text, '))') AS root_block_sessid, bs.blocked_count AS b_cnt, substr(las.unique_query, 1, 50) AS h_sql, substr(blocked_las.unique_query, 1, 50) AS w_sql FROM blocker_stats bs JOIN gs_asp_1 las ON bs.sampleid = las.sampleid AND bs.root_blocker = las.sessionid JOIN gs_asp_1 blocked_las ON bs.sampleid = blocked_las.sampleid AND bs.example_blocked_sessionid = blocked_las.sessionid), merged AS (SELECT '[local_active_session]' AS src, interval_start, root_block_sessid, b_cnt, h_sql, w_sql FROM local_part UNION ALL SELECT '[gs_asp]' AS src, interval_start, root_block_sessid, b_cnt, h_sql, w_sql FROM gs_part), picked AS (SELECT m.* FROM merged m WHERE m.src = '[gs_asp]' OR NOT EXISTS (SELECT 1 FROM merged m2 WHERE m2.src = '[gs_asp]' AND m2.interval_start = m.interval_start)), bucketed AS (SELECT p.*, row_number() OVER (PARTITION BY p.src, p.interval_start, p.root_block_sessid ORDER BY p.b_cnt DESC) AS rn FROM picked p) SELECT src || ' ' || to_char(interval_start, 'YYYY-MM-DD HH24:MI:SS') || '-' || to_char(interval_start + INTERVAL '5 minutes', 'HH24:MI:SS') AS date_time, root_block_sessid, b_cnt AS max_b_cnt, h_sql, w_sql FROM bucketed WHERE rn = 1 ORDER BY interval_start, max_b_cnt DESC LIMIT 1000) TO '$dbd/ash_waitchain.csv' WITH CSV HEADER
+\copy (WITH RECURSIVE lasg AS (SELECT * FROM get_local_active_session() WHERE sample_time > '$ash_b' AND sample_time <= '$ash_e'), lchain AS (SELECT sampleid, sessionid AS blocked_sessionid, block_sessionid AS blocker_sessionid, 1 AS level, ARRAY[sessionid] AS path FROM lasg WHERE block_sessionid IS NOT NULL AND block_sessionid <> 0 AND sessionid <> block_sessionid AND $ash_c1 UNION ALL SELECT bc.sampleid, bc.blocked_sessionid, a.block_sessionid, bc.level + 1, bc.path || a.sessionid FROM lchain bc JOIN lasg a ON bc.sampleid = a.sampleid AND bc.blocker_sessionid = a.sessionid WHERE a.block_sessionid IS NOT NULL AND a.block_sessionid <> 0 AND NOT a.sessionid = ANY(bc.path)), lroot AS (SELECT sampleid, blocked_sessionid, blocker_sessionid AS root_blocker FROM lchain WHERE NOT EXISTS (SELECT 1 FROM lasg a WHERE a.sampleid = lchain.sampleid AND a.sessionid = lchain.blocker_sessionid AND a.block_sessionid IS NOT NULL)), lstats AS (SELECT sampleid, root_blocker, count(blocked_sessionid) AS blocked_count, min(blocked_sessionid) AS example_blocked_sessionid FROM lroot GROUP BY sampleid, root_blocker), local_part AS (SELECT DATE_TRUNC('hour', las.sample_time) + FLOOR(EXTRACT(MINUTE FROM las.sample_time) / 5) * INTERVAL '5 min' AS interval_start, ${ash_wcsuf_l} AS root_block_sessid, bs.blocked_count AS b_cnt, substr(las.unique_query, 1, 50) AS h_sql, substr(blocked_las.unique_query, 1, 50) AS w_sql FROM lstats bs JOIN lasg las ON bs.sampleid = las.sampleid AND bs.root_blocker = las.sessionid JOIN lasg blocked_las ON bs.sampleid = blocked_las.sampleid AND bs.example_blocked_sessionid = blocked_las.sessionid), gs_asp_1 AS (SELECT gs.* FROM gs_asp gs WHERE gs.sample_time > '$ash_b' AND gs.sample_time <= '$ash_e' AND NOT EXISTS (SELECT 1 FROM lasg l WHERE l.sample_time::timestamp(0) = gs.sample_time::timestamp(0))), blocking_chain AS (SELECT sampleid, sessionid AS blocked_sessionid, block_sessionid AS blocker_sessionid, 1 AS level, ARRAY[sessionid] AS path FROM gs_asp_1 WHERE block_sessionid IS NOT NULL UNION ALL SELECT bc.sampleid, bc.blocked_sessionid, a.block_sessionid, bc.level + 1, bc.path || a.sessionid FROM blocking_chain bc JOIN gs_asp_1 a ON bc.sampleid = a.sampleid AND bc.blocker_sessionid = a.sessionid WHERE a.block_sessionid IS NOT NULL AND NOT a.sessionid = ANY(bc.path)), root_blockers AS (SELECT sampleid, blocked_sessionid, blocker_sessionid AS root_blocker FROM blocking_chain WHERE NOT EXISTS (SELECT 1 FROM gs_asp_1 a WHERE a.sampleid = blocking_chain.sampleid AND a.sessionid = blocking_chain.blocker_sessionid AND a.block_sessionid IS NOT NULL)), blocker_stats AS (SELECT sampleid, root_blocker, count(blocked_sessionid) AS blocked_count, min(blocked_sessionid) AS example_blocked_sessionid FROM root_blockers GROUP BY sampleid, root_blocker), gs_part AS (SELECT DATE_TRUNC('hour', las.sample_time) + FLOOR(EXTRACT(MINUTE FROM las.sample_time) / 5) * INTERVAL '5 min' AS interval_start, ${ash_wcsuf_g} AS root_block_sessid, bs.blocked_count AS b_cnt, substr(las.unique_query, 1, 50) AS h_sql, substr(blocked_las.unique_query, 1, 50) AS w_sql FROM blocker_stats bs JOIN gs_asp_1 las ON bs.sampleid = las.sampleid AND bs.root_blocker = las.sessionid JOIN gs_asp_1 blocked_las ON bs.sampleid = blocked_las.sampleid AND bs.example_blocked_sessionid = blocked_las.sessionid), merged AS (SELECT '[local_active_session]' AS src, interval_start, root_block_sessid, b_cnt, h_sql, w_sql FROM local_part UNION ALL SELECT '[gs_asp]' AS src, interval_start, root_block_sessid, b_cnt, h_sql, w_sql FROM gs_part), picked AS (SELECT m.* FROM merged m WHERE m.src = '[gs_asp]' OR NOT EXISTS (SELECT 1 FROM merged m2 WHERE m2.src = '[gs_asp]' AND m2.interval_start = m.interval_start)), bucketed AS (SELECT p.*, row_number() OVER (PARTITION BY p.src, p.interval_start, p.root_block_sessid ORDER BY p.b_cnt DESC) AS rn FROM picked p) SELECT src || ' ' || to_char(interval_start, 'YYYY-MM-DD HH24:MI:SS') || '-' || to_char(interval_start + INTERVAL '5 minutes', 'HH24:MI:SS') AS date_time, root_block_sessid, b_cnt AS max_b_cnt, h_sql, w_sql FROM bucketed WHERE rn = 1 ORDER BY interval_start, max_b_cnt DESC LIMIT 1000) TO '$dbd/ash_waitchain.csv' WITH CSV HEADER
 PSQL2
     fi
     local t
