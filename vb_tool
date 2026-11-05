@@ -26712,42 +26712,64 @@ _vtop_db_collect() { # $1 = the combined VT_SQL+VT_TOP text -> the ===MARK-annot
     # ★前置探活 (select 1): 库不可达时逐段空跑会让每帧烧 15 x 5s connect 超时, 画面
     # 冻 75s -- 探针一次失败 (<5s) 即整帧判不可达, 与旧单管线行为的 5s 同阶。
     [ -n "$(_vtop_q "select 1" 2>/dev/null)" ] || return 0
-    # ★帧级 12s 截止: 逐段顺序跑会把主屏帧耗时变成 Σ(各段), 慢实例上比旧单管线的 12s
-    # 上限还慢 (用户 2026-11-05 抱怨切换慢, 帧时即体感). 截止后剩余区只发标记 -> 该区
-    # 渲染 '-' (帧首复位保证不是旧值), 帧墙钟被钉在旧版同阶; 排在前面的区优先出数。
+    # ★帧级 12s 截止: 车道取下一段前判 SECONDS, 过线即跳过 (该区只发标记 -> 渲染 '-')。
+    # ★并行两车道 (2026-11-05 用户拍板「并行, 最多只能 2 个 session」): 15 段按序号奇偶
+    # 静态分道, 每道内部串行 -- 任意时刻至多 2 个连接 (探活在车道启动前已结束, 不重叠)。
+    # 道间结果落 /tmp/vbtop_dbc.$$/r<i>.{rc,out}, 全部 wait 后按下标原序拼流, 渲染端看到
+    # 的流与串行版逐字节同构; 同样 12s 墙钟内两道共可容纳 ~2x 段工作量, 重实例上排尾部
+    # 的重区 (CTX/TOPMEM/TOPSQL) 也能出数。奇偶分道是刻意的零机制选择: 无队列/无锁/无
+    # 新依赖, 两道负载在天然位置上已交错 (CTX=7 道1, MEMSES=13 道1, TOP=14 道0)。
+    # rc 文件内容 "S" = 截止跳过; 数字 = _vtop_q 返回码 (rc!=0 时 .out 已丢半写末行);
+    # 文件缺失 (道被杀) = 该段无数据, 与跳过同渲染。
     local _dl=$(( SECONDS + 12 ))
-    local _nl=$'\n' _mark="" _sql="" _ln _out _rc _n=0
+    local _nl=$'\n' _mark="" _sql="" _ln
+    local -a _M=() _Q=()
     while IFS= read -r _ln; do
         case "$_ln" in
         '\echo ===EOD') break ;;           # tail sentinel: re-emitted below, not a section
         '\echo ==='*)
-            if [ -n "$_mark" ]; then
-                printf '===%s\n' "$_mark"
-                if [ "$SECONDS" -lt "$_dl" ]; then
-                    _out=$(_vtop_q "$_sql" 2>/dev/null); _rc=$?
-                    if [ "$_rc" -ne 0 ]; then
-                        # a killed psql can leave a HALF-WRITTEN last line; drop it (a
-                        # statement error leaves _out empty, so this only bites the kill)
-                        _out=${_out%$_nl*}
-                    fi
-                    if [ -n "$_out" ]; then printf '%s\n' "$_out"; _n=$((_n+1)); fi
-                fi
-            fi
+            [ -n "$_mark" ] && { _M+=("$_mark"); _Q+=("$_sql"); }
             _mark=${_ln:9}                  # strip the 9-char '\echo ===' prefix
             _sql=""
             ;;
         *) _sql="$_sql$_nl$_ln" ;;
         esac
     done <<< "$1"
-    if [ -n "$_mark" ]; then                # flush the last section (===TOP)
-        printf '===%s\n' "$_mark"
-        if [ "$SECONDS" -lt "$_dl" ]; then
-            _out=$(_vtop_q "$_sql" 2>/dev/null); _rc=$?
-            [ "$_rc" -ne 0 ] && _out=${_out%$_nl*}
-            if [ -n "$_out" ]; then printf '%s\n' "$_out"; _n=$((_n+1)); fi
+    [ -n "$_mark" ] && { _M+=("$_mark"); _Q+=("$_sql"); }
+    local _n=${#_M[@]} _i _w _rc _out _data=0
+    [ "$_n" -eq 0 ] && return 0
+    local _d="/tmp/vbtop_dbc.$$"
+    rm -rf "$_d" 2>/dev/null
+    mkdir "$_d" 2>/dev/null || return 0      # /tmp unusable: same footing as a dead DB (the
+                                             # error-file path already depends on /tmp)
+    for _w in 0 1; do
+        (
+            _i=$_w
+            while [ "$_i" -lt "$_n" ]; do
+                if [ "$SECONDS" -ge "$_dl" ]; then
+                    printf 'S\n' > "$_d/r$_i.rc"
+                else
+                    _out=$(_vtop_q "${_Q[$_i]}" 2>/dev/null); _rc=$?
+                    # a killed psql can leave a HALF-WRITTEN last line; drop it (a
+                    # statement error leaves _out empty, so this only bites the kill)
+                    [ "$_rc" -ne 0 ] && _out=${_out%$_nl*}
+                    printf '%s\n' "$_rc"  > "$_d/r$_i.rc"
+                    printf '%s\n' "$_out" > "$_d/r$_i.out"
+                fi
+                _i=$((_i+2))
+            done
+        ) &
+    done
+    wait
+    for _i in $(seq 0 $((_n-1))); do
+        printf '===%s\n' "${_M[_i]}"
+        if [ -f "$_d/r$_i.rc" ] && [ "$(cat "$_d/r$_i.rc" 2>/dev/null)" != "S" ] && [ -f "$_d/r$_i.out" ]; then
+            _out=$(cat "$_d/r$_i.out" 2>/dev/null)
+            if [ -n "$_out" ]; then printf '%s\n' "$_out"; _data=$((_data+1)); fi
         fi
-    fi
-    [ "$_n" -gt 0 ] && printf '===EOD\n'
+    done
+    rm -rf "$_d" 2>/dev/null
+    [ "$_data" -gt 0 ] && printf '===EOD\n'
     return 0
 }
 _vtop_pg() { # $1=key $2=title $3=subtitle -- $2/$3 unused now (user's call
@@ -28556,6 +28578,9 @@ _vtop_cleanup() {
     rm -f "${_vtop_f:-}" "${_vtop_f:-}.box."* "/tmp/vbtop_q.$$.err" \
           "${TMPDIR:-/tmp}/vbtop_wait.$$.prev" "${TMPDIR:-/tmp}/vbtop_istat.$$.prev" "${TMPDIR:-/tmp}/vbtop_repl.$$.prev" \
           "${TMPDIR:-/tmp}"/vbtop_stack."$$".* "${TMPDIR:-/tmp}"/vbtop_stkch."$$".* "${TMPDIR:-/tmp}"/vbtop_stkagg."$$".* 2>/dev/null
+    # ★主屏并行采集的分段结果目录 (信号打断帧时车道文件会残留; 下次运行也会自愈清掉,
+    #   这里退出时一并收走, 客户机上不留垃圾)
+    rm -rf "/tmp/vbtop_dbc.$$" 2>/dev/null
     # ★`stty echo ICANON` -- icanon too: bash's own `read -n1` switches the tty
     # to non-canonical while it reads, and a signal landing mid-read (Ctrl+C)
     # unwinds that restore; we are the reason the tty was touched at all, so
