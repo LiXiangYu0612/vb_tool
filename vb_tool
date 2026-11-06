@@ -4165,14 +4165,45 @@ run_mem() {
     echo "    memory frag" && \
     echo "====================" && \
     cat /proc/buddyinfo && \
+    # ---- session memory detail: ONE view walk, data rides back into the SQL
+    # as an inline literal -- the as-script topcpu pattern (top -b -n1 ->
+    # paste -sd ';' -> regexp_split_to_table literal). The SRF view walks
+    # every session's context tree under lock, so the three statements below
+    # must share ONE snapshot: capture it once into a shell var, splice it
+    # into a CTE, and the aggregation/join/rendering all stay DB-side --
+    # byte-identical query logic, zero client-side reimplementation.
+    # ★Row split is string_to_array, NOT regexp_split_to_table: the regex
+    # split restarts the engine at every match -- quadratic on big literals.
+    # 112's 5532 instance has 27k context rows (1.4 MB literal): regex split
+    # 166s vs string_to_array 278 ms, same 27303 rows (2026-11-06 实测).
+    # This replaces v2.0.5's temp-table materialization, whose CTAS dies on
+    # a STANDBY ("cannot execute CREATE TABLE in a read-only transaction" ->
+    # 'relation "_vb_smd" does not exist on dn_6001_6002_6003', reproduced
+    # verbatim on the 225 standby 2026-11-06, customer screenshot). With no
+    # temp object at all there is nothing to clean up and the read-only
+    # standby runs the same single code path.
+    # Separators: rows newline-separated (psql -t one per line), fields ';'.
+    # Kernel context names are C identifiers -- no ';' can occur (verified
+    # 0 hits on 112/204/225/226); sessid is digits.digits, sizes are digits.
+    # Empty capture (view walk failed / 0 rows) -> the length(r) > 0 guard
+    # leaves the sections empty instead of erroring. (Guard must NOT be
+    # "r <> ''": on A-compat kernels the '' literal IS NULL -- Oracle
+    # semantics, "'' is null" is true, 204 实测/MSSQL 112 false -- so every
+    # COMPARISON against it ('a' <> '' included) evaluates to NULL and
+    # filters EVERYTHING. 2026-11-06.)
+    # (deliberately NO \g-FILE redirect: VastBase psql would send the NEXT
+    # query's output to that file too, which emptied the memory guc section)
+    local _vb_smd_data _vb_smd_cte
+    _vb_smd_data=$(psql -d postgres -qAtX -c "select sessid||';'||contextname||';'||totalsize||';'||freesize||';'||usedsize from gs_session_memory_detail" 2>/dev/null)
+    _vb_smd_cte="with smd as (
+    select split_part(r,';',1) sessid,
+           split_part(r,';',2) contextname,
+           split_part(r,';',3)::int8 totalsize,
+           split_part(r,';',4)::int8 freesize,
+           split_part(r,';',5)::int8 usedsize
+    from unnest(string_to_array('${_vb_smd_data}', chr(10))) r
+    where length(r) > 0)"
     psql -q -d postgres -P footer=off <<EOF
--- materialize session memory detail once: the view walks every session's
--- memory contexts under lock, scanning it 3x is the dominant cost on
--- instances with many sessions
--- (-q suppresses the CTAS "INSERT 0 n" tag; deliberately NO \g-FILE redirect:
---  VastBase psql would send the NEXT query's output to that file too, which
---  emptied the memory guc section)
-create temp table _vb_smd as select sessid,contextname,totalsize,freesize,usedsize from gs_session_memory_detail;
 \echo ====================
 \echo      memory guc
 \echo ====================
@@ -4213,6 +4244,7 @@ limit 10;
 \echo top 10 session memory context
 \echo =============================
 \echo (per-node operator contexts Hash_/Sort_/Stream/SIRW/... aggregated under the family name)
+${_vb_smd_cte}
 select
     -- family = strip the dynamic object coordinates, keep the operator name.
     -- Kernel suffix inventory (same rule as the awr report's ctx_family):
@@ -4238,7 +4270,7 @@ select
     pg_size_pretty(min(totalsize)::numeric(100,0)) min_size,
     pg_size_pretty(avg(totalsize)::numeric(100,0)) avg_size
 from
-    _vb_smd
+    smd
 group by
     case when contextname ~ '^SIRW(_[0-9]+)+$' then 'SIRW'
          else regexp_replace(regexp_replace(contextname, '_[0-9]{10,}_[0-9]+$', ''),
@@ -4250,11 +4282,13 @@ limit 10;
 \echo =============================
 \echo top 10 session memory used
 \echo =============================
+${_vb_smd_cte}
 select count(*) sess_cnt,pg_size_pretty(sum(totalsize)::numeric(100,0)) sess_total_size,pg_size_pretty(avg((totalsize)::numeric(100,0))) sess_avg_size,pg_size_pretty(min((totalsize)::numeric(100,0))) sess_min_size,pg_size_pretty(max((totalsize)::numeric(100,0))) sess_max_size from
-(select sessid,sum(totalsize) totalsize from _vb_smd group by sessid);
+(select sessid,sum(totalsize) totalsize from smd group by sessid);
 
+${_vb_smd_cte}
 select split_part(sessid,'.',2) sessionid,application_name,to_char(backend_start,'yyyy-mm-dd hh24:mi:ss') backend_start,state,pg_size_pretty(sum(t1.totalsize)::numeric(100,0)) total_size,substr(REGEXP_REPLACE(REGEXP_REPLACE(query, '(\r|\n)+', ' '),' {2,}', ' '),1,50) sql_text
- from _vb_smd t1  left join pg_stat_activity a on split_part(sessid,'.',2) = a.sessionid 
+ from smd t1  left join pg_stat_activity a on split_part(sessid,'.',2) = a.sessionid
 group by split_part(sessid,'.',2),application_name,state,to_char(backend_start,'yyyy-mm-dd hh24:mi:ss'),substr(REGEXP_REPLACE(REGEXP_REPLACE(query, '(\r|\n)+', ' '),' {2,}', ' '),1,50) order by sum(t1.totalsize) desc limit 10;
 EOF
     local _vb_rc=$?
