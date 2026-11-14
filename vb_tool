@@ -26955,7 +26955,7 @@ _vtop_blist="'JobScheduler','Asp','workload','WdrSnapshot','AutoVacWorker'"
 # ★The 10 OS keys (c v g p d i f n o h, see the design doc) are still UNBUILT, so
 # this list is EMPTY and the rule is inert -- add the page names here when those
 # pages land and both the cadence and the page header pick it up automatically.
-_vtop_os_screens="iostat"
+_vtop_os_screens="iostat cpu vmstat net"
 # ★「开页抢一次 5s 首刷」的页 = **只有真正有跨帧增量的页** (用户拍板 2026-09-28:
 # 「m的时候 第一次刷新也是15s吧 因为这个不需要增量 而且会话多查询ctx会比较慢」+
 # 「[SESS]也没增量的 也可以弄成15s吧」)。5s 首刷原本的理由就是"增量值要尽早播种第二
@@ -28489,6 +28489,78 @@ _vtop_screen_iostat() {
     printf '\n'
 }
 
+# ★OS sub-pages (user 2026-11-14, same session as iostat: cpu / mem / net).
+# One skeleton for all four: _vtop_pg header, flat 3s (registered in
+# _vtop_os_screens), the tool's own columns passed through, and the LAST live
+# sample kept -- sysstat's first block is since-boot and the trailing
+# "Average:" block averages the whole run; neither is a live reading.
+# sysstat block shape (verified on 204, sysstat 10.1.5): each interval block
+# is a run of lines whose first field is a timestamp, so "last run of
+# timestamped lines" is exactly the last 1s window; vmstat instead prints a
+# 2-line header once and one row per interval -> keep header + last row.
+_vtop_sar_lastblock() { # stdin sysstat output -> last live sample block
+    # Structure, NOT timestamps: sysstat separates sample blocks with BLANK
+    # lines and ends with an "Average:" summary block. The header line's
+    # second and the rows' second can differ by 1 (en_US 12h shape on 204)
+    # or coincide (C locale) -- a timestamp-diff parser dropped the column
+    # header in one and kept it in the other. Walk blocks from the end:
+    # skip trailing blanks, skip ONE Average block, print that block.
+    awk '
+        { L[++n] = $0 }
+        END {
+            i = n
+            while (i >= 1 && L[i] == "") i--
+            if (i < 1) exit 1
+            e = i
+            while (i >= 1 && L[i] != "") i--
+            s = i + 1
+            if (L[s] ~ /^Average:/) {
+                while (i >= 1 && L[i] == "") i--
+                if (i < 1) exit 1
+                e = i
+                while (i >= 1 && L[i] != "") i--
+                s = i + 1
+            }
+            if (e < s) exit 1
+            for (j = s; j <= e; j++) print L[j]
+        }
+    '
+}
+
+_vtop_screen_cpu() { # mpstat -P ALL: per-core split the main screen lacks
+    _vtop_pg cpu
+    if ! command -v mpstat >/dev/null 2>&1; then
+        printf '%s  !! mpstat not found (sysstat)%s\n' "${c_red:-}" "${c_off:-}"
+        return 0
+    fi
+    timeout 8 mpstat -P ALL 1 2 2>/dev/null | _vtop_sar_lastblock \
+        || printf '%s  !! mpstat produced no rows%s\n' "${c_red:-}" "${c_off:-}"
+    printf '\n'
+}
+
+_vtop_screen_vmstat() { # vmstat: mem/swap/paging + cpu overview, procps (no sysstat needed)
+    _vtop_pg vmstat
+    if ! command -v vmstat >/dev/null 2>&1; then
+        printf '%s  !! vmstat not found (procps)%s\n' "${c_red:-}" "${c_off:-}"
+        return 0
+    fi
+    timeout 8 vmstat 1 2 2>/dev/null \
+        | awk 'NR <= 2 { print; next } { l = $0 } END { if (l != "") print l; else exit 1 }' \
+        || printf '%s  !! vmstat produced no rows%s\n' "${c_red:-}" "${c_off:-}"
+    printf '\n'
+}
+
+_vtop_screen_net() { # sar -n DEV: per-interface rates (main NET row sums physical only)
+    _vtop_pg net
+    if ! command -v sar >/dev/null 2>&1; then
+        printf '%s  !! sar not found (sysstat)%s\n' "${c_red:-}" "${c_off:-}"
+        return 0
+    fi
+    timeout 8 sar -n DEV 1 2 2>/dev/null | _vtop_sar_lastblock \
+        || printf '%s  !! sar produced no rows%s\n' "${c_red:-}" "${c_off:-}"
+    printf '\n'
+}
+
 # ---- old page names kept as thin aliases (a stale ESC command line, a tab
 #      completion muscle memory, or an old script still renders something sane) --
 _vtop_cmd_quit=0     # set by _vtop_cmd_exec when the typed command was 'q'
@@ -28523,6 +28595,9 @@ _vtop_cmd_exec() { # $1 = prefill; opens the command line, then runs what was ty
         k)  screen=lock ;;
         g)  screen=stack ;;    # vb_tool stack's summary, one instant dump (2026-09-29)
         d)  screen=iostat ;;   # OS page: iostat -xm for the data_dir fs's devices only (2026-11-14)
+        c)  screen=cpu ;;      # OS page: mpstat -P ALL, per-core split (2026-11-14)
+        v)  screen=vmstat ;;   # OS page: vmstat, mem/swap/paging (2026-11-14)
+        n)  screen=net ;;      # OS page: sar -n DEV, per-interface rates (2026-11-14)
         *)  _vtop_notice="unknown command: ${_vtop_cmd}   (one letter per built page -- see the HINT line at the bottom)" ;;
     esac
     # a sub-screen chosen via the command line gets the quick first refresh
@@ -28560,7 +28635,7 @@ _vtop_keys_hint() { # $1=screen -> key legend line, interactive mode only.
     # line of every page, this legend is keys-only again. The main screen does
     # not need it either: its header line already prints "refresh 15s".
     case "$1" in
-        main) printf '%sHINT%s    %ss=sess l=ltx a=istat e=wait x=xlog r=repl m=dbmem+memctx+topmem t=topsql k=lock g=stack d=iostat%s   %sEnter=cmd  ESC=cmd  q=quit%s\n' \
+        main) printf '%sHINT%s    %ss=sess l=ltx a=istat e=wait x=xlog r=repl m=dbmem+memctx+topmem t=topsql k=lock g=stack d=iostat c=cpu v=vmstat n=net%s   %sEnter=cmd  ESC=cmd  q=quit%s\n' \
                       "${c_grn:-}" "${c_off:-}" "${c_sec:-}" "${c_off:-}" "${c_ylw:-}" "${c_off:-}" ;;
         *)    printf '%sHINT%s    %sESC=back%s   %sEnter=refresh  q=quit%s\n' \
                       "${c_grn:-}" "${c_off:-}" "${c_sec:-}" "${c_off:-}" "${c_ylw:-}" "${c_off:-}" ;;
