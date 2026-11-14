@@ -28522,7 +28522,17 @@ _vtop_sar_lastblock() { # stdin sysstat output -> last live sample block
                 s = i + 1
             }
             if (e < s) exit 1
-            for (j = s; j <= e; j++) print L[j]
+            # ★strip the tool timestamp prefix (user 2026-11-14: 不需要显示时间) --
+            # the page header already carries the frame clock, per-line sample
+            # seconds are noise. Fixed-width prefix removed only; the remaining
+            # spaces on each line keep the block column alignment intact (the
+            # right-aligned CPU/IFACE ids stay under their headers). Meridiem
+            # optional (en_US prints AM/PM, C locale does not).
+            for (j = s; j <= e; j++) {
+                line = L[j]
+                sub(/^[0-9][0-9]:[0-9][0-9]:[0-9][0-9]( +(AM|PM))?/, "", line)
+                print line
+            }
         }
     '
 }
