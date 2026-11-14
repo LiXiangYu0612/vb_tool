@@ -28566,6 +28566,17 @@ _vtop_screen_cpu() { # mpstat -P ALL: per-core split the main screen lacks
                         if (!used[i] && (best == 0 || busy[i] > busy[best])) best = i
                     used[best] = 1; print rows[best]
                 }
+                # ★busy distribution (user 2026-11-14: 万一都忙怎么办) -- when
+                # all 300 cores are hot the Top-20 rows all look alike and the
+                # cut cores story stays hidden; one fixed-enum line (zeros
+                # included, always-write rule) tells it: how many cores sit in
+                # each busy bucket. busy = 100 - %idle, clamped to [0,100].
+                for (i = 1; i <= n; i++) {
+                    b = busy[i]; if (b > 100) b = 100; if (b < 0) b = 0
+                    if (b >= 90) g9++; else if (b >= 70) g7++
+                    else if (b >= 50) g5++; else g0++
+                }
+                printf "(busy: >=90%% %d | 70-90 %d | 50-70 %d | <50 %d)\n", g9 + 0, g7 + 0, g5 + 0, g0 + 0
                 printf "(omitted %d cores; full: mpstat -P ALL)\n", n - 20
             }
         }' \
