@@ -28543,7 +28543,32 @@ _vtop_screen_cpu() { # mpstat -P ALL: per-core split the main screen lacks
         printf '%s  !! mpstat not found (sysstat)%s\n' "${c_red:-}" "${c_off:-}"
         return 0
     fi
-    timeout 8 mpstat -P ALL 1 2 2>/dev/null | _vtop_sar_lastblock \
+    # ★line budget (user 2026-11-14, 300-core boxes exist): <=20 cores print
+    # every row unchanged; beyond that keep the all-average row plus the Top 20
+    # BUSIEST cores only (busy = 100 - %idle, %idle is the last column in every
+    # mpstat version), ordered busiest first, with the same trailing omission
+    # note the stack page uses. Selection sort (20 passes over n rows) keeps it
+    # plain awk -- no asort/gawk dependency.
+    timeout 8 mpstat -P ALL 1 2 2>/dev/null | _vtop_sar_lastblock | awk '
+        NR == 1 { hdr = $0; next }
+        NR == 2 { allr = $0; next }
+        { rows[++n] = $0; busy[n] = 100 - $NF }
+        END {
+            if (hdr == "") exit 1
+            print hdr
+            if (allr != "") print allr
+            if (n <= 20) {
+                for (i = 1; i <= n; i++) print rows[i]
+            } else {
+                for (k = 1; k <= 20; k++) {
+                    best = 0
+                    for (i = 1; i <= n; i++)
+                        if (!used[i] && (best == 0 || busy[i] > busy[best])) best = i
+                    used[best] = 1; print rows[best]
+                }
+                printf "(omitted %d cores; full: mpstat -P ALL)\n", n - 20
+            }
+        }' \
         || printf '%s  !! mpstat produced no rows%s\n' "${c_red:-}" "${c_off:-}"
     printf '\n'
 }
