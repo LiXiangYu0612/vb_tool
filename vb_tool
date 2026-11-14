@@ -26955,7 +26955,7 @@ _vtop_blist="'JobScheduler','Asp','workload','WdrSnapshot','AutoVacWorker'"
 # ★The 10 OS keys (c v g p d i f n o h, see the design doc) are still UNBUILT, so
 # this list is EMPTY and the rule is inert -- add the page names here when those
 # pages land and both the cadence and the page header pick it up automatically.
-_vtop_os_screens=""
+_vtop_os_screens="iostat"
 # ★「开页抢一次 5s 首刷」的页 = **只有真正有跨帧增量的页** (用户拍板 2026-09-28:
 # 「m的时候 第一次刷新也是15s吧 因为这个不需要增量 而且会话多查询ctx会比较慢」+
 # 「[SESS]也没增量的 也可以弄成15s吧」)。5s 首刷原本的理由就是"增量值要尽早播种第二
@@ -28450,6 +28450,45 @@ _vtop_screen_stack() { # STACK page -- `vb_tool stack`'s SUMMARY part only
     printf '\n'
 }
 
+# ★OS sub-page (user 2026-11-14): iostat -xm restricted to the data_dir
+# filesystem's OWN devices -- on an LVM/RAID fs the main screen's DSK line
+# names the dm device and its I/O row follows the WORST physical member, so
+# this page puts the dm layer and its members side by side in iostat's own
+# columns instead. Never the whole box's device list: iostat is given the
+# device names as arguments (kernel dm-X names, /proc/diskstats spelling).
+# Entry: command line 'd'. Cadence: flat 3s (registered in _vtop_os_screens).
+# Two 1s samples are taken -- iostat's FIRST block is since-boot, useless as a
+# live reading -- and only the LAST "Device:" block is kept (each interval
+# block repeats the header on sysstat 10/11/12, verified on 204's 10.1.5).
+_vtop_screen_iostat() {
+    local dset="$dev" d
+    # dev = the fs device (dm-X on LVM); devs = expanded physical members
+    # (ndev>1 only). Both layers, deduped, fs device first; a plain single-
+    # disk fs just shows that disk (lifted parent if the expand did it).
+    for d in ${devs:-}; do
+        case " $dset " in *" $d "*) ;; *) dset="$dset $d";; esac
+    done
+    _vtop_pg iostat
+    if ! command -v iostat >/dev/null 2>&1; then
+        printf '%s  !! iostat not found (sysstat)%s\n' "${c_red:-}" "${c_off:-}"
+        return 0
+    fi
+    if [ -z "$dset" ] || [ "$dset" = "-" ]; then
+        printf '%s  !! cannot map data_dir to a block device%s\n' "${c_red:-}" "${c_off:-}"
+        return 0
+    fi
+    # timeout: a wedged device must never freeze the page (same rule as every
+    # sampler); 2x1s samples + slop. Parse: buffer resets at every "Device:"
+    # header, so END holds exactly the last block; no header at all (bad device
+    # name, empty sysstat) falls through to the visible error line.
+    timeout 8 iostat -xmd 1 2 $dset 2>/dev/null | awk '
+        /^Device:/     { buf = $0 "\n"; next }
+        buf != "" && NF > 1 { buf = buf $0 "\n" }
+        END { if (buf == "") exit 1; printf "%s", buf }
+    ' || printf '%s  !! iostat produced no rows for: %s%s\n' "${c_red:-}" "$dset" "${c_off:-}"
+    printf '\n'
+}
+
 # ---- old page names kept as thin aliases (a stale ESC command line, a tab
 #      completion muscle memory, or an old script still renders something sane) --
 _vtop_cmd_quit=0     # set by _vtop_cmd_exec when the typed command was 'q'
@@ -28483,6 +28522,7 @@ _vtop_cmd_exec() { # $1 = prefill; opens the command line, then runs what was ty
         t)  screen=topsql ;;
         k)  screen=lock ;;
         g)  screen=stack ;;    # vb_tool stack's summary, one instant dump (2026-09-29)
+        d)  screen=iostat ;;   # OS page: iostat -xm for the data_dir fs's devices only (2026-11-14)
         *)  _vtop_notice="unknown command: ${_vtop_cmd}   (one letter per built page -- see the HINT line at the bottom)" ;;
     esac
     # a sub-screen chosen via the command line gets the quick first refresh
@@ -28520,7 +28560,7 @@ _vtop_keys_hint() { # $1=screen -> key legend line, interactive mode only.
     # line of every page, this legend is keys-only again. The main screen does
     # not need it either: its header line already prints "refresh 15s".
     case "$1" in
-        main) printf '%sHINT%s    %ss=sess l=ltx a=istat e=wait x=xlog r=repl m=dbmem+memctx+topmem t=topsql k=lock g=stack%s   %sEnter=cmd  ESC=cmd  q=quit%s\n' \
+        main) printf '%sHINT%s    %ss=sess l=ltx a=istat e=wait x=xlog r=repl m=dbmem+memctx+topmem t=topsql k=lock g=stack d=iostat%s   %sEnter=cmd  ESC=cmd  q=quit%s\n' \
                       "${c_grn:-}" "${c_off:-}" "${c_sec:-}" "${c_off:-}" "${c_ylw:-}" "${c_off:-}" ;;
         *)    printf '%sHINT%s    %sESC=back%s   %sEnter=refresh  q=quit%s\n' \
                       "${c_grn:-}" "${c_off:-}" "${c_sec:-}" "${c_off:-}" "${c_ylw:-}" "${c_off:-}" ;;
