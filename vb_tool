@@ -26686,7 +26686,7 @@ _vtop_print_os() { # main-screen OS block; reads caller-scope vars (dynamic scop
         _vtop_lv I/O "$dsk_col" \
             "r_iops|$d_rops" "r_mbps|$d_rmb" "r_wait_ms|$d_rms" \
             "w_iops|$d_wops" "w_mbps|$d_wmb" "w_wait_ms|$d_wms" \
-            "aqu_sz|$d_aqu" "util!|$d_util"
+            "aqu_sz|$d_aqu" "util(RAID/SSD ignore)!|$d_util"
     else
         printf "${c_sec}[DSK]${c_off}      (cannot map %s to a /proc/diskstats device)\n" "$datadir"
     fi
