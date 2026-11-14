@@ -26222,6 +26222,75 @@ _vtop_cpustat() {
     head -n1 /proc/stat | timeout 3 awk '{print $2+$3+$4+$5+$6+$7+$8+$9, $2, $3, $4, $5, $6, $7, $8, $9}'
 }
 
+# ★vbcpu% anchor (user 2026-11-14): the pid of the instance vtop ITSELF talks
+# to -- the port this shell's psql goes to (${PGPORT:-5432}), never "every
+# vastbase process on the box". VB rewrites its process titles to worker /
+# AVCworker / 2pccleaner / ..., so NAME matching is useless by construction;
+# ancestry (PPid chains from /proc/*/stat) is the only reliable family tie.
+# Resolution order:
+#   1. $datadir/postmaster.pid wins ONLY when its recorded port (line 4)
+#      equals ${PGPORT:-5432}. A stale/hijacked $PGDATA pointing at ANOTHER
+#      live instance must not leak that instance's tree into vbcpu%.
+#   2. Otherwise the LISTEN socket owner on the port (ss -p; same-user
+#      sockets show their pid without root).
+#   3. Neither resolves -> empty string = renderer shows '-' (empty is not
+#      zero). Re-resolved every frame, so an instance restart mid-session
+#      re-anchors on the next frame instead of summing a dead pid forever.
+_vtop_vbcpu_pid() { # -> pid | ""
+    local port="${PGPORT:-5432}" f l1 l4 p
+    f="${datadir:-}/postmaster.pid"
+    if [ -n "$datadir" ] && [ -r "$f" ]; then
+        { read -r l1; read -r _; read -r _; read -r l4; } < "$f"
+        l1=${l1//[[:space:]]/}; l4=${l4//[[:space:]]/}
+        # line 4 = the port this postmaster listens on; only trust the file
+        # when it agrees with the port WE are connected to
+        if [ "$l4" = "$port" ]; then
+            case "$l1" in ''|*[!0-9]*) ;; *)
+                [ -d "/proc/$l1" ] && { printf '%s\n' "$l1"; return 0; }
+                ;; esac
+        fi
+    fi
+    if command -v ss >/dev/null 2>&1; then
+        p=$(timeout -k 2 5 ss -tlnpH "sport = :$port" 2>/dev/null \
+            | awk 'match($0, /pid=[0-9]+/) { print substr($0, RSTART+4, RLENGTH-4); exit }')
+        case "$p" in ''|*[!0-9]*) ;; *) [ -d "/proc/$p" ] && printf '%s\n' "$p" ;; esac
+    fi
+    return 0
+}
+
+# ★vbcpu% sample (user 2026-11-14): summed utime+stime (kernel ticks) of the
+# whole process tree rooted at $1 (postmaster + every descendant -- auxiliary
+# processes included, that IS "the instance"). /proc/<leader>/stat already
+# accumulates all threads of the group, so thread-pool workers are covered by
+# the same walk. Prints NOTHING when the anchor is gone (empty = no baseline).
+# One cat + one awk over the /proc glob: cat (unlike gawk) tolerates pids that
+# vanish between glob expansion and open -- the same vanish-safety rule as
+# _vtop_dthreads. $1 = pid (first token, before the "(comm)" that may hold
+# spaces); the tail after the LAST ") " starts at state: 1=state 2=ppid
+# ... 12=utime 13=stime (stat fields 3..15 shifted by 2).
+_vtop_vbcpu() { # $1 = postmaster pid -> summed ticks | ""
+    local root="$1"
+    [ -n "$root" ] && [ -d "/proc/$root" ] || return 0
+    timeout 3 cat /proc/[0-9]*/stat 2>/dev/null | timeout 3 awk -v root="$root" '
+        {
+            pid = $1
+            s = $0; sub(/^.*\) /, "", s); split(s, f, " ")
+            seen[pid] = 1; PP[pid] = f[2] + 0; CPU[pid] = f[12] + 0 + f[13] + 0
+        }
+        END {
+            if (!(root in seen)) exit
+            t = 0
+            for (q in seen) {
+                p = q
+                while (p in seen) {
+                    if (p == root) { t += CPU[q]; break }
+                    p = PP[p]
+                }
+            }
+            print t
+        }'
+}
+
 # TCP socket states on the port the DB listens on (PGPORT), kernel view.
 # Deliberately the SAME source, SAME state set and SAME fixed order as the awr
 # collector's db_tcp_states, so vtop and the awr report can be read side by
@@ -26523,6 +26592,7 @@ _vtop_print_os() { # main-screen OS block; reads caller-scope vars (dynamic scop
     if awk -v u="$a_user" -v sy="$a_sys" -v w="$a_iowait" 'BEGIN{exit !(u+sy+w>=80 || w>=20)}'; then os_col=$c_red
     elif awk -v u="$a_user" -v sy="$a_sys" 'BEGIN{exit !(u+sy>=60)}'; then os_col=$c_ylw; fi
     _vtop_lv CPU "$os_col" \
+        "vbcpu%|${a_vbcpu:--}" \
         "user|$a_user" "nice|$a_nice" "system|$a_sys" "idle|$a_idle" \
         "iowait|$a_iowait" "irq|$a_irq" "softirq|$a_softirq" "steal|$a_steal" \
         "max_freq|$a_fmax" "min_freq|$a_fmin" "avg_freq|$a_favg"
@@ -29167,6 +29237,7 @@ order by s.sz desc;"
     # ---- sampling loop ----
     local t0 t1 d0 d1 c0 c1 n0 n1 dt key rrc rd_tmo
     local a_user a_nice a_sys a_idle a_iowait a_irq a_softirq a_steal a_fmax a_fmin a_favg
+    local a_vbcpu v0 v1 clk
     local t_lis t_est t_sr t_ss t_f1 t_f2 t_tw t_cw t_la t_cl t_oth
     local p_rq p_bq p_proc p_ctxt p_fork p_csw p_dthr p_cur p0
     local g_flt g_mflt g_pi g_po g_si g_so g_af g_if g_aa g_ia
@@ -29176,6 +29247,10 @@ order by s.sz desc;"
     local mt ma mst msf
     t0=$(date +%s%3N)
     d0=$(_vtop_dsample); c0=$(_vtop_cpustat); n0=$(_vtop_net); p0=$(_vtop_procs); g0=$(_vtop_pgc)
+    # ★vbcpu% (user 2026-11-14): instance-tree CPU via /proc counter deltas --
+    # needs CLK_TCK once and a first tree sample so frame 1 already shows a value
+    clk=$(getconf CLK_TCK 2>/dev/null); case "$clk" in ''|*[!0-9]*) clk=100;; esac
+    v0=$(_vtop_vbcpu "$(_vtop_vbcpu_pid)")
     local first=1 sub_first=0
     while :; do
         if [ "$once" = "1" ]; then
@@ -29244,7 +29319,7 @@ order by s.sz desc;"
                         # fresh sampling baseline: without this the first main frame
                         # after coming back would average over the whole sub-screen
                         # stay (tps / iops / EVENT would show a bogus value)
-                        t0=$(date +%s%3N); d0=$(_vtop_dsample); c0=$(_vtop_cpustat); n0=$(_vtop_net); p0=$(_vtop_procs); g0=$(_vtop_pgc)
+                        t0=$(date +%s%3N); d0=$(_vtop_dsample); c0=$(_vtop_cpustat); n0=$(_vtop_net); p0=$(_vtop_procs); g0=$(_vtop_pgc); v0=$(_vtop_vbcpu "$(_vtop_vbcpu_pid)")
                         prev_xc=""; prev_xr=""; prev_br=""; prev_bh=""; prev_tb=""; prev_lsn=""; ist_qps=""; ist_cm=""; ist_roll=""; ist_tps=""; ist_lg=""; ist_ph=""; ist_pw=""; ist_rd=""; ist_tp=""; ist_dl=""
                         # ★REPL 每帧复位:显示值 + 基线。基线一并清 ⇒ 备库消失/重连后的首帧显示 '-'(不会跨空档算出一个巨大的假增量)
                         r_app=""; r_state=""; r_sync=""; r_sent=""; r_wr=""; r_fl=""; r_rp=""; r_slot=""
@@ -29332,6 +29407,7 @@ order by s.sz desc;"
             continue
         fi
         t1=$(date +%s%3N); d1=$(_vtop_dsample); c1=$(_vtop_cpustat); n1=$(_vtop_net)
+        v1=$(_vtop_vbcpu "$(_vtop_vbcpu_pid)")
         dt=$(( t1 - t0 )); [ "$dt" -le 0 ] && dt=1
         read -r a_user a_nice a_sys a_idle a_iowait a_irq a_softirq a_steal <<< "$(awk -v a="$c0" -v b="$c1" 'BEGIN{split(a,x);split(b,y);d=y[1]-x[1];if(d<=0)d=1;
             # ★逐状态钳非负 (2026-09-28): 累计值变小只有一种来源 —— CPU 热插拔/下线
@@ -29340,6 +29416,19 @@ order by s.sz desc;"
             # 钳法与本帧其它三块 (I/O、NET、PGCACHE) 完全一致。
             for(i=2;i<=9;i++) if(y[i]<x[i]) y[i]=x[i];
             printf "%.1f %.1f %.1f %.1f %.1f %.1f %.1f %.1f", (y[2]-x[2])*100/d, (y[3]-x[3])*100/d, (y[4]-x[4])*100/d, (y[5]-x[5])*100/d, (y[6]-x[6])*100/d, (y[7]-x[7])*100/d, (y[8]-x[8])*100/d, (y[9]-x[9])*100/d}')"
+        # ★vbcpu% (user 2026-11-14, first column of the CPU row): CPU of the
+        # instance vtop itself talks to, PER-CORE scale (top's IRIX style, user's
+        # pick: 3 busy cores = 300.0) -- not host-share, so it deliberately does
+        # NOT divide by the core count like the user/system fields beside it.
+        # Tree counter delta / (dt * CLK_TCK). Empty sample = anchor lost (port's
+        # instance not resolvable) or no baseline yet -> '-', never a fake 0.
+        # Negative delta (instance restarted between frames -> new pid tree with
+        # lower accumulated ticks) clamps to 0 like every other delta block.
+        if [ -z "$v0" ] || [ -z "$v1" ]; then
+            a_vbcpu="-"
+        else
+            a_vbcpu=$(awk -v a="$v0" -v b="$v1" -v ms="$dt" -v c="$clk" 'BEGIN{s=ms/1000; v=(b-a)*100/(s*c); if(v<0)v=0; printf "%.1f", v}')
+        fi
         read -r a_fmax a_fmin a_favg <<< "$(_vtop_cpufreq)"
         read -r t_lis t_est t_sr t_ss t_f1 t_f2 t_tw t_cw t_la t_cl t_oth <<< "$(_vtop_sockstat)"
         # ★空样本 = 还没有基线, 必须显示 '-' 而不是拿 0 当基线 (2026-09-28 修):
@@ -29865,7 +29954,7 @@ printf '           %-14s %-22s %-8.8s %-9s %.62s\n' "-" "-" "-" "-" "-"
         _vtop_notice=""          # a notice lives exactly one frame
         _vtop_print_frame "$_vtop_f"
         [ "$once" = "1" ] && break
-        t0=$t1; d0=$d1; c0=$c1; n0=$n1; p0=$p_cur; g0=$g_cur
+        t0=$t1; d0=$d1; c0=$c1; n0=$n1; p0=$p_cur; g0=$g_cur; v0=$v1
     done
     rm -f "$_vtop_f"
     return 0
