@@ -28469,6 +28469,7 @@ _vtop_screen_iostat() {
         case " $dset " in *" $d "*) ;; *) dset="$dset $d";; esac
     done
     _vtop_pg iostat
+    _vtop_sec "iostat -xm"   # banner = boxify trigger: page content gets the frame
     if ! command -v iostat >/dev/null 2>&1; then
         printf '%s  !! iostat not found (sysstat)%s\n' "${c_red:-}" "${c_off:-}"
         return 0
@@ -28539,6 +28540,7 @@ _vtop_sar_lastblock() { # stdin sysstat output -> last live sample block
 
 _vtop_screen_cpu() { # mpstat -P ALL: per-core split the main screen lacks
     _vtop_pg cpu
+    _vtop_sec "mpstat -P ALL"   # banner = boxify trigger: page content gets the frame
     if ! command -v mpstat >/dev/null 2>&1; then
         printf '%s  !! mpstat not found (sysstat)%s\n' "${c_red:-}" "${c_off:-}"
         return 0
@@ -28566,24 +28568,25 @@ _vtop_screen_cpu() { # mpstat -P ALL: per-core split the main screen lacks
                         if (!used[i] && (best == 0 || busy[i] > busy[best])) best = i
                     used[best] = 1; print rows[best]
                 }
-                # ★busy distribution (user 2026-11-14: 万一都忙怎么办; buckets
-                # regrouped to 10-point bins 0-10 .. 90-100 per user call)
-                # -- when all 300 cores are hot the Top-20 rows all look alike
-                # and the cut cores story stays hidden; one fixed-enum line
-                # (zeros included, always-write rule) tells it. busy = 100 -
-                # %idle, clamped to [0,100]; bin = int(busy/10), busy 100 lands
-                # in the 90-100 bin.
-                for (i = 1; i <= n; i++) {
-                    b = busy[i]; if (b > 100) b = 100; if (b < 0) b = 0
-                    k = int(b / 10); if (k > 9) k = 9
-                    cnt[k]++
-                }
-                line = "(busy: "
-                for (k = 0; k < 10; k++)
-                    line = line sprintf("%s%d-%d %d", (k ? " | " : ""), k * 10, (k == 9 ? 100 : (k + 1) * 10), cnt[k] + 0)
-                printf "%s)\n", line
                 printf "(omitted %d cores; full: mpstat -P ALL)\n", n - 20
             }
+            # ★busy distribution (user 2026-11-14: 万一都忙怎么办; buckets are
+            # 10-point bins 0-10 .. 90-100 per user call). Printed after the
+            # rows for EVERY core count (user 2026-11-15: tied to the cut-only
+            # branch it was invisible on small boxes, so the feature could not
+            # be eyeballed at all); the omitted line above stays cut-only.
+            # Fixed enum, zeros included (always-write rule). busy = 100 -
+            # %idle clamped to [0,100]; bin = int(busy/10), busy 100 lands in
+            # the 90-100 bin.
+            for (i = 1; i <= n; i++) {
+                b = busy[i]; if (b > 100) b = 100; if (b < 0) b = 0
+                k = int(b / 10); if (k > 9) k = 9
+                cnt[k]++
+            }
+            line = "(busy: "
+            for (k = 0; k < 10; k++)
+                line = line sprintf("%s%d-%d %d", (k ? " | " : ""), k * 10, (k == 9 ? 100 : (k + 1) * 10), cnt[k] + 0)
+            printf "%s)\n", line
         }' \
         || printf '%s  !! mpstat produced no rows%s\n' "${c_red:-}" "${c_off:-}"
     printf '\n'
@@ -28591,6 +28594,7 @@ _vtop_screen_cpu() { # mpstat -P ALL: per-core split the main screen lacks
 
 _vtop_screen_vmstat() { # vmstat: mem/swap/paging + cpu overview, procps (no sysstat needed)
     _vtop_pg vmstat
+    _vtop_sec "vmstat"   # banner = boxify trigger: page content gets the frame
     if ! command -v vmstat >/dev/null 2>&1; then
         printf '%s  !! vmstat not found (procps)%s\n' "${c_red:-}" "${c_off:-}"
         return 0
@@ -28603,6 +28607,7 @@ _vtop_screen_vmstat() { # vmstat: mem/swap/paging + cpu overview, procps (no sys
 
 _vtop_screen_net() { # sar -n DEV: per-interface rates (main NET row sums physical only)
     _vtop_pg net
+    _vtop_sec "sar -n DEV"   # banner = boxify trigger: page content gets the frame
     if ! command -v sar >/dev/null 2>&1; then
         printf '%s  !! sar not found (sysstat)%s\n' "${c_red:-}" "${c_off:-}"
         return 0
