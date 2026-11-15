@@ -28673,10 +28673,12 @@ _vtop_nstat() { # -> ranked "name delta rate/s" rows (two per line), or a no-cha
                     if (!used[i] && (best == 0 || dv[i] > dv[best])) best = i
                 used[best] = 1; rn[s] = nm[best]; rv[s] = dv[best]
             }
-            printf "%-26.26s %6s %7s   %-26.26s %6s %7s\n", "metric", "delta", "rate/s", "metric", "delta", "rate/s"
+            # ★faint divider ┆ between the two cells (user 2026-11-15: 暗线隔开;
+            # same 3 cols as the old blank gap so frame width does not move)
+            printf "%-26.26s %6s %7s ┆ %-26.26s %6s %7s\n", "metric", "delta", "rate/s", "metric", "delta", "rate/s"
             for (s = 1; s <= m; s += 2) {
                 if (s + 1 <= m)
-                    printf "%-26.26s %6d %7.1f   %-26.26s %6d %7.1f\n", rn[s], rv[s], rv[s] / s_, rn[s+1], rv[s+1], rv[s+1] / s_
+                    printf "%-26.26s %6d %7.1f ┆ %-26.26s %6d %7.1f\n", rn[s], rv[s], rv[s] / s_, rn[s+1], rv[s+1], rv[s+1] / s_
                 else
                     printf "%-26.26s %6d %7.1f\n", rn[s], rv[s], rv[s] / s_
             }
