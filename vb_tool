@@ -28605,6 +28605,79 @@ _vtop_screen_vmstat() { # vmstat: mem/swap/paging + cpu overview, procps (no sys
     printf '\n'
 }
 
+# ★nstat top deltas (user 2026-11-15: net 子屏要补充 nstat 的变更最大的指标,
+# 除了流量和包) -- the nstat METRIC SET is the kernel extended counters in
+# /proc/net/netstat + /proc/net/snmp (TcpExt/IpExt/Tcp/Ip/Icmp/Udp, shown by
+# the nstat binary as TcpExtSyncookiesSent etc). The BINARY is deliberately
+# not used: it diffs against a persistent per-user history file, so two vtop
+# users (or cron) would corrupt each other's windows -- /proc is read twice
+# 1s apart instead, the same window semantics as the other OS pages. Pure
+# volume counters are EXCLUDED by name (bytes / segments / forwarded /
+# delivered / broadcast / multicast / icmp message totals -- the throughput
+# family would otherwise always top the ranking and drown the interesting
+# retransmit / timeout / drop / connection-churn counters). Zero deltas are
+# not rows: nothing changed -> one explicit note (empty is not zero).
+_vtop_nstat_snap() { # -> "GroupKey value" lines from the nstat counter set
+    timeout 3 cat /proc/net/netstat /proc/net/snmp 2>/dev/null | timeout 3 awk '
+        $1 !~ /:$/ { next }
+        {
+            g = substr($1, 1, length($1) - 1)
+            if (!(g in hdr)) {
+                hdr[g] = 1
+                for (i = 2; i <= NF; i++) K[g, i - 1] = $i
+                next
+            }
+            for (i = 2; i <= NF; i++)
+                if (K[g, i - 1] != "") printf "%s%s %s\n", g, K[g, i - 1], $i
+        }'
+}
+
+_vtop_nstat() { # -> ranked "name delta /s" rows, or a no-change note
+    local a b
+    a=$(_vtop_nstat_snap)
+    sleep 1
+    b=$(_vtop_nstat_snap)
+    [ -n "$a" ] && [ -n "$b" ] || return 1
+    # ★the BLANK line between the two snapshots is load-bearing: it is how the
+    # diff pass knows where a ends and b starts ($a has no trailing newline)
+    printf '%s\n\n%s\n' "$a" "$b" | awk -v top=15 '
+        BEGIN { ex = "Octets$|InSegs$|OutSegs$|InReceives$|OutRequests$|InDelivers$|OutTransmits$|McastPkts$|BcastPkts$|InMsgs$|OutMsgs$|Datagrams$|InNoECTPkts$|TCPOrigDataSent$|TCPDelivered$|TCPPureAcks$|TCPRcvCoalesce$|TCPAutoCorking$|TCPHPHits$|TCPHPAcks$" }
+        NF == 0 { second = 1; next }
+        {
+            split($0, p, " ")
+            if (!second) A[p[1]] = p[2] + 0
+            else         B[p[1]] = p[2] + 0
+        }
+        END {
+            n = 0
+            for (k in B) {
+                if (!(k in A)) continue
+                d = B[k] - A[k]
+                if (d > 0 && k !~ ex) { nm[++n] = k; dv[n] = d }
+            }
+            if (n == 0) { print "(no non-volume counter changes in window)"; exit }
+            # ★rank then lay out TWO METRICS PER LINE (user 2026-11-15: 一行放
+            # 两个指标, 能排多少取多少) -- cell = name(26, truncated) + rate/s,
+            # two cells fit the 148-col frame with room to spare; cap = 30
+            # metrics = 15 rows. rate == delta here: the window is 1s.
+            m = (n < 30 ? n : 30)
+            for (s = 1; s <= m; s++) {
+                best = 0
+                for (i = 1; i <= n; i++)
+                    if (!used[i] && (best == 0 || dv[i] > dv[best])) best = i
+                used[best] = 1; rn[s] = nm[best]; rv[s] = dv[best]
+            }
+            printf "%-26.26s %7s   %-26.26s %7s\n", "metric", "rate/s", "metric", "rate/s"
+            for (s = 1; s <= m; s += 2) {
+                if (s + 1 <= m)
+                    printf "%-26.26s %7d   %-26.26s %7d\n", rn[s], rv[s], rn[s+1], rv[s+1]
+                else
+                    printf "%-26.26s %7d\n", rn[s], rv[s]
+            }
+            if (n > m) printf "(and %d more changed counters)\n", n - m
+        }'
+}
+
 _vtop_screen_net() { # sar -n DEV: per-interface rates (main NET row sums physical only)
     _vtop_pg net
     _vtop_sec "sar -n DEV"   # banner = boxify trigger: page content gets the frame
@@ -28614,6 +28687,8 @@ _vtop_screen_net() { # sar -n DEV: per-interface rates (main NET row sums physic
     fi
     timeout 8 sar -n DEV 1 2 2>/dev/null | _vtop_sar_lastblock \
         || printf '%s  !! sar produced no rows%s\n' "${c_red:-}" "${c_off:-}"
+    _vtop_sec "nstat top deltas (non-volume)"
+    _vtop_nstat || printf '%s  !! /proc/net/netstat or /proc/net/snmp unreadable%s\n' "${c_red:-}" "${c_off:-}"
     printf '\n'
 }
 
