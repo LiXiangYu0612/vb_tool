@@ -28661,7 +28661,7 @@ _vtop_nstat() { # -> ranked "name delta rate/s" rows (two per line), or a no-cha
                 d = B[k] - A[k]
                 if (d > 0 && k !~ ex) { nm[++n] = k; dv[n] = d }
             }
-            if (n == 0) { print "(no non-volume counter changes in window)"; exit }
+            if (n == 0) { print "(no counter changes in window)"; exit }
             # ★rank then lay out TWO METRICS PER LINE (user 2026-11-15: 一行放
             # 两个指标, 能排多少取多少) -- cell = name(26, truncated) + delta +
             # rate/s; two cells fit the 148-col frame with room to spare; cap =
@@ -28693,7 +28693,7 @@ _vtop_screen_net() { # sar -n DEV: per-interface rates (main NET row sums physic
     fi
     timeout 8 sar -n DEV 1 2 2>/dev/null | _vtop_sar_lastblock \
         || printf '%s  !! sar produced no rows%s\n' "${c_red:-}" "${c_off:-}"
-    _vtop_sec "nstat top deltas (non-volume)"
+    _vtop_sec "nstat top deltas"
     _vtop_nstat || printf '%s  !! /proc/net/netstat or /proc/net/snmp unreadable%s\n' "${c_red:-}" "${c_off:-}"
     printf '\n'
 }
