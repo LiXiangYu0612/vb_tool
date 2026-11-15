@@ -49,6 +49,7 @@ show_help() {
     echo "  priv            display privileges for users/tables/databases/schemas"
     echo "  recover_table   recover table data by ctid scan (skip corrupted rows)"
     echo "  se              show-event knowledge base: wait event cause/fix (oerr style)"
+    echo "  sqlpatch        SQL PATCH: create|enable|disable|drop -d <db> -s <unique_sql_id> -h <hint|@file>"
     echo "  redo            analyze redo/WAL log generation"
     echo "  relxlog         analyze WAL records for relations"
     echo "  repl            display streaming replication lag"
@@ -110,6 +111,7 @@ show_list() {
     echo "  priv            display privileges for users/tables/databases/schemas"
     echo "  recover_table   recover table data by ctid scan (skip corrupted rows)"
     echo "  se              show-event knowledge base: wait event cause/fix (oerr style)"
+    echo "  sqlpatch        SQL PATCH: create|enable|disable|drop -d <db> -s <unique_sql_id> -h <hint|@file>"
     echo "  redo            analyze redo/WAL log generation"
     echo "  relxlog         analyze WAL records for relations"
     echo "  repl            display streaming replication lag"
@@ -28950,6 +28952,152 @@ _vtop_cleanup() {
     return 0
 }
 
+sqlpatch_help() {
+    cat <<'SPH'
+Usage: vb_tool sqlpatch create|enable|disable|drop -d <db_name> -s <unique_sql_id> [-h <hint_string>]
+
+  -d  database name (required: gs_sql_patch is per-database)
+  -s  unique_sql_id the patch anchors on
+  -h  hint, create only. Three forms:
+      bare:    set(query_dop 1) / set(rewrite_rule 'magicset,predpushnormal')
+      wrapped: '/*+ ... */' (the wrapper is stripped automatically)
+      file:    @/path/file -- put exactly the hint lines you want into a file
+               (any subset of the outline block, cp'd by hand); line breaks
+               are joined and stray BEGIN/END_OUTLINE_DATA marker lines are
+               dropped. Double quotes (@\"SEL$1\") never pass the shell
+      inline:  paste the hint EXACTLY as it appears in the outline output.
+               If the shell ate the inner single quotes around a set() value
+               (comma/space-containing bare value -- grammatically
+               impossible on purpose), the tool re-quotes it automatically.
+
+  Patch name is always derived: 'patch_' || unique_sql_id
+  (the dbe_sql_util schema/function names are wrapped, nothing to remember).
+SPH
+}
+
+# SQL PATCH wrapper (user 2026-11-15: "记不住创建和删除 sqlpatch 的 schema 和
+# 函数名"). Design per user spec: actions create|enable|disable|drop, required
+# -d (gs_sql_patch is NOT shared across databases), -s anchors the patch,
+# -h only for create, name always 'patch_'||unique_sql_id.
+run_sqlpatch() {
+    local act="${1:-}"
+    case "$act" in
+    create|enable|disable|drop) ;;
+    *)
+        echo "Error: sqlpatch action must be create|enable|disable|drop" >&2
+        sqlpatch_help
+        return 2
+        ;;
+    esac
+    shift
+
+    local db="" uid="" hint=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+        -d) [ $# -ge 2 ] || { echo "Error: -d needs <db_name>" >&2; return 2; }
+            db="$2"; shift 2;;
+        -s) [ $# -ge 2 ] || { echo "Error: -s needs <unique_sql_id>" >&2; return 2; }
+            uid="$2"; shift 2;;
+        -h) [ $# -ge 2 ] || { echo "Error: -h needs <hint_string>" >&2; return 2; }
+            hint="$2"; shift 2;;
+        *)  echo "Error: unknown option '$1'" >&2; return 2;;
+        esac
+    done
+    [ -n "$db" ]  || { echo "Error: -d <db_name> is required (gs_sql_patch is per-database)" >&2; return 2; }
+    [ -n "$uid" ] || { echo "Error: -s <unique_sql_id> is required" >&2; return 2; }
+    case "$uid" in ''|*[!0-9]*) echo "Error: -s expects a numeric unique_sql_id" >&2; return 2;; esac
+    if [ "$act" = create ] && [ -z "$hint" ]; then
+        echo "Error: create needs -h '<hint_string>'" >&2; return 2
+    fi
+
+    local name="patch_${uid}"
+    # Hint normalization (create only): the engine wants the BARE hint text.
+    #  1. -h @file: read the hint from a file -- EXPLAIN (OUTLINE) output can
+    #     be cp'd straight in (double quotes like @"SEL$1" never survive shell
+    #     quoting; a file bypasses the shell entirely)
+    #  2. drop BEGIN_OUTLINE_DATA / END_OUTLINE_DATA marker lines, collapse
+    #     CR/newlines into single spaces (outline blocks are multi-line)
+    #  3. strip a '/*+ ... */' wrapper if present
+    if [ "$act" = create ]; then
+        case "$hint" in
+        @?*)
+            local hf="${hint#@}"
+            [ -r "$hf" ] || { echo "Error: -h @$hf: file not readable" >&2; return 2; }
+            hint=$(cat "$hf")
+            ;;
+        esac
+        # The file holds EXACTLY the hint the user curated -- any subset of
+        # the outline block (one line or several). Transport only: drop stray
+        # CR and the two outline marker tokens if they were copied along,
+        # join the lines, no content decisions.
+        hint=$(printf '%s' "$hint" | tr -d '\r' \
+            | sed -e '/^[[:space:]]*BEGIN_OUTLINE_DATA[[:space:]]*$/d' -e '/^[[:space:]]*END_OUTLINE_DATA[[:space:]]*$/d' \
+            | awk 'NF { printf "%s ", $0 }')
+        hint="${hint% }"
+        [ -n "$hint" ] || { echo "Error: -h produced an empty hint after normalization" >&2; return 2; }
+        case "$hint" in
+        '/*+'*'*/') hint="${hint#/\*+}"; hint="${hint%\*/}"; hint="${hint#"${hint%%[![:space:]]*}"}"; hint="${hint%"${hint##*[![:space:]]}"}";;
+        esac
+        # Auto-repair quotes the SHELL ate: '-h 'SET(x 'a,b')'' loses its
+        # inner single quotes to shell concatenation, so a set() value that
+        # contains commas/spaces but no quotes can only mean that. A bare
+        # value with commas/spaces is grammatically impossible, so re-quoting
+        # is deterministic, never a guess (user 2026-11-16: 原样贴, 工具转义).
+        hint=$(printf '%s' "$hint" | awk '
+        {
+            q = sprintf("%c", 39); s = $0; out = ""
+            while (1) {
+                idx = index(tolower(s), "set(")
+                if (idx == 0) { out = out s; break }
+                out = out substr(s, 1, idx + 3)
+                rest = substr(s, idx + 4)
+                ci = index(rest, ")")
+                if (ci == 0) { out = out rest; break }
+                grp = substr(rest, 1, ci - 1)
+                if (match(grp, /^[[:space:]]*[^[:space:]]+[[:space:]]+/)) {
+                    head = substr(grp, 1, RLENGTH)
+                    val = substr(grp, RLENGTH + 1)
+                    gsub(/^[[:space:]]+|[[:space:]]+$/, "", val)
+                    fv = substr(val, 1, 1); lv = substr(val, length(val), 1)
+                    if (val != "" && !(fv == q && lv == q) && (val ~ /,/ || val ~ / /)) {
+                        val = q val q
+                    }
+                    grp = head val
+                }
+                out = out grp ")"
+                s = substr(rest, ci + 1)
+            }
+            print out
+        }')
+    fi
+    if [ "$act" = create ]; then
+        [ -n "${NETDIAG_SP_DEBUG:-}" ] && printf 'DBG hint=[%s]\n' "$hint" >&2
+        psql -d "$db" -P footer=off -v n="$name" -v i="$uid" -v h="$hint" <<'SQLEOF'
+\echo '=========================='
+\echo 'create_hint_sql_patch'
+\echo '=========================='
+SELECT dbe_sql_util.create_hint_sql_patch(:'n', :'i'::bigint, :'h', NULL, true) AS created;
+SELECT patch_name, unique_sql_id, enable, abort, status,
+       coalesce(hint_string, '-') AS hint_string
+FROM gs_sql_patch WHERE unique_sql_id = :'i'::bigint;
+SQLEOF
+    else
+        local fn="${act}_sql_patch"
+        psql -d "$db" -P footer=off -v n="$name" -v i="$uid" <<SQLEOF
+\echo '=========================='
+\echo $act: state before
+\echo '=========================='
+SELECT patch_name, unique_sql_id, enable, abort, status,
+       coalesce(hint_string, '-') AS hint_string
+FROM gs_sql_patch WHERE unique_sql_id = :'i'::bigint;
+SELECT dbe_sql_util.$fn(:'n') AS ${act}_result;
+SELECT patch_name, unique_sql_id, enable, abort, status,
+       coalesce(hint_string, '-') AS hint_string
+FROM gs_sql_patch WHERE unique_sql_id = :'i'::bigint;
+SQLEOF
+    fi
+}
+
 run_vtop() {
     local interval=15 once=0 want_color="" want_plain=0
     while [ $# -gt 0 ]; do
@@ -42917,6 +43065,16 @@ case "$1" in
         run_se "$2" "${3:-}"
         rc=$?
         [ "$rc" = "2" ] && se_help
+        exit $rc
+        ;;
+    sqlpatch)
+        if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
+            sqlpatch_help
+            exit 0
+        fi
+        run_sqlpatch "${@:2}"
+        rc=$?
+        [ "$rc" = "2" ] && sqlpatch_help
         exit $rc
         ;;
     as)
