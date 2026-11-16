@@ -29495,6 +29495,20 @@ run_vtop() {
     if [ -n "$datadir" ] && [ -d "$datadir" ]; then
         dev=$(_vtop_disk_dev "$datadir")
     fi
+    # ★partition lifted to the PARENT WHOLE DISK (user 2026-11-17: '都是vda 为什么
+    #   是vda1??'). df resolves the data fs to its partition (vda1), but everything
+    # around it already speaks whole-disk: the DSK row's queue attrs (sched/qdepth/
+    #   nr_rq) read the PARENT, the multi-disk path lifts leaf partitions to parents
+    #   for its counters, and the iostat page's stack lifts partitions too -- a plain
+    #   single-partition fs showing vda1 made the main screen disagree with iostat on
+    #   the same box, and partition-line io_ticks would under-report util when a
+    #   NEIGHBOUR partition is the one saturating the physical disk. dm/md fs devices
+    #   are NOT lifted (no sysfs partition file): the dm layer is the fs's own device
+    #   and keeps 2026-11-01's dm-on-one-disk semantics. The [FS] row still carries
+    #   the filesystem view (fstype/fs-size/mount), so nothing is lost by this.
+    if [ -n "$dev" ] && [ -f "/sys/class/block/$dev/partition" ]; then
+        dev=$(_vtop_parent_dev "$dev")
+    fi
     # ★multi-disk filesystem (user 2026-11-01): the data fs spanning several
     # physical disks (LVM/RAID) used to show ONE averaged dm/md line, which
     # hides the straggler -- DSK/I-O rows now follow the WORST disk by read+
