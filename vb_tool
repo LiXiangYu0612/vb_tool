@@ -28869,7 +28869,10 @@ _vtop_screen_cpu() { # mpstat -P ALL: per-core split the main screen lacks
     # mpstat version), ordered busiest first, with the same trailing omission
     # note the stack page uses. Selection sort (20 passes over n rows) keeps it
     # plain awk -- no asort/gawk dependency.
-    timeout 8 mpstat -P ALL 1 2 2>/dev/null | _vtop_sar_lastblock | awk '
+    # ★单拍即真 1s 窗 (用户令 2026-11-16: "为什么要2 执行一次不就好了"): 204 实测
+    #   mpstat -P ALL 1 1 单拍值≠开机均值(2.05/93.85 vs 7.79/88.56), 无 iostat 式
+    #   首拍 since-boot 毛病, 2 拍白等 1s; vmstat 页例外(首行真是开机均值, 保留 2)。
+    timeout 8 mpstat -P ALL 1 1 2>/dev/null | _vtop_sar_lastblock | awk '
         NR == 1 { hdr = $0; next }
         NR == 2 { allr = $0; next }
         { rows[++n] = $0; busy[n] = 100 - $NF }
@@ -29011,7 +29014,8 @@ _vtop_screen_net() { # sar -n DEV: per-interface rates (main NET row sums physic
         printf '%s  !! sar not found (sysstat)%s\n' "${c_red:-}" "${c_off:-}"
         return 0
     fi
-    timeout 8 sar -n DEV 1 2 2>/dev/null | _vtop_sar_lastblock \
+    # ★单拍即真 1s 窗 (同 cpu 页 2026-11-16 实测, 2 拍白等 1s)
+    timeout 8 sar -n DEV 1 1 2>/dev/null | _vtop_sar_lastblock \
         || printf '%s  !! sar produced no rows%s\n' "${c_red:-}" "${c_off:-}"
     _vtop_sec "nstat top deltas"
     _vtop_nstat || printf '%s  !! /proc/net/netstat or /proc/net/snmp unreadable%s\n' "${c_red:-}" "${c_off:-}"
