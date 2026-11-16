@@ -30285,7 +30285,7 @@ order by s.sz desc;"
         # 消费者 (2026-09-28 审计发现并删除): 白扔一次进程创建, 屏幕上也从没出现过。
 
         # ---- DB sections ----
-        local db section="" h_node h_ver h_up h_clk="" s_tot s_act s_iit s_idle s_ltx s_avac s_smp s_jdbc m_used m_max m_shmax m_shused m_dyu m_dym m_dyp m_shr m_shrp m_other m_sbuf x_cur x_ckr x_old x_cbm x_cnt x_sz x_rest x_arch r_app r_state r_sync r_sent r_wr r_fl r_rp r_slot r_dsent r_dwr r_dfl r_drp r_net r_fs r_ap r_tot
+        local db section="" h_node h_ver h_up h_clk s_tot s_act s_iit s_idle s_ltx s_avac s_smp s_jdbc m_used m_max m_shmax m_shused m_dyu m_dym m_dyp m_shr m_shrp m_other m_sbuf x_cur x_ckr x_old x_cbm x_cnt x_sz x_rest x_arch r_app r_state r_sync r_sent r_wr r_fl r_rp r_slot r_dsent r_dwr r_dfl r_drp r_net r_fs r_ap r_tot
         local r_sqlid r_cpu r_ns r_rn r_et r_sql ms_sid ms_sz ms_sql
         local cpupairs="0,0" VT_TOP
         # ★[TOPSQL] cpu 采样改回 `as` 的算法 (user's call 2026-10-10: 「cpu%感觉也是
