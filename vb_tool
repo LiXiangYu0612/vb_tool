@@ -26038,10 +26038,11 @@ vtop_help() {
     echo "               / block roots / top SQL (grouped by sqlid, ranked by real CPU%)"
     echo "               / wait distribution"
     echo "    -P <port>: database port (default: current \$PGPORT)"
-    echo "    -i <sec>:   DB part interval, 1-60 (default 15): main-screen DB sections and
-                DB sub-pages baseline. DB sub-pages default 5s
-    -O <sec>:   OS part interval, 1-60 (default 3): main-screen OS rows and OS
-                sub-pages (iostat/cpu/vmstat/net); the frame ticks at this pace"
+    echo "    -I <sec>:   DB MAIN-screen interval, 1-60 (default 15)
+    -i <sec>:   DB SUB-screen interval, 1-60 (default 5)
+    -O <sec>:   OS MAIN-screen interval, 1-60 (default 3) -- the frame tick
+    -o <sec>:   OS SUB-screen interval, 1-60 (default 3)
+    (upper case = main screen, lower case = sub-screen)"
     echo "    --once:     print one frame and exit (non-interactive)"
     echo "    --no-color: no ANSI colour (keeps the in-place redraw); also honoured:"
     echo "                the NO_COLOR environment variable and TERM=dumb/empty"
@@ -29386,13 +29387,17 @@ SQLEOF
 }
 
 run_vtop() {
-    local interval=15 osint=3 once=0 want_color="" want_plain=0
+    local interval=15 osint=3 dbsub=5 ossub=3 once=0 want_color="" want_plain=0
     while [ $# -gt 0 ]; do
         case "$1" in
+            -I)       [ $# -lt 2 ] && { echo "Error: -I requires a value (seconds)" >&2; return 2; }
+                      dbint="$2"; shift 2;;
             -i)       [ $# -lt 2 ] && { echo "Error: -i requires a value (seconds)" >&2; return 2; }
-                      interval="$2"; shift 2;;
+                      dbsub="$2"; shift 2;;
             -O)       [ $# -lt 2 ] && { echo "Error: -O requires a value (seconds)" >&2; return 2; }
                       osint="$2"; shift 2;;
+            -o)       [ $# -lt 2 ] && { echo "Error: -o requires a value (seconds)" >&2; return 2; }
+                      ossub="$2"; shift 2;;
             -n)       echo "Error: -n is no longer supported (the main screen's TOPSQL shows one top-1 row, and only when cpu_usage% > 50)" >&2; return 2;;
             --once)   once=1; shift;;
             # ---- terminal capability switches (user's question 2026-09-27:
@@ -29401,7 +29406,7 @@ run_vtop() {
             --no-color) want_color=0; shift;;
             --plain)    want_plain=1; shift;;    # no colour AND no cursor control
             -h|--help) vtop_help; return 0;;
-            *)        echo "Error: unknown option '$1' (usage: vb_tool vtop [-i <db_sec>] [-O <os_sec>] [--once] [--color|--no-color|--plain])" >&2; return 2;;
+            *)        echo "Error: unknown option '$1' (usage: vb_tool vtop [-I <db_sec>] [-i <db_sub>] [-O <os_sec>] [-o <os_sub>] [--once] [--color|--no-color|--plain])" >&2; return 2;;
         esac
     done
     case "$interval" in ''|*[!0-9]*) echo "Error: -i expects seconds (1-60)" >&2; return 2;; esac
@@ -29412,6 +29417,20 @@ run_vtop() {
     case "$osint" in ''|*[!0-9]*) echo "Error: -O expects seconds (1-60)" >&2; return 2;; esac
     if [ "$osint" -lt 1 ] || [ "$osint" -gt 60 ]; then echo "Error: -O must be 1-60" >&2; return 2; fi
     osint=$((10#$osint))
+    # ★flag scheme (user 2026-11-16): UPPER = main screen, lower = sub-screen.
+    # -I db main (was -i) / -i db subs (default 5) / -O os main (frame tick) /
+    # -o os subs (default 3). 注意变量: interval is the DB main cadence.
+    if [ -n "${dbint:-}" ]; then
+        case "$dbint" in ''|*[!0-9]*) echo "Error: -I expects seconds (1-60)" >&2; return 2;; esac
+        { [ "$dbint" -ge 1 ] && [ "$dbint" -le 60 ]; } 2>/dev/null || { echo "Error: -I must be 1-60" >&2; return 2; }
+        interval=$((10#$dbint))
+    fi
+    case "$dbsub" in ''|*[!0-9]*) echo "Error: -i expects seconds (1-60)" >&2; return 2;; esac
+    { [ "$dbsub" -ge 1 ] && [ "$dbsub" -le 60 ]; } 2>/dev/null || { echo "Error: -i must be 1-60" >&2; return 2; }
+    dbsub=$((10#$dbsub))
+    case "$ossub" in ''|*[!0-9]*) echo "Error: -o expects seconds (1-60)" >&2; return 2;; esac
+    { [ "$ossub" -ge 1 ] && [ "$ossub" -le 60 ]; } 2>/dev/null || { echo "Error: -o must be 1-60" >&2; return 2; }
+    ossub=$((10#$ossub))
     local os_tick=$osint
     [ "$interval" -lt "$os_tick" ] && os_tick=$interval
     # ★前导零必须归一化 (2026-09-28 修的可复现崩溃): `[ "08" -lt 1 ]` 和 `[ "08" -gt 60 ]`
@@ -29932,7 +29951,7 @@ order by s.sz desc;"
     trap '[ "$interactive" = "1" ] && [ -t 0 ] && stty -echo 2>/dev/null' CONT
     local _vtop_dbcache
     _vtop_dbcache=$(mktemp /tmp/vbtop_dbcache.XXXXXX)
-    local db_next=0 db_ok=0 db_dirty=1   # schedule, reachability, unrendered-collect flag
+    local db_next=0 db_ok=0 db_dirty=1 t_db_ms=0 dbdt=15000   # schedule, reachability, unrendered flag, last-collect ms, measured DB window ms
     local screen="main"          # active screen: main | mem (one screen runs at a time)
     local interactive=0 # key legend line: only when a human is
     [ -t 1 ] && [ "$once" != "1" ] && interactive=1
@@ -29983,14 +30002,14 @@ order by s.sz desc;"
             if [ "$screen" = "main" ]; then
                 rd_tmo=$os_tick
             else
-                # ★DB sub-screens: default 5s (user 2026-11-16), never above the
-                # DB main cadence; replaces the old 3x-interval-capped-15 pacing
-                rd_tmo=5; [ "$interval" -lt 5 ] && rd_tmo=$interval
+                # ★DB sub-screens follow -i (default 5s, user 2026-11-16);
+                # replaces the old 3x-interval-capped-15 pacing
+                rd_tmo=$dbsub
                 # ★OS-side pages: flat 3s, and the 5s first-refresh rule below does
                 # NOT apply to them (user's call 2026-09-28). Inert while
                 # _vtop_os_screens is empty -- no OS page exists yet.
                 case " ${_vtop_os_screens} " in *" ${screen} "*)
-                    rd_tmo=$os_tick; sub_first=0;;
+                    rd_tmo=$ossub; sub_first=0;;
                 esac
                 # ★only the DELTA pages keep the quick 5s first refresh (user's call
                 # 2026-09-28: 「m的时候 第一次刷新也是15s吧 因为这个不需要增量 而且
@@ -30314,6 +30333,12 @@ limit 1;
         # cached DB tail with fresh OS numbers. db/db_ok/db_next are the cache.
         if [ "$((t1 / 1000))" -ge "$db_next" ]; then
         db=$(_vtop_db_collect "$(printf '%s\n%s\n' "$VT_SQL" "$VT_TOP")")
+        # ★DB rates divide by the MEASURED window between collects (user
+        # 2026-11-16: ISTAT 按 DB 采样间隔), never the frame dt -- with dual
+        # cadence frame dt (~3s) and collect window (~-I s) differ, and frame
+        # dt inflated every DB-side rate by interval/os_tick.
+        if [ "$t_db_ms" -gt 0 ] && [ "$t1" -gt "$t_db_ms" ]; then dbdt=$((t1 - t_db_ms)); else dbdt=$((interval * 1000)); fi
+        t_db_ms=$t1
         # ★完整性哨兵 (2026-09-26 设计, 2026-11-05 语义更新): ===EOD 由收集器在
         # >=1 段出数时补发; 空 db = 一段都没出数 = 库不可达 -> 整帧走"DB 不可用"路径
         # (头部 (db unreachable) + OS 块)。段内不再有"被砍的半截流": 每段要么完整
@@ -30560,26 +30585,26 @@ printf '           %-14s %-22s %-8.8s %-9s %.62s\n' "-" "-" "-" "-" "-"
                           # 任何一个计数器回退 ⇒ 当作"还没有基线": 本帧全 '-', 本帧值留作新基线。
                           # 整组 { } 统一吃掉 stderr: 某列万一为空串时 [ x -ge y ] 会报
                           # integer expression expected, 不该刷到用户屏幕上。
-                          if { [ -n "$prev_lsn" ] && [ "$dt" -gt 0 ] \
+                          if { [ -n "$prev_lsn" ] && [ "$dbdt" -gt 0 ] \
                                && [ "$i_lsn" -ge "$prev_lsn" ] && [ "$i_xc" -ge "$prev_xc" ] \
                                && [ "$i_xr" -ge "$prev_xr" ] && [ "$i_br" -ge "$prev_br" ] \
                                && [ "$i_bh" -ge "$prev_bh" ] && [ "$i_tb" -ge "$prev_tb" ] \
                                && [ "$i_nc" -ge "$prev_nc" ] && [ "$i_pw" -ge "$prev_pw" ] \
                                && [ "$i_dl" -ge "$prev_dl" ]; } 2>/dev/null; then
                               # ★every rate below is a DELTA over the sampling interval (user's spec)
-                              _qps=$(( (i_nc - prev_nc) * 1000 / dt ))
-                              _cm=$(( (i_xc - prev_xc) * 1000 / dt ))
-                              _rb=$(( (i_xr - prev_xr) * 1000 / dt ))
-                              _lg=$(( (i_br - prev_br + i_bh - prev_bh) * 1000 / dt * 8192 ))
-                              _ph=$(( (i_br - prev_br) * 1000 / dt * 8192 ))
-                              _rd=$(( (i_lsn - prev_lsn) * 1000 / dt ))
-                              _tp=$(( (i_tb - prev_tb) * 1000 / dt ))
+                              _qps=$(( (i_nc - prev_nc) * 1000 / dbdt ))
+                              _cm=$(( (i_xc - prev_xc) * 1000 / dbdt ))
+                              _rb=$(( (i_xr - prev_xr) * 1000 / dbdt ))
+                              _lg=$(( (i_br - prev_br + i_bh - prev_bh) * 1000 / dbdt * 8192 ))
+                              _ph=$(( (i_br - prev_br) * 1000 / dbdt * 8192 ))
+                              _rd=$(( (i_lsn - prev_lsn) * 1000 / dbdt ))
+                              _tp=$(( (i_tb - prev_tb) * 1000 / dbdt ))
                               # pagewrite: pagewriter 累计刷页数的间隔增量,再 ×8192 转字节
                               # (与 logical/physical 同口径;也即 AWR join 里的 pages × BLCKSZ 8K)
-                              _pw=$(( (i_pw - prev_pw) * 1000 / dt * 8192 ))
+                              _pw=$(( (i_pw - prev_pw) * 1000 / dbdt * 8192 ))
                               # deadlocks/s (user's call 2026-09-28): plain counter delta,
                               # same sampling-interval convention as every other rate here
-                              _dl=$(( (i_dl - prev_dl) * 1000 / dt ))
+                              _dl=$(( (i_dl - prev_dl) * 1000 / dbdt ))
                               # values carry NO /s: the labels already say it (and the OS block
                               # never doubled it -- fault/s shows a bare number)
                               ist_qps=$_qps; ist_cm=$_cm; ist_roll=$_rb; ist_tps=$(( _cm + _rb ))
@@ -30594,16 +30619,22 @@ printf '           %-14s %-22s %-8.8s %-9s %.62s\n' "-" "-" "-" "-" "-"
                               ist_qps=""; ist_cm=""; ist_roll=""; ist_tps=""
                               ist_lg=""; ist_ph=""; ist_rd=""; ist_tp=""; ist_pw=""; ist_dl=""
                           fi
-                          prev_xc=$i_xc; prev_xr=$i_xr; prev_br=$i_br; prev_bh=$i_bh; prev_tb=$i_tb; prev_lsn=$i_lsn; prev_nc=$i_nc; prev_pw=$i_pw; prev_dl=$i_dl;;
+                          # roll the baselines ONLY on a non-empty ISTAT row: a
+                          # timed-out/empty segment must not wipe them (an empty
+                          # prev made the NEXT collect's guard fail on empty
+                          # strings -> a '-' chain until fresh baselines built)
+                          if [ -n "$i_lsn" ]; then
+                              prev_xc=$i_xc; prev_xr=$i_xr; prev_br=$i_br; prev_bh=$i_bh; prev_tb=$i_tb; prev_lsn=$i_lsn; prev_nc=$i_nc; prev_pw=$i_pw; prev_dl=$i_dl
+                          fi;;
                     XLOG) IFS='|' read -r x_cur x_ckr x_old x_cbm x_cnt x_sz x_rest x_arch <<< "$line";;
                     REPL) IFS='|' read -r r_app r_state r_sync r_sent r_wr r_fl r_rp r_slot <<< "$line"
                           n_repl=1   # ★这一帧确实有备库行 (见循环末尾 n_repl=0 的基线清理)
                           # ★LSN 四列按"每秒推进量"显示(user's call 2026-09-26),与全帧其它速率列同口径;
                           # 四个 lag 仍为瞬时值,由当前位点相减得到。首帧无基线 ⇒ 全 '-'
                           if [ -n "$prev_rsent" ] && [ -n "$r_sent" ] && [ "$dt" -gt 0 ] 2>/dev/null; then
-                              r_dsent=$(( (r_sent - prev_rsent) * 1000 / dt ))
-                              r_dwr=$(( (r_wr - prev_rwr) * 1000 / dt ))
-                              r_dfl=$(( (r_fl - prev_rfl) * 1000 / dt ))
+                              r_dsent=$(( (r_sent - prev_rsent) * 1000 / dbdt ))
+                              r_dwr=$(( (r_wr - prev_rwr) * 1000 / dbdt ))
+                              r_dfl=$(( (r_fl - prev_rfl) * 1000 / dbdt ))
                               r_drp=$(( (r_rp - prev_rrp) * 1000 / dt ))
                               r_net=$(( r_sent - r_wr )); r_fs=$(( r_wr - r_fl ))
                               r_ap=$(( r_fl - r_rp )); r_tot=$(( r_sent - r_rp ))
