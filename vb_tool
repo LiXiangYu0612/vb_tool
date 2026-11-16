@@ -26030,7 +26030,7 @@ PSQLEOF
 # ================== vtop: oratop-style real-time view ==================
 vtop_help() {
     echo "Options for vtop:"
-    echo "  Usage: vb_tool vtop [-i <db_sec>] [-O <os_sec>] [--once]"
+    echo "  Usage: vb_tool vtop [-I <db_sec>] [-i <db_sub_sec>] [-O <os_sec>] [-o <os_sub_sec>] [--once]"
     echo "  Description: real-time monitor -- CPU (top-style states) / memory (free-style)"
     echo "               / data_dir filesystem (df) + its disk IO (iops, MB/s, avg latency;"
     echo "               read and write split; lsds disk metadata) / network / dbmem"
@@ -26913,11 +26913,15 @@ _vtop_pg() { # $1=key $2=title $3=subtitle -- $2/$3 unused now (user's call
     # header is just the bracketed section name -- the SAME convention as the
     # main screen's rows, so a page and its [SECTION] cross-reference --
     # followed by the refresh cadence. Signature keeps $2/$3 so the 11 call
-    # sites stay untouched. Cadence = steady min(3x interval, 15s), the same
-    # formula the rd_tmo block uses (dynamic scope `interval`, cannot drift);
-    # the FIRST auto-refresh after entry is 5s and is not shown.
-    local r=$(( ${interval:-15} * 3 )); [ "$r" -gt 15 ] && r=15
-    case " ${_vtop_os_screens:-} " in *" $1 "*) r=3;; esac   # OS pages: flat 3s
+    # sites stay untouched.
+    # ★cadence = the page's REAL tick (2026-11-16 补漏): b795ccc 废除了 DB 子屏的
+    # 3x-interval 系数 (rd_tmo 改跟 -i/dbsub), 但本横幅还印着老公式 -- 默认参数下
+    # 页面实际 5s 一刷、横幅却写 "refresh 15s"; OS 子屏同理恒印 3、-o 10 时照印 3。
+    # DB 页 = -i (dbsub, 默认 5), OS 页 = -o (ossub, 默认 3), 两者都经动态作用域
+    # 从 run_vtop 的 local 传入, 与 rd_tmo 分支同源不再漂移; the FIRST auto-refresh
+    # after entry is 5s (quick pages) and is not shown.
+    local r=${dbsub:-5}
+    case " ${_vtop_os_screens:-} " in *" $1 "*) r=${ossub:-3};; esac   # OS pages: -o
     printf '\n'
     # ★timestamp after the cadence (user's call 2026-09-28: 「每个子界面我需要时间加在
     #   [XLOG]   refresh 15s 后面，不然我没法确定是否刷新了」) -- same format and the
@@ -29387,7 +29391,7 @@ SQLEOF
 }
 
 run_vtop() {
-    local interval=15 osint=3 dbsub=5 ossub=3 once=0 want_color="" want_plain=0
+    local interval=15 osint=3 dbsub=5 ossub=3 dbint="" once=0 want_color="" want_plain=0
     while [ $# -gt 0 ]; do
         case "$1" in
             -I)       [ $# -lt 2 ] && { echo "Error: -I requires a value (seconds)" >&2; return 2; }
@@ -29409,8 +29413,9 @@ run_vtop() {
             *)        echo "Error: unknown option '$1' (usage: vb_tool vtop [-I <db_sec>] [-i <db_sub>] [-O <os_sec>] [-o <os_sub>] [--once] [--color|--no-color|--plain])" >&2; return 2;;
         esac
     done
-    case "$interval" in ''|*[!0-9]*) echo "Error: -i expects seconds (1-60)" >&2; return 2;; esac
-    if [ "$interval" -lt 1 ] || [ "$interval" -gt 60 ]; then echo "Error: -i must be 1-60" >&2; return 2; fi
+    # ★2026-11-16 旗标改版清障: 这里原有一段对 `interval` 的校验 (文案还写着 -i),
+    # 但 -I 的值在下方才经 dbint 落进 interval -- 该段校验的永远是常量默认 15,
+    # 永不触发 = 死代码, 已删。真正的 -I 校验在下面 dbint 分支里。
     # ★dual cadence (user 2026-11-16): -i = DB part (DB sections + DB sub-screens),
     # -O = OS part (main-screen OS rows + OS sub-screens). The frame TICK follows
     # the OS cadence, never slower than the DB one.
@@ -30631,11 +30636,17 @@ printf '           %-14s %-22s %-8.8s %-9s %.62s\n' "-" "-" "-" "-" "-"
                           n_repl=1   # ★这一帧确实有备库行 (见循环末尾 n_repl=0 的基线清理)
                           # ★LSN 四列按"每秒推进量"显示(user's call 2026-09-26),与全帧其它速率列同口径;
                           # 四个 lag 仍为瞬时值,由当前位点相减得到。首帧无基线 ⇒ 全 '-'
-                          if [ -n "$prev_rsent" ] && [ -n "$r_sent" ] && [ "$dt" -gt 0 ] 2>/dev/null; then
+                          # ★dbdt for ALL FOUR (2026-11-16 补漏): a2d0bfc 把
+                          # sent/write/flush 三列的分母换成了实测采集窗 dbdt, 但
+                          # replay/s 还在除帧 dt -- 双频下 dbdt(~15s)/dt(~3s) 不同,
+                          # replay/s 恒虚高 interval/os_tick 倍 (单元 RED: 四列同
+                          # 1000B/s 的备库, 前三列 1000、replay/s 5000)。四列的
+                          # prev_* 同在采集帧滚动, 窗口同为 dbdt; 守卫也一并换。
+                          if [ -n "$prev_rsent" ] && [ -n "$r_sent" ] && [ "$dbdt" -gt 0 ] 2>/dev/null; then
                               r_dsent=$(( (r_sent - prev_rsent) * 1000 / dbdt ))
                               r_dwr=$(( (r_wr - prev_rwr) * 1000 / dbdt ))
                               r_dfl=$(( (r_fl - prev_rfl) * 1000 / dbdt ))
-                              r_drp=$(( (r_rp - prev_rrp) * 1000 / dt ))
+                              r_drp=$(( (r_rp - prev_rrp) * 1000 / dbdt ))
                               r_net=$(( r_sent - r_wr )); r_fs=$(( r_wr - r_fl ))
                               r_ap=$(( r_fl - r_rp )); r_tot=$(( r_sent - r_rp ))
                           fi
