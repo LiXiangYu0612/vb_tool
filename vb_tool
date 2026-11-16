@@ -26814,6 +26814,8 @@ _vtop_hum() { # kB -> human
 #   inside a command substitution, so both sides compute the same path.
 _vtop_q() { # $1 = SQL; rows on stdout ('|'-separated); errors -> /tmp/vbtop_q.$$.err
     local _qrc
+    # ★连接库写死 postgres = 用户拍板 (2026-11-16: "写死postgres 没事的啊"),
+    #   勿再"修"; 曾评估过跟随 PGDATABASE 以覆盖每库一份的 dbe_perf 视图, 已否。
     PGCONNECT_TIMEOUT=5 PGOPTIONS='-c statement_timeout=5000' \
         timeout 12 psql -d postgres -X -q -A -t -F'|' -c "$1" 2>"/tmp/vbtop_q.$$.err"
     _qrc=$?
