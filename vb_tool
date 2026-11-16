@@ -27380,7 +27380,10 @@ from pg_stat_database"
     #   下一帧自然拿到正常窗口。阈值公式与 rp_lim/we_lim 同源: min(3×节律,15s)×3,
     #   下限 20s; 单位毫秒(is_t1 是 %s%3N 毫秒, 阈值也必须毫秒 —— rp_lim 第一版
     #   写成秒的教训在案)。
-    is_lim=$(( ${interval:-15} * 3 )); [ "$is_lim" -gt 15 ] && is_lim=15
+    # ★节律跟 -i 不跟 -I (2026-11-16 旗标改版同族补漏): 本页真实节律是 dbsub
+    #   (默认 5s), 不是主屏 DB 节律 interval —— 旧引用 interval 在 -i<5 时阈值
+    #   恒 45s (9-22 倍节律), 离页 40s 回来首帧照样拿超长窗口平均。
+    is_lim=$(( ${dbsub:-5} * 3 )); [ "$is_lim" -gt 15 ] && is_lim=15
     is_lim=$(( is_lim * 3 * 1000 )); [ "$is_lim" -lt 20000 ] && is_lim=20000
     [ "$is_dt" -gt "$is_lim" ] && is_dt=0
     # no baseline (first render) -> is_a empty and is_dt 0: every rate renders '-'
@@ -27532,7 +27535,9 @@ _vtop_screen_wait() { # WAIT page -- two blocks, both [SESS]-style (boxed banner
     #   refresh 15s。超阈值就把基线当作不存在(与"首次进页没有基线文件"走同一条路: 本节
     #   只显示 '-' 占位行), 下一帧自然恢复。we_pts 以前读出来却没人用, 现在正是用它。
     # ★单位必须与 we_pts 一致(毫秒, date +%s%3N); 第一版写成秒 ⇒ 恒定判定过期。见 REPL 页同注。
-    we_lim=$(( ${interval:-15} * 3 )); [ "$we_lim" -gt 15 ] && we_lim=15
+    # ★节律跟 -i 不跟 -I (2026-11-16 旗标改版同族补漏, 同 is_lim/rp_lim): 本页
+    #   真实节律是 dbsub, 旧引用 interval 在 -i<5 时阈值恒 45s。
+    we_lim=$(( ${dbsub:-5} * 3 )); [ "$we_lim" -gt 15 ] && we_lim=15
     we_lim=$(( we_lim * 3 * 1000 )); [ "$we_lim" -lt 20000 ] && we_lim=20000
     if [ -n "$we_pts" ] && [ "$(( $(date +%s%3N) - we_pts ))" -gt "$we_lim" ]; then
         we_pt=(); we_pw=(); we_pdb=0
@@ -27870,7 +27875,10 @@ order by a.application_name")
     # ★单位必须与时间戳一致: rp_t1 是 date +%s%3N 的**毫秒**, 所以阈值也要毫秒
     #   (第一版写成秒了 ⇒ 5.1 秒的窗口 5157 > 45 恒成立 ⇒ 每帧都判过期、速率列永远 '-'。
     #    插桩实测抓到)。公式: 节律(秒) ×3 再 ×1000, 下限 20 秒。
-    rp_lim=$(( ${interval:-15} * 3 )); [ "$rp_lim" -gt 15 ] && rp_lim=15
+    # ★节律跟 -i 不跟 -I (2026-11-16 旗标改版同族补漏, 同 is_lim/we_lim): 本页
+    #   真实节律是 dbsub (默认 5s), 旧引用主屏 interval 在 -i<5 时阈值恒 45s
+    #   (9-22 倍节律), 离页 40s 回来首帧照样拿 40s 窗口平均当速率。
+    rp_lim=$(( ${dbsub:-5} * 3 )); [ "$rp_lim" -gt 15 ] && rp_lim=15
     rp_lim=$(( rp_lim * 3 * 1000 )); [ "$rp_lim" -lt 20000 ] && rp_lim=20000
     [ "$rp_dt" -gt "$rp_lim" ] && rp_dt=0
     printf '\n'
