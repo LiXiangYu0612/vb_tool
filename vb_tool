@@ -26130,6 +26130,29 @@ _vtop_disk_expand() {
     printf '%s\n' "$out"
 }
 
+# _vtop_disk_stack <dev> -- EVERY layer from the fs device down to the
+# paths (multipath/LVM sandwiches): lv-dm -> mpath-dm -> sd path disks all
+# appear, deduped, partitions lifted. The iostat page needs each layer --
+# _vtop_disk_expand returns LEAVES only, which skips the mpath dm between
+# the LV and its path disks (user 2026-11-16: 多路径多盘符).
+_vtop_disk_stack() {
+    local _ds_seen=""
+    _vtop_stack_rec() {
+        local cur="$1" depth=$2 d p
+        [ "$depth" -ge 8 ] && return
+        if [ -f "/sys/class/block/$cur/partition" ]; then
+            p=$(_vtop_parent_dev "$cur"); [ -n "$p" ] && cur="$p"
+        fi
+        case " $_ds_seen " in *" $cur "*) return;; esac
+        _ds_seen="$_ds_seen $cur"
+        printf '%s\n' "$cur"
+        for d in /sys/class/block/$cur/slaves/*; do
+            [ -e "$d" ] && _vtop_stack_rec "${d##*/}" $((depth+1))
+        done
+    }
+    _vtop_stack_rec "$1" 0
+}
+
 # same 8 fields as _vtop_diskstats but for EVERY candidate at once, one line
 # per device ("name:f1 f2 .. f8") -- the worst-disk picker keys off the name.
 # A device absent from a sample simply has no line = no baseline, so it is
@@ -28463,13 +28486,21 @@ _vtop_screen_stack() { # STACK page -- `vb_tool stack`'s SUMMARY part only
 # live reading -- and only the LAST "Device:" block is kept (each interval
 # block repeats the header on sysstat 10/11/12, verified on 204's 10.1.5).
 _vtop_screen_iostat() {
-    local dset="$dev" d
-    # dev = the fs device (dm-X on LVM); devs = expanded physical members
-    # (ndev>1 only). Both layers, deduped, fs device first; a plain single-
-    # disk fs just shows that disk (lifted parent if the expand did it).
-    for d in ${devs:-}; do
-        case " $dset " in *" $d "*) ;; *) dset="$dset $d";; esac
-    done
+    # full stack: fs device + every intermediate layer (mpath dm) + leaves
+    # (paths). _vtop_disk_expand's leaf-only view skips the mpath layer of an
+    # LVM-on-multipath sandwich; a plain single-disk fs still shows one disk.
+    local dset
+    dset=$(_vtop_disk_stack "$dev" | tr '\n' ' ')
+    dset="${dset% }"; dset="${dset# }"
+    [ -n "$dset" ] || dset="$dev"
+    # extra devices from custom tablespaces / relocated WAL were resolved ONCE
+    # at startup into $tsdevs (user 2026-11-16: 不必每帧重查 pg_tblspc)
+    case " $dset " in
+        *" $tsdevs "*) ;;
+        *) for _d in ${tsdevs:-}; do
+               case " $dset " in *" $_d "*) ;; *) dset="$dset $_d";; esac
+           done ;;
+    esac
     _vtop_pg iostat
     _vtop_sec "iostat -xm"   # banner = boxify trigger: page content gets the frame
     if ! command -v iostat >/dev/null 2>&1; then
@@ -28489,7 +28520,100 @@ _vtop_screen_iostat() {
         buf != "" && NF > 1 { buf = buf $0 "\n" }
         END { if (buf == "") exit 1; printf "%s", buf }
     ' || printf '%s  !! iostat produced no rows for: %s%s\n' "${c_red:-}" "$dset" "${c_off:-}"
+    _vtop_sec "vb thread IO top"
+    _vtop_procio || printf '%s  !! /proc 不可读%s\n' "${c_red:-}" "${c_off:-}"
     printf '\n'
+}
+
+# ★proc IO top (user 2026-11-16: iostat 页要 iotop 的效果, 但 iotop 不是所有环境都有).
+# iotop itself (data.py): default output is THREAD granularity (-P aggregates)
+# and its /proc fallback reads the same io files -- this box matches that
+# semantics without netlink/root. /proc/<pid>/io IS iotop's fallback source --
+# per-process cumulative
+# read_bytes/write_bytes; two snapshots over a measured window give the
+# per-process IO rate with zero external dependencies. Permissions: the file
+# is 0400-owner, so as the DB user the instance's OWN processes (the ones
+# worth watching) are readable; other users' processes are skipped, root sees
+# all. Threads are included in their process's counters (thread group).
+_vtop_procio_snap() { # -> "tid read_bytes write_bytes comm" lines (THREAD level)
+    # VastBase runs a thread pool inside the postmaster process -- per-PROCESS
+    # io would merge every session into one row. /proc/<pid>/task/<tid>/io
+    # gives one counter set per thread (each thread exactly once; the group
+    # leader's /proc/<pid>/io line is the thread SUM and is not walked), and
+    # a thread's tid is the same id family VB sessionids are built from, so
+    # rows cross-reference with the sess page.
+    awk 'BEGIN {
+        while (("ls -d /proc/[0-9]*/task/[0-9]*" | getline d) > 0) {
+            tid = substr(d, match(d, /task\//) + 5)
+            f = d "/io"
+            rb = wb = sc = sw = -1
+            while ((getline l < f) > 0) {
+                # strip the "label:" prefix BEFORE the numeric cast -- awk
+                # coercion of "read_bytes: 123" is 0, not 123
+                ci = index(l, ":")
+                if      (l ~ /^read_bytes:/)  rb = substr(l, ci + 1) + 0
+                else if (l ~ /^write_bytes:/) wb = substr(l, ci + 1) + 0
+                else if (l ~ /^syscr:/)       sc = substr(l, ci + 1) + 0
+                else if (l ~ /^syscw:/)       sw = substr(l, ci + 1) + 0
+            }
+            close(f)
+            if (rb < 0 || wb < 0) continue   # unreadable (other uid) or vanished
+            comm = ""
+            if ((getline c < (d "/comm")) > 0) { gsub(/[[:space:]]/, "_", c); comm = c }
+            close(d "/comm")
+            printf "%s %s %s %s %s %s\n", tid, rb, wb, sc, sw, comm
+        }
+        close("ls -d /proc/[0-9]*/task/[0-9]*")
+    }' 2>/dev/null
+}
+
+# rank processes by read+write delta in the window; human rates, top rows only
+_vtop_procio() { # -> "pid comm read/s write/s" ranked rows, or a no-IO note
+    local a b t0 t1
+    t0=$(date +%s%3N)
+    a=$(_vtop_procio_snap)
+    sleep 1
+    b=$(_vtop_procio_snap)
+    t1=$(date +%s%3N)
+    [ -n "$b" ] || return 1
+    [ "$t1" -gt "$t0" ] 2>/dev/null || t1=$((t0 + 1000))
+    printf '%s\n\n%s\n' "$a" "$b" | awk -v top=20 -v ms=$((t1 - t0)) '
+        NF == 0 { second = 1; next }
+        {
+            p = $1
+            if (!second) { Ar[p] = $2; Aw[p] = $3; As[p] = $4; Ax[p] = $5 }
+            else         { Br[p] = $2; Bw[p] = $3; Bs[p] = $4; Bx[p] = $5; Cm[p] = $6 }
+        }
+        function h(v) {
+            if (v >= 1073741824) return sprintf("%.1fG", v / 1073741824)
+            if (v >= 1048576)    return sprintf("%.1fM", v / 1048576)
+            if (v >= 1024)       return sprintf("%.1fK", v / 1024)
+            return sprintf("%d", v)
+        }
+        END {
+            s = ms / 1000; if (s <= 0) s = 1
+            n = 0
+            for (p in Br) {
+                if (!(p in Ar)) continue
+                dr = Br[p] - Ar[p]; dw = Bw[p] - Aw[p]
+                ds = Bs[p] - As[p]; dx = Bx[p] - Ax[p]
+                if (dr + dw > 0 || ds + dx > 0) { n++; P[n] = p; D[n] = dr + dw; R[n] = dr; W[n] = dw; SR[n] = ds; SW[n] = dx }
+            }
+            if (n == 0) { print "(窗口内无线程块设备 IO, 或仅其他用户的线程不可读)"; exit }
+            m = (n < top ? n : top)
+            for (i = 1; i <= m; i++) {
+                best = 0
+                for (j = 1; j <= n; j++)
+                    if (!U[j] && (best == 0 || D[j] > D[best])) best = j
+                U[best] = 1; QP[i] = P[best]; QR[i] = R[best]; QW[i] = W[best]; QC[i] = Cm[P[best]]; QS[i] = SR[best]; QT[i] = SW[best]
+            }
+            printf "%-8s %-16s %10s %10s %8s %8s\n", "tid", "thread", "read/s", "write/s", "syscr/s", "syscw/s"
+            for (i = 1; i <= m; i++)
+                printf "%-8s %-16s %10s %10s %8d %8d\n", QP[i], substr(QC[i], 1, 16), h(QR[i] / s), h(QW[i] / s), QS[i] / s, QT[i] / s
+            tr = tw = ts = tx = 0
+            for (j = 1; j <= n; j++) { tr += R[j]; tw += W[j]; ts += SR[j]; tx += SW[j] }
+            printf "%-8s %-16s %10s %10s %8d %8d\n", "total", "(" n " threads)", h(tr / s), h(tw / s), ts / s, tx / s
+        }'
 }
 
 # ★OS sub-pages (user 2026-11-14, same session as iostat: cpu / mem / net).
@@ -28647,7 +28771,7 @@ _vtop_nstat() { # -> ranked "name delta rate/s" rows (two per line), or a no-cha
     # diff pass knows where a ends and b starts ($a has no trailing newline).
     # rate/s uses the MEASURED window ms (snapshot reads take time on top of
     # the sleep) so delta and rate are two genuinely different numbers
-    printf '%s\n\n%s\n' "$a" "$b" | awk -v top=30 -v ms=$((t1 - t0)) '
+    printf '%s\n\n%s\n' "$a" "$b" | awk -v top=20 -v ms=$((t1 - t0)) '
         BEGIN { ex = "Octets$|InSegs$|OutSegs$|InReceives$|OutRequests$|InDelivers$|OutTransmits$|McastPkts$|BcastPkts$|InMsgs$|OutMsgs$|Datagrams$|InNoECTPkts$|TCPOrigDataSent$|TCPDelivered$|TCPPureAcks$|TCPRcvCoalesce$|TCPAutoCorking$|TCPHPHits$|TCPHPAcks$" }
         NF == 0 { second = 1; next }
         {
@@ -29154,6 +29278,22 @@ run_vtop() {
         fi
     fi
     datadir="${datadir:-unknown}"
+    # Custom tablespaces (and a relocated WAL dir) can live on OTHER
+    # filesystems: their device stacks are resolved ONCE here and reused by
+    # the iostat page every frame (same-fs ones dedup away silently).
+    tsdevs=""
+    if [ -d "$datadir/pg_tblspc" ]; then
+        for _t in "$datadir"/pg_tblspc/* "$datadir"/pg_xlog "$datadir"/pg_wal; do
+            [ -L "$_t" ] || continue
+            _tdir=$(readlink -f "$_t" 2>/dev/null)
+            [ -n "$_tdir" ] && [ -d "$_tdir" ] || continue
+            _tdev=$(_vtop_disk_dev "$_tdir") || continue
+            for _d in $(_vtop_disk_stack "$_tdev"); do
+                case " $tsdevs " in *" $_d "*) ;; *) tsdevs="$tsdevs $_d";; esac
+            done
+        done
+        tsdevs="${tsdevs# }"
+    fi
     devinfo=""
     [ -n "$dev" ] && devinfo=$(_vtop_devinfo "$dev")
     fsinfo=""        # data_dir filesystem (df asked about that one path), per frame
