@@ -29961,7 +29961,7 @@ order by s.sz desc;"
     trap '[ "$interactive" = "1" ] && [ -t 0 ] && stty -echo 2>/dev/null' CONT
     local _vtop_dbcache
     _vtop_dbcache=$(mktemp /tmp/vbtop_dbcache.XXXXXX)
-    local db_next=0 db_ok=0 db_dirty=1 t_db_ms=0 dbdt=15000   # schedule, reachability, unrendered flag, last-collect ms, measured DB window ms
+    local db_next=0 db_ok=0 db_dirty=1 prev_ist_ms=0 prev_rp_ms=0   # schedule, reachability, unrendered flag, per-section baseline stamps (ms)
     local screen="main"          # active screen: main | mem (one screen runs at a time)
     local interactive=0 # key legend line: only when a human is
     [ -t 1 ] && [ "$once" != "1" ] && interactive=1
@@ -29983,6 +29983,7 @@ order by s.sz desc;"
 
     # ---- sampling loop ----
     local t0 t1 d0 d1 c0 c1 n0 n1 dt key rrc rd_tmo
+    local ist_w rp_w ist_wmax rp_wmax   # DB 侧两段各自的实测窗口(ms)与过期上限
     local a_user a_nice a_sys a_idle a_iowait a_irq a_softirq a_steal a_fmax a_fmin a_favg
     local a_vbcpu v0 v1 clk
     local t_lis t_est t_sr t_ss t_f1 t_f2 t_tw t_cw t_la t_cl t_oth
@@ -30070,10 +30071,12 @@ order by s.sz desc;"
                         # stay (tps / iops / EVENT would show a bogus value)
                         t0=$(date +%s%3N); d0=$(_vtop_dsample); c0=$(_vtop_cpustat); n0=$(_vtop_net); p0=$(_vtop_procs); g0=$(_vtop_pgc); v0=$(_vtop_vbcpu "$(_vtop_vbcpu_pid)")
                         prev_xc=""; prev_xr=""; prev_br=""; prev_bh=""; prev_tb=""; prev_lsn=""; ist_qps=""; ist_cm=""; ist_roll=""; ist_tps=""; ist_lg=""; ist_ph=""; ist_pw=""; ist_rd=""; ist_tp=""; ist_dl=""
+                        prev_ist_ms=0
                         # ★REPL 每帧复位:显示值 + 基线。基线一并清 ⇒ 备库消失/重连后的首帧显示 '-'(不会跨空档算出一个巨大的假增量)
                         r_app=""; r_state=""; r_sync=""; r_sent=""; r_wr=""; r_fl=""; r_rp=""; r_slot=""
                         r_dsent=""; r_dwr=""; r_dfl=""; r_drp=""; r_net=""; r_fs=""; r_ap=""; r_tot=""
                         prev_rsent=""; prev_rwr=""; prev_rfl=""; prev_rrp=""
+                        prev_rp_ms=0
                         # (原来的 _vw_prev=()/_vt_prev=() 两行是死代码: 这两个名字在
                         #  全文件再无第二处 —— wait 页早已改用 vbtop_wait.$$.prev 基线文件。
                         #  2026-09-28 审计发现并删除。)
@@ -30343,12 +30346,13 @@ limit 1;
         # cached DB tail with fresh OS numbers. db/db_ok/db_next are the cache.
         if [ "$((t1 / 1000))" -ge "$db_next" ]; then
         db=$(_vtop_db_collect "$(printf '%s\n%s\n' "$VT_SQL" "$VT_TOP")")
-        # ★DB rates divide by the MEASURED window between collects (user
-        # 2026-11-16: ISTAT 按 DB 采样间隔), never the frame dt -- with dual
-        # cadence frame dt (~3s) and collect window (~-I s) differ, and frame
-        # dt inflated every DB-side rate by interval/os_tick.
-        if [ "$t_db_ms" -gt 0 ] && [ "$t1" -gt "$t_db_ms" ]; then dbdt=$((t1 - t_db_ms)); else dbdt=$((interval * 1000)); fi
-        t_db_ms=$t1
+        # ★DB rate windows = per-section baseline stamps (2026-11-16 终版):
+        # 分子分母必须同源 —— 每段速率用"该段 prev_* 滚动时刻→本帧"的窗口
+        # (prev_ist_ms/prev_rp_ms, 解析端 prev 滚动处盖章), 不再用统一 dbdt
+        # (=上次采集尝试时刻差)。dbdt 的洞: 断库/断网期间每次尝试都刷 t_db_ms,
+        # 恢复帧窗口≈interval 而计数器 delta 跨整个断档 ⇒ 一帧 N 倍虚高
+        # (单元 RED: 断600s, qps 20000 vs 真实均值 500); 某段单帧被 12s 截止
+        # 砍掉时该段 prev 多老一拍, 统一 dbdt 也量不出。过期规则在解析端(同子屏)。
         # ★完整性哨兵 (2026-09-26 设计, 2026-11-05 语义更新): ===EOD 由收集器在
         # >=1 段出数时补发; 空 db = 一段都没出数 = 库不可达 -> 整帧走"DB 不可用"路径
         # (头部 (db unreachable) + OS 块)。段内不再有"被砍的半截流": 每段要么完整
@@ -30586,6 +30590,14 @@ printf '           %-14s %-22s %-8.8s %-9s %.62s\n' "-" "-" "-" "-" "-"
                     HDR)  IFS='|' read -r h_node h_ver h_up <<< "$line";;
                     SESS) IFS='|' read -r s_tot s_act s_iit s_idle s_ltx s_avac s_smp s_jdbc <<< "$line";;
                     ISTAT) IFS='|' read -r i_xc i_xr i_br i_bh i_tb i_lsn i_nc i_pw i_dl <<< "$line"
+                          # ★本段窗口 = prev_ist_ms(本段基线盖章)→本帧, 与子屏 ist_dt 同构;
+                          # 过期规则同子屏 (2026-11-16 终版, 用户拍板废派生壳): 窗口
+                          # 超 max(3×interval,20s) ⇒ 当无基线 (断库/断网恢复帧不许拿
+                          # 断档均值冒充 /s, 也不许旧 dbdt 那样 N 倍虚高)。
+                          ist_w=0
+                          [ "$prev_ist_ms" -gt 0 ] && [ "$t1" -gt "$prev_ist_ms" ] && ist_w=$(( t1 - prev_ist_ms ))
+                          ist_wmax=$(( interval * 3 * 1000 )); [ "$ist_wmax" -lt 20000 ] && ist_wmax=20000
+                          [ "$ist_w" -gt "$ist_wmax" ] && ist_w=0
                           # ★重启 / pg_stat_reset 的判据 = **每一个计数器都不许变小**
                           # (2026-09-28 修): 老写法只看 WAL LSN 是否前进 —— 但实例重启后
                           # WAL 是**接着涨**的, 而 pg_stat_database / statement / pagewriter
@@ -30595,26 +30607,26 @@ printf '           %-14s %-22s %-8.8s %-9s %.62s\n' "-" "-" "-" "-" "-"
                           # 任何一个计数器回退 ⇒ 当作"还没有基线": 本帧全 '-', 本帧值留作新基线。
                           # 整组 { } 统一吃掉 stderr: 某列万一为空串时 [ x -ge y ] 会报
                           # integer expression expected, 不该刷到用户屏幕上。
-                          if { [ -n "$prev_lsn" ] && [ "$dbdt" -gt 0 ] \
+                          if { [ -n "$prev_lsn" ] && [ "$ist_w" -gt 0 ] \
                                && [ "$i_lsn" -ge "$prev_lsn" ] && [ "$i_xc" -ge "$prev_xc" ] \
                                && [ "$i_xr" -ge "$prev_xr" ] && [ "$i_br" -ge "$prev_br" ] \
                                && [ "$i_bh" -ge "$prev_bh" ] && [ "$i_tb" -ge "$prev_tb" ] \
                                && [ "$i_nc" -ge "$prev_nc" ] && [ "$i_pw" -ge "$prev_pw" ] \
                                && [ "$i_dl" -ge "$prev_dl" ]; } 2>/dev/null; then
                               # ★every rate below is a DELTA over the sampling interval (user's spec)
-                              _qps=$(( (i_nc - prev_nc) * 1000 / dbdt ))
-                              _cm=$(( (i_xc - prev_xc) * 1000 / dbdt ))
-                              _rb=$(( (i_xr - prev_xr) * 1000 / dbdt ))
-                              _lg=$(( (i_br - prev_br + i_bh - prev_bh) * 1000 / dbdt * 8192 ))
-                              _ph=$(( (i_br - prev_br) * 1000 / dbdt * 8192 ))
-                              _rd=$(( (i_lsn - prev_lsn) * 1000 / dbdt ))
-                              _tp=$(( (i_tb - prev_tb) * 1000 / dbdt ))
+                              _qps=$(( (i_nc - prev_nc) * 1000 / ist_w ))
+                              _cm=$(( (i_xc - prev_xc) * 1000 / ist_w ))
+                              _rb=$(( (i_xr - prev_xr) * 1000 / ist_w ))
+                              _lg=$(( (i_br - prev_br + i_bh - prev_bh) * 1000 / ist_w * 8192 ))
+                              _ph=$(( (i_br - prev_br) * 1000 / ist_w * 8192 ))
+                              _rd=$(( (i_lsn - prev_lsn) * 1000 / ist_w ))
+                              _tp=$(( (i_tb - prev_tb) * 1000 / ist_w ))
                               # pagewrite: pagewriter 累计刷页数的间隔增量,再 ×8192 转字节
                               # (与 logical/physical 同口径;也即 AWR join 里的 pages × BLCKSZ 8K)
-                              _pw=$(( (i_pw - prev_pw) * 1000 / dbdt * 8192 ))
+                              _pw=$(( (i_pw - prev_pw) * 1000 / ist_w * 8192 ))
                               # deadlocks/s (user's call 2026-09-28): plain counter delta,
                               # same sampling-interval convention as every other rate here
-                              _dl=$(( (i_dl - prev_dl) * 1000 / dbdt ))
+                              _dl=$(( (i_dl - prev_dl) * 1000 / ist_w ))
                               # values carry NO /s: the labels already say it (and the OS block
                               # never doubled it -- fault/s shows a bare number)
                               ist_qps=$_qps; ist_cm=$_cm; ist_roll=$_rb; ist_tps=$(( _cm + _rb ))
@@ -30635,27 +30647,31 @@ printf '           %-14s %-22s %-8.8s %-9s %.62s\n' "-" "-" "-" "-" "-"
                           # strings -> a '-' chain until fresh baselines built)
                           if [ -n "$i_lsn" ]; then
                               prev_xc=$i_xc; prev_xr=$i_xr; prev_br=$i_br; prev_bh=$i_bh; prev_tb=$i_tb; prev_lsn=$i_lsn; prev_nc=$i_nc; prev_pw=$i_pw; prev_dl=$i_dl
+                              prev_ist_ms=$t1
                           fi;;
                     XLOG) IFS='|' read -r x_cur x_ckr x_old x_cbm x_cnt x_sz x_rest x_arch <<< "$line";;
                     REPL) IFS='|' read -r r_app r_state r_sync r_sent r_wr r_fl r_rp r_slot <<< "$line"
                           n_repl=1   # ★这一帧确实有备库行 (见循环末尾 n_repl=0 的基线清理)
                           # ★LSN 四列按"每秒推进量"显示(user's call 2026-09-26),与全帧其它速率列同口径;
                           # 四个 lag 仍为瞬时值,由当前位点相减得到。首帧无基线 ⇒ 全 '-'
-                          # ★dbdt for ALL FOUR (2026-11-16 补漏): a2d0bfc 把
-                          # sent/write/flush 三列的分母换成了实测采集窗 dbdt, 但
-                          # replay/s 还在除帧 dt -- 双频下 dbdt(~15s)/dt(~3s) 不同,
-                          # replay/s 恒虚高 interval/os_tick 倍 (单元 RED: 四列同
-                          # 1000B/s 的备库, 前三列 1000、replay/s 5000)。四列的
-                          # prev_* 同在采集帧滚动, 窗口同为 dbdt; 守卫也一并换。
-                          if [ -n "$prev_rsent" ] && [ -n "$r_sent" ] && [ "$dbdt" -gt 0 ] 2>/dev/null; then
-                              r_dsent=$(( (r_sent - prev_rsent) * 1000 / dbdt ))
-                              r_dwr=$(( (r_wr - prev_rwr) * 1000 / dbdt ))
-                              r_dfl=$(( (r_fl - prev_rfl) * 1000 / dbdt ))
-                              r_drp=$(( (r_rp - prev_rrp) * 1000 / dbdt ))
+                          # ★窗口 = prev_rp_ms(本段基线盖章)→本帧 (2026-11-16 终版):
+                          # 四列统一, 替代 dbdt(上次采集尝试时刻差——断库恢复帧会拿
+                          # ~interval 窗口除整个断档的 delta, 一帧 N 倍虚高);
+                          # 过期规则同 ISTAT 段/子屏: 超 max(3×interval,20s) 当无基线。
+                          rp_w=0
+                          [ "$prev_rp_ms" -gt 0 ] && [ "$t1" -gt "$prev_rp_ms" ] && rp_w=$(( t1 - prev_rp_ms ))
+                          rp_wmax=$(( interval * 3 * 1000 )); [ "$rp_wmax" -lt 20000 ] && rp_wmax=20000
+                          [ "$rp_w" -gt "$rp_wmax" ] && rp_w=0
+                          if [ -n "$prev_rsent" ] && [ -n "$r_sent" ] && [ "$rp_w" -gt 0 ] 2>/dev/null; then
+                              r_dsent=$(( (r_sent - prev_rsent) * 1000 / rp_w ))
+                              r_dwr=$(( (r_wr - prev_rwr) * 1000 / rp_w ))
+                              r_dfl=$(( (r_fl - prev_rfl) * 1000 / rp_w ))
+                              r_drp=$(( (r_rp - prev_rrp) * 1000 / rp_w ))
                               r_net=$(( r_sent - r_wr )); r_fs=$(( r_wr - r_fl ))
                               r_ap=$(( r_fl - r_rp )); r_tot=$(( r_sent - r_rp ))
                           fi
-                          prev_rsent=$r_sent; prev_rwr=$r_wr; prev_rfl=$r_fl; prev_rrp=$r_rp;;
+                          prev_rsent=$r_sent; prev_rwr=$r_wr; prev_rfl=$r_fl; prev_rrp=$r_rp
+                          prev_rp_ms=$t1;;
                     DBM)  IFS='|' read -r m_used m_max m_shmax m_shused m_dyu m_dym m_dyp m_shr m_shrp m_other m_sbuf <<< "$line";;
                     WAIT) IFS='|' read -r w_io w_lock w_lwlock w_stat w_cpu <<< "$line";;
                     CTX)  ctx_txt="$line";;
@@ -30679,7 +30695,7 @@ printf '           %-14s %-22s %-8.8s %-9s %.62s\n' "-" "-" "-" "-" "-"
             # ★这一帧一行备库行都没有(备库掉线 / 槽被删) ⇒ 连**基线**一起清: 显示值已被
             # 上面的每帧复位清成 '-' 了, 但 prev_r* 若留着, 备库重连后的第一帧就会拿
             # 几分钟前的旧位点去减, 算出一个巨大的假 sent/s。与 ESC 回主屏那条路径同规矩。
-            [ "${n_repl:-0}" -eq 0 ] && { prev_rsent=""; prev_rwr=""; prev_rfl=""; prev_rrp=""; }
+            [ "${n_repl:-0}" -eq 0 ] && { prev_rsent=""; prev_rwr=""; prev_rfl=""; prev_rrp=""; prev_rp_ms=0; }
             # ★no TOP SQL rows this frame -> keep the header's column structure readable with a
             # "-" row (user's call 2026-09-26, same rule as LTX/LOCK). TOPMEM gets the same
             # treatment at the ===TOP marker above, because its rows have to be flushed
