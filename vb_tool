@@ -29259,7 +29259,6 @@ Usage: vb_tool sqlpatch create|enable|disable|drop -d <db_name> -s <unique_sql_i
                impossible on purpose), the tool re-quotes it automatically.
 
   Patch name is always derived: 'patch_' || unique_sql_id
-  (the dbe_sql_util schema/function names are wrapped, nothing to remember).
 SPH
 }
 
