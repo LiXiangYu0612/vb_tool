@@ -110,6 +110,7 @@ vb_tool list
 
 | 版本 | 日期 | 要点 |
 |------|------|------|
+| v2.5.24 | 2026-11-16 | vtop：主屏 OS/DB 双频刷新（-i/-O 独立控制，段横幅带采样时刻）；iostat 子屏新增线程级 IO top、多路径/表空间/WAL 设备链；新增 OS 内存子屏 f=osmem（meminfo 组件、缺页与回收、zone 水位仪、buddyinfo 阶分布）；DB 子屏默认 5s |
 | v2.5.23 | 2026-11-15 | vtop：主屏新增 vbcpu%（端口绑定实例进程树 CPU）、OS 子屏四页 d/c/v/n（iostat/cpu/vmstat/net，cpu 超 20 核 Top30+忙闲十档，net 含 nstat 计数器箱）；se 知识库清理不适用于集中式部署的内容；新增 sqlpatch 命令（SQL PATCH 全周期，hint 原样贴自动补引号/剥皮/@文件） |
 | v2.5.22 | 2026-11-05 | awr：OS Memory 表补 KernelStack/AnonPages/Unevictable/AnonHugePages/Committed_AS/VmallocUsed 六键；进程段新增 Page Tables(VmPTE)/Swapped(VmSwap) 行（旧快照自动隐藏）——内存构成逐项判读；同日修订：flamegraph 采样统一 DWARF 调用链（--call-graph dwarf），产物改为 tar.gz 三件套（SVG 火焰图 + perf report 占比报告 + perf script 调用栈明细），打包后清理中间文件；次日修订：vtop 主屏修复——多段查询共用单管线超时预算时整屏误报 db unreachable（子屏正常）的缺陷，改为逐段独立采集 + 帧级时限 + 双通道并行（任意时刻至多 2 个连接），慢段只影响自身区域、整屏不再判死；再次修订：mem 会话内存三段在备库（只读实例）因临时表建表失败而整段报错，改为单次采样内联回灌——不建任何库对象，主备同一条只读路径，三段共享同一份冻结快照，大上下文规模实例（数万行）实测 6 秒完成 |
 | v2.5.21 | 2026-11-04 | awr：Load Profile 每秒列格式统一（千级以上 K/M/B 换算，不足千保两位小数，各数据行同一规则）；awr topsql 屏显总耗时列单位改为毫秒并与表头标注对齐（与报告内 SQL 统计表同单位）；采样器抓栈失败/空返回留痕 |
