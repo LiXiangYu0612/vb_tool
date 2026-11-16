@@ -30285,7 +30285,7 @@ order by s.sz desc;"
         # 消费者 (2026-09-28 审计发现并删除): 白扔一次进程创建, 屏幕上也从没出现过。
 
         # ---- DB sections ----
-        local db section="" h_node h_ver h_up s_tot s_act s_iit s_idle s_ltx s_avac s_smp s_jdbc m_used m_max m_shmax m_shused m_dyu m_dym m_dyp m_shr m_shrp m_other m_sbuf x_cur x_ckr x_old x_cbm x_cnt x_sz x_rest x_arch r_app r_state r_sync r_sent r_wr r_fl r_rp r_slot r_dsent r_dwr r_dfl r_drp r_net r_fs r_ap r_tot
+        local db section="" h_node h_ver h_up h_clk="" s_tot s_act s_iit s_idle s_ltx s_avac s_smp s_jdbc m_used m_max m_shmax m_shused m_dyu m_dym m_dyp m_shr m_shrp m_other m_sbuf x_cur x_ckr x_old x_cbm x_cnt x_sz x_rest x_arch r_app r_state r_sync r_sent r_wr r_fl r_rp r_slot r_dsent r_dwr r_dfl r_drp r_net r_fs r_ap r_tot
         local r_sqlid r_cpu r_ns r_rn r_et r_sql ms_sid ms_sz ms_sql
         local cpupairs="0,0" VT_TOP
         # ★[TOPSQL] cpu 采样改回 `as` 的算法 (user's call 2026-10-10: 「cpu%感觉也是
@@ -30383,6 +30383,11 @@ limit 1;
         # 由复位块继续兜底。
         case "$db" in *"===EOD"*) ;; *) db="";; esac
         [ -n "$db" ] && db_ok=1 || db_ok=0
+        # ★表头时钟锚 DB 采集成功时刻 (用户令 2026-11-16: "这个时间不用刷了啊 因为
+        #   都分开采样了的"): port/up 本就是 DB 采样值, 时钟跟它们同源冻结, 回放帧
+        #   不走字, 下次采集才跳; OS 侧新鲜度由 OS Statistics 横幅自己的时刻表达。
+        #   从未采集成功过 ⇒ '-' (无 DB 样本), 不退化为走字时钟冒充新鲜。
+        [ "$db_ok" = "1" ] && h_clk=$(date '+%F %T')
         db_dirty=1
         db_next=$((t1 / 1000 + interval))
         fi
@@ -30400,7 +30405,7 @@ limit 1;
             printf "${c_lbl}port${c_off} ${c_grn}%s${c_off}   ${c_lbl}up${c_off} %s   %s  ${c_lbl}│${c_off}  ${c_dim}%s${c_off}\n" \
                 "${PGPORT:-5432}" \
                 "$(awk -v s="$h_up" 'BEGIN{printf "%dd%02dh%02dm", int(s/86400), int(s%86400/3600), int(s%3600/60)}')" \
-                "$cores" "$(date '+%F %T')"
+                "$cores" "${h_clk:--}"
             _vtop_print_os
             cat "$_vtop_dbcache"
             # notice/hint: appended once per frame by the shared interactive
@@ -30415,7 +30420,7 @@ limit 1;
             printf "%s[vbtop]%s %s(db unreachable)%s  %s│%s  %sLinux %s%s\n" \
                 "$c_sec" "$c_off" "$c_red" "$c_off" "$c_lbl" "$c_off" "$c_blu" "$kver" "$c_off"
             printf "${c_lbl}port${c_off} ${c_grn}%s${c_off}   %s  ${c_lbl}│${c_off}  ${c_dim}%s${c_off}\n" \
-                "${PGPORT:-5432}" "$cores" "$(date '+%F %T')"
+                "${PGPORT:-5432}" "$cores" "${h_clk:--}"
             _vtop_print_os
         else
             # ★每帧复位 (2026-09-28 补 r_*/x_*): bash 的 `read` 不会把没读到的变量清空,
@@ -30477,7 +30482,7 @@ limit 1;
                         printf "${c_lbl}port${c_off} ${c_grn}%s${c_off}   ${c_lbl}up${c_off} %s   %s  ${c_lbl}│${c_off}  ${c_dim}%s${c_off}\n" \
                             "${PGPORT:-5432}" \
                             "$(awk -v s="$h_up" 'BEGIN{printf "%dd%02dh%02dm", int(s/86400), int(s%86400/3600), int(s%3600/60)}')" \
-                            "$cores" "$(date '+%F %T')"
+                            "$cores" "${h_clk:--}"
                         _vtop_print_os
                         _vtop_sec "VASTBASE Statistics ($(date '+%T'))"
                         if [ -n "$s_tot" ]; then
