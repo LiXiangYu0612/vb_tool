@@ -27177,7 +27177,7 @@ order by 2 desc limit 10")
                  then coalesce(a.application_name,'-')
             when a.client_addr is null then coalesce(a.usename,'-')||':'||coalesce(a.application_name,'-')
             else coalesce(a.usename,'-')||':'||a.client_addr end,
-       a.sessionid::text||':'||decode(w.block_sessionid,null,'not wait',w.block_sessionid::text),
+       a.sessionid::text||':'||case when w.block_sessionid is null then 'not wait' else w.block_sessionid::text end,
        coalesce(nullif(a.unique_sql_id::text,'0'),'-'),
        coalesce(w.wait_event,'-'),
        coalesce((extract(epoch from (now()-a.query_start)))::bigint::text,'-'),
@@ -27235,12 +27235,12 @@ order by (extract(epoch from (now()-a.query_start))) desc nulls last limit 15")
                  then coalesce(b.application_name,'-')
             when b.client_addr is null then coalesce(b.usename,'-')||':'||coalesce(b.application_name,'-')
             else coalesce(b.usename,'-')||':'||b.client_addr end,
-       b.sessionid::text||':'||decode(wb.block_sessionid,null,'not wait',wb.block_sessionid::text),
+       b.sessionid::text||':'||case when wb.block_sessionid is null then 'not wait' else wb.block_sessionid::text end,
        coalesce(nullif(b.unique_sql_id::text,'0'),'-'),
        coalesce(wb.wait_event,'-'),
        coalesce((extract(epoch from (now()-b.query_start)))::bigint::text,'-'),
-       decode(b.state,'active','act','idle in transaction','idle-tx',
-              'idle in transaction (aborted)','idle-tx!','?'),
+       case b.state when 'active' then 'act' when 'idle in transaction' then 'idle-tx'
+            when 'idle in transaction (aborted)' then 'idle-tx!' else '?' end,
        coalesce(substr(regexp_replace(regexp_replace(b.query,'(\r|\n)+',' '),' {2,}',' '),1,40),'-')
 from pg_stat_activity b
 left join dbe_perf.thread_wait_status wb on b.pid = wb.tid
@@ -27306,7 +27306,7 @@ where a.state in ('active','idle in transaction')
     _vtop_sec "long transactions (top 30)"
     _vtop_th "$(printf '%-14s %-9s %-9s %-8s %-8s %-19s %s' sid user db state xact_age event sqltext)"
     lx_out=$(_vtop_q "select a.sessionid::text, coalesce(a.usename,'-'), coalesce(a.datname,'-'),
-       decode(a.state,'active','act','idle in transaction','idle-tx','?'),
+       case a.state when 'active' then 'act' when 'idle in transaction' then 'idle-tx' else '?' end,
        (extract(epoch from (now()-a.xact_start)))::bigint,
        coalesce(w.wait_event,'-'),
        coalesce(substr(regexp_replace(regexp_replace(a.query,'(\r|\n)+',' '),' {2,}',' '),1,44),'-')
@@ -27678,7 +27678,7 @@ _vtop_screen_xlog() { # XLOG page -- `vb_tool xloghc`'s two sections, rendered i
     }
     _vtop_p1() { printf '%s%-22.22s%s %s\n' "${c_lbl:-}" "$1" "${c_off:-}" "$2"; }
     xl_out=$(_vtop_q "select (select get_nodename()),
-       decode(pg_is_in_recovery(),'f','Primary','Standby'),
+       case pg_is_in_recovery() when 'f' then 'Primary' else 'Standby' end,
        replace(replace(regexp_substr(vb_version(), '^(.*?)(?= compiled)', 1, 1),'(',''),')','')
          ||' patch '||coalesce(regexp_substr(vb_version(), 'patch:(\d+)', 1, 1, NULL, 1),'?')
          ||' commit '||coalesce(regexp_substr(vb_version(), 'commit (\S+)', 1, 1, NULL, 1),'?'),
@@ -27785,7 +27785,7 @@ from pg_ls_waldir() where name not like '%backup%'")
     # ---- GUCs: xloghc's four groups, three parameters per line ----
     xl_out=$(_vtop_q "select name, val, grp from (
   select name,
-         decode(unit,'8kB',setting*8||'kB', setting||coalesce(unit,' ')) val,
+         case unit when '8kB' then setting*8||'kB' else setting||coalesce(unit,' ') end val,
          case when name in ('enable_incremental_checkpoint','checkpoint_completion_target','checkpoint_segments',
                'checkpoint_timeout','checkpoint_wait_timeout','pagewriter_thread_num','pagewriter_sleep',
                'bgwrite_sleep','bgwrite_delay','max_io_capacity') then 'checkpoint'
@@ -28078,7 +28078,7 @@ order by sum(totalsize) desc limit 10")
     _vtop_sec "top 10 session memory used"
     _vtop_th "$(printf '%-14s %-16s %-9s %-10s %s' sid sesstype state total_size sql_text)"
     mx_out=$(_vtop_q "select s.sid::text, coalesce(s.sesstype,'-'),
-       decode(a.state,'active','act','idle in transaction','idle-tx','idle','idle','-'),
+       case a.state when 'active' then 'act' when 'idle in transaction' then 'idle-tx' when 'idle' then 'idle' else '-' end,
        pg_size_pretty(s.sz::numeric),
        coalesce(substr(regexp_replace(regexp_replace(a.query,'(\r|\n)+',' '),' {2,}',' '),1,40),'-')
 from (select split_part(t1.sessid,'.',2) sid, t1.sesstype, sum(t1.totalsize) sz
@@ -28344,9 +28344,11 @@ FROM (
   FROM (
     SELECT tree.root, tree.lvl, tree.w_chain,
       CASE WHEN tree.holder LIKE 'P:%' THEN '2pc'
-           WHEN a.sessionid IS NOT NULL THEN COALESCE(decode(a.state,'active','act','idle','idle','idle in transaction','idle-tx',
-                                      'idle in transaction (aborted)','idle-tx!',
-                                      'fastpath function call','fastpath','disabled','disabled','?'),'unknown')
+           WHEN a.sessionid IS NOT NULL THEN COALESCE(case a.state when 'active' then 'act' when 'idle' then 'idle'
+                                      when 'idle in transaction' then 'idle-tx'
+                                      when 'idle in transaction (aborted)' then 'idle-tx!'
+                                      when 'fastpath function call' then 'fastpath'
+                                      when 'disabled' then 'disabled' else '?' end,'unknown')
            ELSE 'gone' END AS state,
       tree.holder AS sid,
       COALESCE(a.usename, px.owner, '-') AS usename,
@@ -29629,7 +29631,7 @@ where a.pid <> pg_backend_pid();
 -- the LSNs + the WAL segment backlog. Verified field-by-field against xloghc on 204.
 -- Standby-safe: pg_current_xlog_location() is primary-only, so fall back to the WAL
 -- receiver's received location (same decode xloghc uses).
-select (select decode(pg_is_in_recovery(),'f',pg_current_xlog_location(),(select receiver_received_location from pg_stat_get_wal_receiver())))::text,
+select (select case pg_is_in_recovery() when 'f' then pg_current_xlog_location() else (select receiver_received_location from pg_stat_get_wal_receiver()) end)::text,
        upper(to_hex((select redo_lsn from pg_control_checkpoint())>>32)||'/'||lpad(to_hex((select redo_lsn from pg_control_checkpoint())&4294967295),8,'0')),
        (select upper(coalesce(nullif(ltrim(substr(n,9,8),'0'),''),'0')||'/'||right(substr(n,17,8),2)||'000000') from (select pg_ls_dir n from pg_ls_dir('pg_xlog') where pg_ls_dir not like '%backup%' and pg_ls_dir not like '%archive_s%' and pg_ls_dir ~ '^[0-9A-F]{24}$' order by 1 limit 1) t),
        regexp_replace(pg_cbm_tracked_location()::text,'^0+([0-9A-F])','\1'),
@@ -29769,9 +29771,11 @@ WITH RECURSIVE l AS (
 )
 SELECT lvl,
   CASE WHEN tree.holder LIKE 'P:%' THEN '2pc'
-       WHEN a.sessionid IS NOT NULL THEN COALESCE(decode(a.state,'active','act','idle','idle','idle in transaction','idle-tx',
-                                  'idle in transaction (aborted)','idle-tx!',
-                                  'fastpath function call','fastpath','disabled','disabled','?'),'unknown')
+       WHEN a.sessionid IS NOT NULL THEN COALESCE(case a.state when 'active' then 'act' when 'idle' then 'idle'
+                                  when 'idle in transaction' then 'idle-tx'
+                                  when 'idle in transaction (aborted)' then 'idle-tx!'
+                                  when 'fastpath function call' then 'fastpath'
+                                  when 'disabled' then 'disabled' else '?' end,'unknown')
        ELSE 'gone' END AS state,
   tree.holder AS sid,
   COALESCE(a.usename, px.owner, '-') AS usename,
@@ -29786,7 +29790,7 @@ WHERE lvl = 0
 ORDER BY blocked DESC, age_s DESC LIMIT 5;
 \\echo ===LTX
 select a.sessionid::text, coalesce(a.usename,'-'), coalesce(a.datname,'-'),
-       decode(a.state,'active','act','idle in transaction','idle-tx','?') st,
+       case a.state when 'active' then 'act' when 'idle in transaction' then 'idle-tx' else '?' end st,
        (extract(epoch from (now()-a.xact_start)))::bigint age_s,
        coalesce(w.wait_event,'-') we,
        coalesce(substr(regexp_replace(regexp_replace(a.query,'(\r|\n)+',' '),' {2,}',' '),1,44),'-')
@@ -29819,7 +29823,7 @@ where state in ('active','idle in transaction')
   and pid <> pg_backend_pid();
 \echo ===MEMSES
 select s.sid::text, coalesce(s.sesstype,'-'),
-       decode(a.state,'active','act','idle in transaction','idle-tx','idle','idle','-') st,
+       case a.state when 'active' then 'act' when 'idle in transaction' then 'idle-tx' when 'idle' then 'idle' else '-' end st,
        pg_size_pretty(s.sz::numeric),
        coalesce(substr(regexp_replace(regexp_replace(a.query,'(\r|\n)+',' '),' {2,}',' '),1,64),'-')
 from (select split_part(sessid,'.',2) sid, sesstype, sum(totalsize) sz from gs_session_memory_detail where split_part(sessid,'.',2) <> pg_backend_pid()::text group by split_part(sessid,'.',2), sesstype order by sum(totalsize) desc limit 1) s
