@@ -26946,6 +26946,20 @@ _vtop_age() { # seconds -> 3d04h / 4h05m / 12m30s / 45s (same shape as the main 
 _vtop_dash2() { # print '-' for an empty value, else the value itself
     [ -z "${1:-}" ] && printf '%s' '-' || printf '%s' "$1"
 }
+_vtop_lim_ms() { # $1=本页节律(s) $2=每帧串行查询数 -> 基线过期阈值(ms), 全站唯一实现
+    # ★单一来源 (2026-11-16 复核收口): 五处阈值曾各抄一份公式, 正是本周
+    #   横幅/阈值/tick 三处漂移 bug 的病根; 改这里=五处同步。
+    # 阈值 = max(3×节律, 节律+每帧查询×12s 预算+8s 余量, 20s):
+    #   - 3×节律 = 过期本体 (离开页面太久回来 ⇒ 平均值失真, 当无基线)
+    #   - 慢帧保护: 一帧最坏墙钟 = 节律 + q×12s (子屏每查询独享 12s; 主屏
+    #     帧级截止 12s + 截止前一刻起跑的段再吃满 12s ≈ 2 段预算) -- 阈值必须
+    #     盖过它, 否则慢库上每帧都判过期, 速率列恒 '-' (2026-11-16 复核抓的
+    #     回归: wait 页 3 查询×12s+5s 节律=41s > 旧下限 20s, 慢库整页空窗)
+    local v=$(( $1 * 3 * 1000 )) f=$(( $1 * 1000 + ${2:-1} * 12000 + 8000 ))
+    [ "$f" -lt 20000 ] && f=20000
+    [ "$v" -lt "$f" ] && v=$f
+    echo "$v"
+}
 _vtop_rate() { # $1=begin $2=end $3=window_ms -> per second (0 on a bad/reset window)
     awk -v a="$1" -v b="$2" -v t="$3" 'BEGIN{
         if (t <= 0) t = 1
@@ -27380,10 +27394,9 @@ from pg_stat_database"
     #   下一帧自然拿到正常窗口。阈值公式与 rp_lim/we_lim 同源: 3×本页节律(-i/dbsub),
     #   下限 20s(一帧渲染最坏 ~12s psql 预算 + 余量, 慢机器不误判); 单位毫秒
     #   (is_t1 是 %s%3N 毫秒, 阈值也必须毫秒 —— rp_lim 第一版写成秒的教训在案)。
-    # ★min(3×节律,15) 壳已废 (用户 2026-11-16: 四旗标后节律全是显式值, 不再派生):
-    #   那层壳是旧版子屏刷新公式(3×interval 封顶 15)的化石, 封顶只服务"派生值可能
-    #   爆大"的场景 —— 显式节律不存在该场景, 慢节律(-i 60)就该给 3×60 的宽限。
-    is_lim=$(( ${dbsub:-5} * 3 * 1000 )); [ "$is_lim" -lt 20000 ] && is_lim=20000
+    # ★min(3×节律,15) 壳已废 (用户 2026-11-16: 四旗标后节律全是显式值, 不再派生);
+    #   阈值统一走 _vtop_lim_ms (本页 1 条查询, 慢帧保护进 floor)。
+    is_lim=$(_vtop_lim_ms "${dbsub:-5}" 1)
     [ "$is_dt" -gt "$is_lim" ] && is_dt=0
     # no baseline (first render) -> is_a empty and is_dt 0: every rate renders '-'
     # (_vtop_istrow prints dashes when its begin value is empty), exactly like the
@@ -27534,9 +27547,10 @@ _vtop_screen_wait() { # WAIT page -- two blocks, both [SESS]-style (boxed banner
     #   refresh 5s。超阈值就把基线当作不存在(与"首次进页没有基线文件"走同一条路: 本节
     #   只显示 '-' 占位行), 下一帧自然恢复。we_pts 以前读出来却没人用, 现在正是用它。
     # ★单位必须与 we_pts 一致(毫秒, date +%s%3N); 第一版写成秒 ⇒ 恒定判定过期。见 REPL 页同注。
-    # ★阈值 = 3×本页节律(-i/dbsub) 下限 20s; min(3×节律,15) 壳已废(用户 2026-11-16,
-    #   四旗标后节律全显式不再派生), 同 is_lim/rp_lim。
-    we_lim=$(( ${dbsub:-5} * 3 * 1000 )); [ "$we_lim" -lt 20000 ] && we_lim=20000
+    # ★阈值 = _vtop_lim_ms(dbsub, 3) (2026-11-16): 本页每帧串行 3 条查询
+    #   (we_out/we_dbt/we_out2), 慢库上帧墙钟可达 5+3×12s=41s -- 裸 3×dbsub
+    #   下限 20s 会整页判过期, 复核实证的回归; 查询数进 floor 修正。
+    we_lim=$(_vtop_lim_ms "${dbsub:-5}" 3)
     if [ -n "$we_pts" ] && [ "$(( $(date +%s%3N) - we_pts ))" -gt "$we_lim" ]; then
         we_pt=(); we_pw=(); we_pdb=0
     fi
@@ -27873,10 +27887,9 @@ order by a.application_name")
     # ★单位必须与时间戳一致: rp_t1 是 date +%s%3N 的**毫秒**, 所以阈值也要毫秒
     #   (第一版写成秒了 ⇒ 5.1 秒的窗口 5157 > 45 恒成立 ⇒ 每帧都判过期、速率列永远 '-'。
     #    插桩实测抓到)。公式: 节律(秒) ×3 再 ×1000, 下限 20 秒。
-    # ★min(3×节律,15) 壳已废 + 节律跟 -i 不跟 -I (用户 2026-11-16: 四旗标后节律
-    #   全是显式值不再派生): 本页真实节律是 dbsub (默认 5s), 壳是旧版"3×interval
-    #   封顶 15"刷新公式的化石; 默认下阈值 45s→20s, 慢节律 -i 60 则给满 180s 宽限。
-    rp_lim=$(( ${dbsub:-5} * 3 * 1000 )); [ "$rp_lim" -lt 20000 ] && rp_lim=20000
+    # ★阈值 = _vtop_lim_ms(dbsub, 1) (2026-11-16): min(3×节律,15) 壳已废(用户拍板,
+    #   四旗标后节律全显式), 统一走 helper, 本页 1 条查询。
+    rp_lim=$(_vtop_lim_ms "${dbsub:-5}" 1)
     [ "$rp_dt" -gt "$rp_lim" ] && rp_dt=0
     printf '\n'
     _vtop_sec "REPL STAT"
@@ -27913,9 +27926,14 @@ order by a.application_name")
     done
     # park this render's counters as the next one's baseline (ts + one
     # tab-separated line per standby: app sent write flush replay)
-    { printf '%s\n' "$rp_t1"
-      printf '%s\n' "$rp_out" | awk -F'|' '{printf "%s\t%s\t%s\t%s\t%s\n", $1, $6, $7, $8, $9}'
-    } > "$rp_f" 2>/dev/null
+    # ★查询失败帧不写基线 (2026-11-16 复核修, 对齐 istat 的 [ -n "$is_b" ] /
+    #   wait 的 [ -n "$we_out" ] 同款守卫): 无条件写会把基线写成"只有时间戳",
+    # 下一帧全备库速率列白空一帧; 失败帧沿用旧基线, 恢复后立刻续上。
+    if [ -n "${rp_out:-}" ]; then
+        { printf '%s\n' "$rp_t1"
+          printf '%s\n' "$rp_out" | awk -F'|' '{printf "%s\t%s\t%s\t%s\t%s\n", $1, $6, $7, $8, $9}'
+        } > "$rp_f" 2>/dev/null
+    fi
     # ---- wal receiver (a standby only) ----
     # ★VB has no pg_stat_wal_receiver RELATION (204: relation does not exist) --
     #   it is the SRF pg_stat_get_wal_receiver() (the form xloghc uses), whose
@@ -30346,6 +30364,9 @@ limit 1;
         # cached DB tail with fresh OS numbers. db/db_ok/db_next are the cache.
         if [ "$((t1 / 1000))" -ge "$db_next" ]; then
         db=$(_vtop_db_collect "$(printf '%s\n%s\n' "$VT_SQL" "$VT_TOP")")
+        # (复核核查过共享 err 文件 /tmp/vbtop_q.$$.err: _vtop_q 每次 2> 截断,
+        #  任何下一次查询都会清掉陈旧内容, "主屏残留污染健康子屏警告"不成立,
+        #  无需采集后清理; 两车道并发互踩的错误主屏本就不展示, 亦无后果。)
         # ★DB rate windows = per-section baseline stamps (2026-11-16 终版):
         # 分子分母必须同源 —— 每段速率用"该段 prev_* 滚动时刻→本帧"的窗口
         # (prev_ist_ms/prev_rp_ms, 解析端 prev 滚动处盖章), 不再用统一 dbdt
@@ -30591,12 +30612,13 @@ printf '           %-14s %-22s %-8.8s %-9s %.62s\n' "-" "-" "-" "-" "-"
                     SESS) IFS='|' read -r s_tot s_act s_iit s_idle s_ltx s_avac s_smp s_jdbc <<< "$line";;
                     ISTAT) IFS='|' read -r i_xc i_xr i_br i_bh i_tb i_lsn i_nc i_pw i_dl <<< "$line"
                           # ★本段窗口 = prev_ist_ms(本段基线盖章)→本帧, 与子屏 ist_dt 同构;
-                          # 过期规则同子屏 (2026-11-16 终版, 用户拍板废派生壳): 窗口
-                          # 超 max(3×interval,20s) ⇒ 当无基线 (断库/断网恢复帧不许拿
-                          # 断档均值冒充 /s, 也不许旧 dbdt 那样 N 倍虚高)。
+                          # 过期规则统一走 _vtop_lim_ms (2026-11-16): 窗口超阈 ⇒ 当无基线
+                          # (断库/断网恢复帧不许拿断档均值冒充 /s, 也不许旧 dbdt 那样
+                          # N 倍虚高); q=2 = 帧级 12s 截止 + 截止前起跑的段再吃满自身
+                          # 12s 的最坏帧墙钟, 慢库正常帧不许误判过期。
                           ist_w=0
                           [ "$prev_ist_ms" -gt 0 ] && [ "$t1" -gt "$prev_ist_ms" ] && ist_w=$(( t1 - prev_ist_ms ))
-                          ist_wmax=$(( interval * 3 * 1000 )); [ "$ist_wmax" -lt 20000 ] && ist_wmax=20000
+                          ist_wmax=$(_vtop_lim_ms "$interval" 2)
                           [ "$ist_w" -gt "$ist_wmax" ] && ist_w=0
                           # ★重启 / pg_stat_reset 的判据 = **每一个计数器都不许变小**
                           # (2026-09-28 修): 老写法只看 WAL LSN 是否前进 —— 但实例重启后
@@ -30657,21 +30679,32 @@ printf '           %-14s %-22s %-8.8s %-9s %.62s\n' "-" "-" "-" "-" "-"
                           # ★窗口 = prev_rp_ms(本段基线盖章)→本帧 (2026-11-16 终版):
                           # 四列统一, 替代 dbdt(上次采集尝试时刻差——断库恢复帧会拿
                           # ~interval 窗口除整个断档的 delta, 一帧 N 倍虚高);
-                          # 过期规则同 ISTAT 段/子屏: 超 max(3×interval,20s) 当无基线。
+                          # 过期规则统一走 _vtop_lim_ms (q=2 同 ISTAT 段的最坏帧墙钟)。
                           rp_w=0
                           [ "$prev_rp_ms" -gt 0 ] && [ "$t1" -gt "$prev_rp_ms" ] && rp_w=$(( t1 - prev_rp_ms ))
-                          rp_wmax=$(( interval * 3 * 1000 )); [ "$rp_wmax" -lt 20000 ] && rp_wmax=20000
+                          rp_wmax=$(_vtop_lim_ms "$interval" 2)
                           [ "$rp_w" -gt "$rp_wmax" ] && rp_w=0
+                          # ★四个 lag 是**当前行瞬时差**, 不需要基线 (2026-11-16 复核修):
+                          # 原来困在速率守卫里, 首帧/ESC 返回/断库恢复帧会连 lag 一起
+                          # 清成 '-' —— 恰恰是用户盯着看延迟的时刻; 子屏 REPL 一直就是
+                          # 无基线也渲染 lag 的, 主屏对齐。仅需本行值非空。
+                          if [ -n "$r_sent" ]; then
+                              r_net=$(( r_sent - r_wr )); r_fs=$(( r_wr - r_fl ))
+                              r_ap=$(( r_fl - r_rp )); r_tot=$(( r_sent - r_rp ))
+                          fi
                           if [ -n "$prev_rsent" ] && [ -n "$r_sent" ] && [ "$rp_w" -gt 0 ] 2>/dev/null; then
                               r_dsent=$(( (r_sent - prev_rsent) * 1000 / rp_w ))
                               r_dwr=$(( (r_wr - prev_rwr) * 1000 / rp_w ))
                               r_dfl=$(( (r_fl - prev_rfl) * 1000 / rp_w ))
                               r_drp=$(( (r_rp - prev_rrp) * 1000 / rp_w ))
-                              r_net=$(( r_sent - r_wr )); r_fs=$(( r_wr - r_fl ))
-                              r_ap=$(( r_fl - r_rp )); r_tot=$(( r_sent - r_rp ))
                           fi
-                          prev_rsent=$r_sent; prev_rwr=$r_wr; prev_rfl=$r_fl; prev_rrp=$r_rp
-                          prev_rp_ms=$t1;;
+                          # ★基线只在行值非空时滚动 (2026-11-16 复核修, 对齐 ISTAT 段):
+                          # walsender 重连/startup 态某帧 LSN 列可为 NULL, 无条件滚动
+                          # 会把 prev 写成空串, 下一帧守卫 [ -n ] 失败多空一帧。
+                          if [ -n "$r_sent" ]; then
+                              prev_rsent=$r_sent; prev_rwr=$r_wr; prev_rfl=$r_fl; prev_rrp=$r_rp
+                              prev_rp_ms=$t1
+                          fi;;
                     DBM)  IFS='|' read -r m_used m_max m_shmax m_shused m_dyu m_dym m_dyp m_shr m_shrp m_other m_sbuf <<< "$line";;
                     WAIT) IFS='|' read -r w_io w_lock w_lwlock w_stat w_cpu <<< "$line";;
                     CTX)  ctx_txt="$line";;
