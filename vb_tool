@@ -26030,7 +26030,7 @@ PSQLEOF
 # ================== vtop: oratop-style real-time view ==================
 vtop_help() {
     echo "Options for vtop:"
-    echo "  Usage: vb_tool vtop [-i <sec>] [--once]"
+    echo "  Usage: vb_tool vtop [-i <db_sec>] [-O <os_sec>] [--once]"
     echo "  Description: real-time monitor -- CPU (top-style states) / memory (free-style)"
     echo "               / data_dir filesystem (df) + its disk IO (iops, MB/s, avg latency;"
     echo "               read and write split; lsds disk metadata) / network / dbmem"
@@ -26038,7 +26038,10 @@ vtop_help() {
     echo "               / block roots / top SQL (grouped by sqlid, ranked by real CPU%)"
     echo "               / wait distribution"
     echo "    -P <port>: database port (default: current \$PGPORT)"
-    echo "    -i <sec>:   refresh interval, 1-60 (default 15); sub-pages refresh at 3x"
+    echo "    -i <sec>:   DB part interval, 1-60 (default 15): main-screen DB sections and
+                DB sub-pages baseline. DB sub-pages default 5s
+    -O <sec>:   OS part interval, 1-60 (default 3): main-screen OS rows and OS
+                sub-pages (iostat/cpu/vmstat/net); the frame ticks at this pace"
     echo "    --once:     print one frame and exit (non-interactive)"
     echo "    --no-color: no ANSI colour (keeps the in-place redraw); also honoured:"
     echo "                the NO_COLOR environment variable and TERM=dumb/empty"
@@ -26610,7 +26613,10 @@ _vtop_lv() {
 }
 
 _vtop_print_os() { # main-screen OS block; reads caller-scope vars (dynamic scoping)
-    _vtop_sec "OS Statistics"
+    # the banner carries the section's SAMPLE TIME, not its cadence: in a
+    # replayed frame (DB tail cached between -i refreshes) the VASTBASE banner
+    # keeps its collect timestamp -- data age is visible at a glance.
+    _vtop_sec "OS Statistics ($(date '+%T'))"
     # every section below is TWO lines -- names then values -- see _vtop_lv
     # ---- CPU: top's 8 states, spelled out (user's spec: no abbreviations) ----
     local os_col=""
@@ -29059,7 +29065,7 @@ _vtop_print_frame() { # $1=frame file: redraw in place, or plain dump
 _vtop_cleanup() {
     [ "${BASHPID:-$$}" = "$$" ] || return 0
     pkill -P "$BASHPID" 2>/dev/null
-    rm -f "${_vtop_f:-}" "${_vtop_f:-}.box."* "/tmp/vbtop_q.$$.err" \
+    rm -f "${_vtop_f:-}" "${_vtop_f:-}.box."* "${_vtop_dbcache:-}" "/tmp/vbtop_q.$$.err" \
           "${TMPDIR:-/tmp}/vbtop_wait.$$.prev" "${TMPDIR:-/tmp}/vbtop_istat.$$.prev" "${TMPDIR:-/tmp}/vbtop_repl.$$.prev" \
           "${TMPDIR:-/tmp}"/vbtop_stack."$$".* "${TMPDIR:-/tmp}"/vbtop_stkch."$$".* "${TMPDIR:-/tmp}"/vbtop_stkagg."$$".* 2>/dev/null
     # ★主屏并行采集的分段结果目录 (信号打断帧时车道文件会残留; 下次运行也会自愈清掉,
@@ -29223,11 +29229,13 @@ SQLEOF
 }
 
 run_vtop() {
-    local interval=15 once=0 want_color="" want_plain=0
+    local interval=15 osint=3 once=0 want_color="" want_plain=0
     while [ $# -gt 0 ]; do
         case "$1" in
             -i)       [ $# -lt 2 ] && { echo "Error: -i requires a value (seconds)" >&2; return 2; }
                       interval="$2"; shift 2;;
+            -O)       [ $# -lt 2 ] && { echo "Error: -O requires a value (seconds)" >&2; return 2; }
+                      osint="$2"; shift 2;;
             -n)       echo "Error: -n is no longer supported (the main screen's TOPSQL shows one top-1 row, and only when cpu_usage% > 50)" >&2; return 2;;
             --once)   once=1; shift;;
             # ---- terminal capability switches (user's question 2026-09-27:
@@ -29236,11 +29244,19 @@ run_vtop() {
             --no-color) want_color=0; shift;;
             --plain)    want_plain=1; shift;;    # no colour AND no cursor control
             -h|--help) vtop_help; return 0;;
-            *)        echo "Error: unknown option '$1' (usage: vb_tool vtop [-i <sec>] [--once] [--color|--no-color|--plain])" >&2; return 2;;
+            *)        echo "Error: unknown option '$1' (usage: vb_tool vtop [-i <db_sec>] [-O <os_sec>] [--once] [--color|--no-color|--plain])" >&2; return 2;;
         esac
     done
     case "$interval" in ''|*[!0-9]*) echo "Error: -i expects seconds (1-60)" >&2; return 2;; esac
     if [ "$interval" -lt 1 ] || [ "$interval" -gt 60 ]; then echo "Error: -i must be 1-60" >&2; return 2; fi
+    # ★dual cadence (user 2026-11-16): -i = DB part (DB sections + DB sub-screens),
+    # -O = OS part (main-screen OS rows + OS sub-screens). The frame TICK follows
+    # the OS cadence, never slower than the DB one.
+    case "$osint" in ''|*[!0-9]*) echo "Error: -O expects seconds (1-60)" >&2; return 2;; esac
+    if [ "$osint" -lt 1 ] || [ "$osint" -gt 60 ]; then echo "Error: -O must be 1-60" >&2; return 2; fi
+    osint=$((10#$osint))
+    local os_tick=$osint
+    [ "$interval" -lt "$os_tick" ] && os_tick=$interval
     # ★前导零必须归一化 (2026-09-28 修的可复现崩溃): `[ "08" -lt 1 ]` 和 `[ "08" -gt 60 ]`
     # 都按**十进制**判读 ⇒ "08" 顺利通过校验; 但 bash 的**算术展开**把前导零当八进制,
     # 而 08/09 不是合法八进制 ⇒ 进任何子屏的第一帧, `_vtop_pg` 里那句
@@ -29757,6 +29773,9 @@ order by s.sz desc;"
     trap '_vtop_cleanup; exit 131' QUIT
     trap '_vtop_cleanup; kill -STOP "$$"' TSTP
     trap '[ "$interactive" = "1" ] && [ -t 0 ] && stty -echo 2>/dev/null' CONT
+    local _vtop_dbcache
+    _vtop_dbcache=$(mktemp /tmp/vbtop_dbcache.XXXXXX)
+    local db_next=0 db_ok=0 db_dirty=1   # schedule, reachability, unrendered-collect flag
     local screen="main"          # active screen: main | mem (one screen runs at a time)
     local interactive=0 # key legend line: only when a human is
     [ -t 1 ] && [ "$once" != "1" ] && interactive=1
@@ -29805,14 +29824,16 @@ order by s.sz desc;"
             # otherwise sit still for 45s. Enter refreshes immediately on ANY
             # screen (see the key dispatch); other keys keep their old meaning.
             if [ "$screen" = "main" ]; then
-                rd_tmo=$interval
+                rd_tmo=$os_tick
             else
-                rd_tmo=$((interval * 3)); [ "$rd_tmo" -gt 15 ] && rd_tmo=15
+                # ★DB sub-screens: default 5s (user 2026-11-16), never above the
+                # DB main cadence; replaces the old 3x-interval-capped-15 pacing
+                rd_tmo=5; [ "$interval" -lt 5 ] && rd_tmo=$interval
                 # ★OS-side pages: flat 3s, and the 5s first-refresh rule below does
                 # NOT apply to them (user's call 2026-09-28). Inert while
                 # _vtop_os_screens is empty -- no OS page exists yet.
                 case " ${_vtop_os_screens} " in *" ${screen} "*)
-                    rd_tmo=3; sub_first=0;;
+                    rd_tmo=$os_tick; sub_first=0;;
                 esac
                 # ★only the DELTA pages keep the quick 5s first refresh (user's call
                 # 2026-09-28: 「m的时候 第一次刷新也是15s吧 因为这个不需要增量 而且
@@ -30131,6 +30152,10 @@ limit 1;
         # 根因 (见 _vtop_db_collect 头注释)。现在逐段走 _vtop_q, 每段独享子屏同款
         # 12s 预算; 段级失败只损失该段 (帧首复位渲染 '-'), 只有全部段落都无数据
         # (库真不可达) 才输出空串走下面的不可达路径。
+        # ★dual cadence (user 2026-11-16): DB part refreshes only every -i
+        # seconds; between refreshes the OS-tick frames below replay the
+        # cached DB tail with fresh OS numbers. db/db_ok/db_next are the cache.
+        if [ "$((t1 / 1000))" -ge "$db_next" ]; then
         db=$(_vtop_db_collect "$(printf '%s\n%s\n' "$VT_SQL" "$VT_TOP")")
         # ★完整性哨兵 (2026-09-26 设计, 2026-11-05 语义更新): ===EOD 由收集器在
         # >=1 段出数时补发; 空 db = 一段都没出数 = 库不可达 -> 整帧走"DB 不可用"路径
@@ -30138,6 +30163,31 @@ limit 1;
         # 要么缺席 (缺席区由每帧开头的变量复位渲染成 '-'), 陈旧数据上屏的老风险
         # 由复位块继续兜底。
         case "$db" in *"===EOD"*) ;; *) db="";; esac
+        [ -n "$db" ] && db_ok=1 || db_ok=0
+        db_dirty=1
+        db_next=$((t1 / 1000 + interval))
+        fi
+        # compact ONLY when there is nothing fresh to render: a frame that just
+        # collected (db_dirty=1) must take the full path, or the new data would
+        # sit unrendered while the STALE cache keeps replaying (the freeze bug
+        # this flag fixed -- 16 identical frames under live load).
+        if [ "$db_ok" = "1" ] && [ "$db_dirty" = "0" ] && [ -s "$_vtop_dbcache" ]; then
+            # ---- OS-tick frame (between DB refreshes): fresh OS + cached tail ----
+            {
+            printf "%s[vbtop]%s %s%s%s  %s│%s  %sLinux %s%s  %s│%s  %s%s%s\n" \
+                "$c_sec" "$c_off" "$c_grn" "$h_node" "$c_off" \
+                "$c_lbl" "$c_off" "$c_blu" "$kver" "$c_off" \
+                "$c_lbl" "$c_off" "$c_grn" "$h_ver" "$c_off"
+            printf "${c_lbl}port${c_off} ${c_grn}%s${c_off}   ${c_lbl}up${c_off} %s   %s  ${c_lbl}│${c_off}  ${c_dim}%s${c_off}\n" \
+                "${PGPORT:-5432}" \
+                "$(awk -v s="$h_up" 'BEGIN{printf "%dd%02dh%02dm", int(s/86400), int(s%86400/3600), int(s%3600/60)}')" \
+                "$cores" "$(date '+%F %T')"
+            _vtop_print_os
+            cat "$_vtop_dbcache"
+            # notice/hint: appended once per frame by the shared interactive
+            # zone AFTER this brace -- not here too (that double-printed HINT)
+            } > "$_vtop_f"
+        else
         {
         if [ -z "$db" ]; then
             # ★[vbtop] + │ separators are the STRUCTURAL half of the header styling
@@ -30145,8 +30195,8 @@ limit 1;
             # user's was doing exactly that, 2026-09-26) -- colour is the other half.
             printf "%s[vbtop]%s %s(db unreachable)%s  %s│%s  %sLinux %s%s\n" \
                 "$c_sec" "$c_off" "$c_red" "$c_off" "$c_lbl" "$c_off" "$c_blu" "$kver" "$c_off"
-            printf "${c_lbl}port${c_off} ${c_grn}%s${c_off}   ${c_lbl}refresh${c_off} %ss   %s  ${c_lbl}│${c_off}  ${c_dim}%s${c_off}\n" \
-                "${PGPORT:-5432}" "$interval" "$cores" "$(date '+%F %T')"
+            printf "${c_lbl}port${c_off} ${c_grn}%s${c_off}   %s  ${c_lbl}│${c_off}  ${c_dim}%s${c_off}\n" \
+                "${PGPORT:-5432}" "$cores" "$(date '+%F %T')"
             _vtop_print_os
         else
             # ★每帧复位 (2026-09-28 补 r_*/x_*): bash 的 `read` 不会把没读到的变量清空,
@@ -30205,12 +30255,12 @@ limit 1;
                         # so it does not compete with the identity line above. The one
                         # exception is the DB PORT -- it is a database fact (green),
                         # the number you actually check when several instances are up.
-                        printf "${c_lbl}port${c_off} ${c_grn}%s${c_off}   ${c_lbl}up${c_off} %s   ${c_lbl}refresh${c_off} %ss   %s  ${c_lbl}│${c_off}  ${c_dim}%s${c_off}\n" \
+                        printf "${c_lbl}port${c_off} ${c_grn}%s${c_off}   ${c_lbl}up${c_off} %s   %s  ${c_lbl}│${c_off}  ${c_dim}%s${c_off}\n" \
                             "${PGPORT:-5432}" \
                             "$(awk -v s="$h_up" 'BEGIN{printf "%dd%02dh%02dm", int(s/86400), int(s%86400/3600), int(s%3600/60)}')" \
-                            "$interval" "$cores" "$(date '+%F %T')"
+                            "$cores" "$(date '+%F %T')"
                         _vtop_print_os
-                        _vtop_sec "VASTBASE Statistics"
+                        _vtop_sec "VASTBASE Statistics ($(date '+%T'))"
                         if [ -n "$s_tot" ]; then
                             # Two layers (labels above values) like the OS block, and
                             # FULL names instead of tot/act/idl/idtx/ltx60 (user's
@@ -30488,17 +30538,25 @@ printf '           %-14s %-22s %-8.8s %-9s %.62s\n' "-" "-" "-" "-" "-"
                 _vtop_lv LWLOCK "" "NONE|-"
             fi
         fi
-        if [ "$interactive" = "1" ]; then
-            [ -n "$_vtop_notice" ] && printf '%s\n' "$_vtop_notice"
-            _vtop_keys_hint "$screen"
-        fi
         } > "$_vtop_f"
+        # cache the DATA tail (banner onward, NO notice/hint lines: the
+        # interactive zone is appended per-frame below -- baking it into the
+        # cache would double-print HINT and replay one-frame notices for a
+        # whole -i window) for the OS-tick frames
+        awk '/VASTBASE Statistics/{f=1} f{print}' "$_vtop_f" > "$_vtop_dbcache" 2>/dev/null
+        db_dirty=0
+        fi
+        # per-frame interactive zone (both full and compact frames append it)
+        if [ "$interactive" = "1" ]; then
+            { [ -n "$_vtop_notice" ] && printf '%s\n' "$_vtop_notice"
+              _vtop_keys_hint "$screen"; } >> "$_vtop_f"
+        fi
         _vtop_notice=""          # a notice lives exactly one frame
         _vtop_print_frame "$_vtop_f"
         [ "$once" = "1" ] && break
         t0=$t1; d0=$d1; c0=$c1; n0=$n1; p0=$p_cur; g0=$g_cur; v0=$v1
     done
-    rm -f "$_vtop_f"
+    rm -f "$_vtop_f" "$_vtop_dbcache"
     return 0
 }
 
