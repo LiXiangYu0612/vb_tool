@@ -30002,7 +30002,7 @@ order by s.sz desc;"
     local ist_qps= ist_cm= ist_roll= ist_tps= ist_lg= ist_ph= ist_pw= ist_rd= ist_tp= ist_dl=
 
     # ---- sampling loop ----
-    local t0 t1 d0 d1 c0 c1 n0 n1 dt key rrc rd_tmo
+    local t0 t1 d0 d1 c0 c1 n0 n1 dt key rrc rd_tmo _wk _ss_t0 _last_work_ms=0
     local ist_w rp_w ist_wmax rp_wmax   # DB 侧两段各自的实测窗口(ms)与过期上限
     local a_user a_nice a_sys a_idle a_iowait a_irq a_softirq a_steal a_fmax a_fmin a_favg
     local a_vbcpu v0 v1 clk
@@ -30065,6 +30065,13 @@ order by s.sz desc;"
                 # auto refresh simply comes 5s after that manual frame.
                 [ "$sub_first" = "1" ] && { [ "$rd_tmo" -gt 5 ] && rd_tmo=5; sub_first=0; }
             fi
+            # ★墙钟锚定 (2026-11-16, 用户看 CPU 子屏横幅 3s 实际 5s): read 超时是
+            #   "静默时长", 不是帧间墙钟 —— 帧本身还有工作量(OS 采样/DB 采集/页内
+            #   自带采样窗, cpu 页 mpstat 1 2 就 ≈2s)。下一拍扣除上一帧实测工作量,
+            #   "refresh Ns"=帧落地节律; 工作量≥节律时扣到 1s, 墙钟=物理最短。
+            _wk=$(( _last_work_ms / 1000 ))
+            [ "$_wk" -gt 0 ] && [ "$rd_tmo" -gt "$_wk" ] && rd_tmo=$(( rd_tmo - _wk ))
+            [ "$rd_tmo" -lt 1 ] && rd_tmo=1
             IFS= read -r -t "$rd_tmo" -n 1 key
             rrc=$?
             # ---- key dispatch (case-sensitive)
@@ -30172,8 +30179,10 @@ order by s.sz desc;"
         # the renderer is picked by name: adding an entry = key map + _vtop_screen_<name>
         # + its legend in _vtop_keys_hint(); this branch never needs touching again
         if [ "$screen" != "main" ]; then
+            _ss_t0=$(date +%s%3N)
             { "_vtop_screen_$screen"; [ "$interactive" = "1" ] && _vtop_keys_hint "$screen"; } > "$_vtop_f"
             _vtop_print_frame "$_vtop_f"
+            _last_work_ms=$(( $(date +%s%3N) - _ss_t0 ))
             # no --once check here: screen is only ever switched inside the key
             # branch, which is skipped when once=1, so this path is interactive-only
             continue
@@ -30811,6 +30820,7 @@ printf '           %-14s %-22s %-8.8s %-9s %.62s\n' "-" "-" "-" "-" "-"
         fi
         _vtop_notice=""          # a notice lives exactly one frame
         _vtop_print_frame "$_vtop_f"
+        _last_work_ms=$(( $(date +%s%3N) - t1 ))   # 主屏帧工作量: t1(帧构建起点, 含 OS 采样/采集)→出屏
         [ "$once" = "1" ] && break
         t0=$t1; d0=$d1; c0=$c1; n0=$n1; p0=$p_cur; g0=$g_cur; v0=$v1
     done
