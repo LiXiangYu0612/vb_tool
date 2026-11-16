@@ -26715,7 +26715,14 @@ _vtop_print_os() { # main-screen OS block; reads caller-scope vars (dynamic scop
         # row even when it is red: see the "!" field marker in _vtop_lv.
         local dsk_col=""
         if awk -v r="$d_rms" -v w="$d_wms" 'BEGIN{exit !(r>=20 || w>=20)}'; then dsk_col=$c_red; fi
+        # ★device first column (user 2026-11-17: 那你要把设备名写上吧): the I/O
+        #   numbers follow the same per-frame pick as the DSK row above, but the
+        #   name living only there was not readable off this row -- carry it here
+        #   too. Single disk: the fs device (vda1, partition counters). Multi:
+        #   the worst-of-N pick of THIS frame (can switch disk frame to frame;
+        #   the "(worst of N)" suffix stays on the DSK row).
         _vtop_lv I/O "$dsk_col" \
+            "device|${d_pick:--}" \
             "r_iops|$d_rops" "r_mbps|$d_rmb" "r_wait_ms|$d_rms" \
             "w_iops|$d_wops" "w_mbps|$d_wmb" "w_wait_ms|$d_wms" \
             "aqu_sz|$d_aqu" "util(RAID/SSD ignore)!|$d_util"
