@@ -29118,9 +29118,17 @@ _vtop_keys_hint() { # $1=screen -> key legend line, interactive mode only.
     # line of every page, this legend is keys-only again. The main screen does
     # not need it either: its header line already prints "refresh 15s".
     case "$1" in
-        main) printf '%sHINT%s    %ss=sess l=ltx a=istat e=wait x=xlog r=repl m=dbmem+memctx+topmem t=topsql k=lock g=stack d=iostat c=cpu v=vmstat n=net f=osmem%s
-        %sEnter=cmd  ESC=cmd  q=quit%s\n' \
-                      "${c_grn:-}" "${c_off:-}" "${c_sec:-}" "${c_off:-}" "${c_ylw:-}" "${c_off:-}" ;;
+        main)
+            # ★光标激活时第 hint_cur 个条目包【】(用户令 2026-11-17; 用户终端不渲染
+            #   颜色 ⇒ 标记必须是字符载体)。hint_cur 经动态作用域取 run_vtop 的 local。
+            local _hl="s=sess l=ltx a=istat e=wait x=xlog r=repl m=dbmem+memctx+topmem t=topsql k=lock g=stack d=iostat c=cpu v=vmstat n=net f=osmem"
+            local _h2="Enter=cmd  ESC=cmd  q=quit"
+            if [ "${hint_cur:-0}" -ge 1 ] 2>/dev/null && [ "${hint_cur:-0}" -le 15 ] 2>/dev/null; then
+                _hl=$(printf '%s\n' "$_hl" | awk -v n="$hint_cur" '{for(i=1;i<=NF;i++) if(i==n) $i="【" $i "】"}1')
+                _h2="←→↑↓=move  Enter=open  ESC=cmd  q=quit"
+            fi
+            printf '%sHINT%s    %s%s%s\n        %s%s%s\n' \
+                      "${c_grn:-}" "${c_off:-}" "${c_sec:-}" "$_hl" "${c_off:-}" "${c_ylw:-}" "$_h2" "${c_off:-}" ;;
         *)    printf '%sHINT%s    %sESC=back%s   %sEnter=refresh  q=quit%s\n' \
                       "${c_grn:-}" "${c_off:-}" "${c_sec:-}" "${c_off:-}" "${c_ylw:-}" "${c_off:-}" ;;
     esac
@@ -29128,6 +29136,7 @@ _vtop_keys_hint() { # $1=screen -> key legend line, interactive mode only.
 
 _vtop_drain_ret=""   # set by _vtop_drain_keys when a real key followed the ESC
 _vtop_drain_seq=""   # set to 1 when the ESC turned out to be part of a sequence
+_vtop_drain_fin=""   # final byte of the eaten sequence (A/B/C/D = arrows, 2026-11-17)
 _vtop_drain_keys() { # ESC arrived: eat the escape-sequence tail, nothing else
     # up = ESC [ A , ctrl+right = ESC [ 1 ; 5 C ...: read -n1 only takes the ESC
     # byte. Only a real CSI/SS3 sequence is eaten: any other byte (a key that
@@ -29135,9 +29144,10 @@ _vtop_drain_keys() { # ESC arrived: eat the escape-sequence tail, nothing else
     # -- otherwise a coalesced "ESC m <Enter>" would lose its Enter. bash cannot
     # push a byte back to stdin, hence the hand-back variable.
     # _vtop_drain_seq tells the caller "that ESC was an arrow/function key, not
-    # a real ESC press".
+    # a real ESC press"; _vtop_drain_fin keeps the final byte so the caller can
+    # tell WHICH arrow it was (cursor feature 2026-11-17).
     local _d
-    _vtop_drain_ret=""; _vtop_drain_seq=""
+    _vtop_drain_ret=""; _vtop_drain_seq=""; _vtop_drain_fin=""
     IFS= read -r -t 0.03 -n 1 _d || return 0
     case "$_d" in
         '['|'O') ;;                              # CSI / SS3 introducer: eat the tail
@@ -29147,7 +29157,7 @@ _vtop_drain_keys() { # ESC arrived: eat the escape-sequence tail, nothing else
     while IFS= read -r -t 0.03 -n 1 _d; do
         case "$_d" in
             [0-9\;\?\ ]) : ;;                    # parameter bytes
-            *) return 0 ;;                       # final byte: sequence complete
+            *) _vtop_drain_fin="$_d"; return 0 ;;# final byte: sequence complete
         esac
     done
 }
@@ -30045,6 +30055,10 @@ order by s.sz desc;"
         stty -echo 2>/dev/null && _vtop_stty=1
     fi
     local prev_rsent= prev_rwr= prev_rfl= prev_rrp=
+    # ★HINT 光标 (用户令 2026-11-17: 方向键移动、回车进对应子屏): hint_cur = 选中项
+    #   (1..15, 0=未激活); _hint_screens 与 HINT 行的 15 个条目一一对应 (顺序也是)。
+    local hint_cur=0
+    local _hint_screens=(sess ltx istat wait xlog repl memctx topsql lock stack iostat cpu vmstat net osmem)
     local prev_xc="" prev_xr="" prev_br="" prev_bh="" prev_tb="" prev_lsn="" prev_nc="" prev_pw=""
     local ist_qps= ist_cm= ist_roll= ist_tps= ist_lg= ist_ph= ist_pw= ist_rd= ist_tp= ist_dl=
 
@@ -30138,9 +30152,22 @@ order by s.sz desc;"
                 $'\x1b')
                     _vtop_drain_keys                    # eat the escape-sequence tail
                     if [ -n "$_vtop_drain_seq" ]; then
-                        # the ESC was an arrow/function key, not an ESC press:
-                        # main screen -> inert, sub-screen -> refresh (fall through)
-                        [ "$screen" = "main" ] && continue
+                        # the ESC was an arrow/function key, not an ESC press.
+                        # ★方向键 = 主屏 HINT 光标 (用户令 2026-11-17: 上下左右移动光标
+                        #   到子屏条目、回车进对应屏, 且不影响父屏刷新): A=up/D=left
+                        #   = 前一项, B=down/C=right = 后一项, 15 项环形回绕; 0=未激活,
+                        #   首次按方向键从 1 号起。改光标后落到本循环底部的渲染 (与
+                        #   超时帧同一条路径) ⇒ 按键即见【】标记; 纯键派发+渲染, 不碰
+                        #   采样节律/基线。其它序列 (PgUp/F1 等) 在主屏仍惰性, 子屏
+                        #   方向键维持原语义 (=refresh)。
+                        if [ "$screen" = "main" ]; then
+                            case "${_vtop_drain_fin:-}" in
+                                A|D) if [ "${hint_cur:-0}" -le 1 ]; then hint_cur=15; else hint_cur=$((hint_cur-1)); fi ;;
+                                B|C) if [ "${hint_cur:-0}" -eq 0 ] || [ "${hint_cur:-0}" -ge 15 ]; then hint_cur=1; else hint_cur=$((hint_cur+1)); fi ;;
+                                *) continue ;;
+                            esac
+                            # fall through: render this frame so the cursor move shows now
+                        fi
                     elif [ "$screen" != "main" ]; then
                         screen=main
                         # fresh sampling baseline: without this the first main frame
@@ -30180,8 +30207,16 @@ order by s.sz desc;"
                     # with icrnl off; with icrnl on (the norm) Enter is an EMPTY key
                     # and lands in the "" branch below.
                     if [ "$screen" = "main" ]; then
-                        _vtop_cmd_exec ""
-                        [ "$_vtop_cmd_quit" = "1" ] && break
+                        # ★光标激活时 Enter = 进所选子屏 (用户令 2026-11-17); 未激活
+                        #   = 原命令行 (用户令"原有进入子屏的方式也支持", 2026-09-27
+                        #   "主页面的Enter也等于cmd"语义不变)。
+                        if [ "${hint_cur:-0}" -ge 1 ] 2>/dev/null; then
+                            screen=${_hint_screens[$((hint_cur-1))]}
+                            sub_first=1
+                        else
+                            _vtop_cmd_exec ""
+                            [ "$_vtop_cmd_quit" = "1" ] && break
+                        fi
                     fi
                     ;;
                 "")
@@ -30193,8 +30228,14 @@ order by s.sz desc;"
                     # branch below, whose continue would starve the frame loop forever
                     # (screen frozen on frame 1).
                     if [ "$rrc" -eq 0 ] && [ "$screen" = "main" ]; then
-                        _vtop_cmd_exec ""
-                        [ "$_vtop_cmd_quit" = "1" ] && break
+                        # 同上: 光标激活 = 进所选屏, 否则原命令行 (icrnl 终端的 Enter 走这)
+                        if [ "${hint_cur:-0}" -ge 1 ] 2>/dev/null; then
+                            screen=${_hint_screens[$((hint_cur-1))]}
+                            sub_first=1
+                        else
+                            _vtop_cmd_exec ""
+                            [ "$_vtop_cmd_quit" = "1" ] && break
+                        fi
                     fi
                     ;;
                 *)
