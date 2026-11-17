@@ -30486,8 +30486,8 @@ limit 1;
             # 会**原封不动沿用上一帧的值** —— 掉线的备库会被画成"完美追平"(lag 0B、sent/s 0B),
             # 正是 ===EOD 哨兵注释里点名要防的「陈旧数据看着像实时」。文本类 (ctx_txt/
             # lwl_txt/blk_raw/ltx_raw) 本来就是这么做的, 这里把数值类补齐。基线 prev_* 不在
-            # 此列 (它必须跨帧存活); 没有行返回时由循环末尾的 n_repl 判断单独清掉。
-            ctx_txt="" lwl_txt="" blk_raw="" ltx_raw="" ltxc_a="" ltxc_i="" n_mem=0 n_top=0 n_repl=0
+            # 此列 (它必须跨帧存活): 空段/截止段一律不擦基线 (2026-11-17 规矩, 见循环末尾注)。
+            ctx_txt="" lwl_txt="" blk_raw="" ltx_raw="" ltxc_a="" ltxc_i="" n_mem=0 n_top=0
             r_app="" r_state="" r_sync="" r_sent="" r_wr="" r_fl="" r_rp="" r_slot=""
             r_dsent="" r_dwr="" r_dfl="" r_drp="" r_net="" r_fs="" r_ap="" r_tot=""
             x_cur="" x_ckr="" x_old="" x_cbm="" x_cnt="" x_sz="" x_rest="" x_arch=""
@@ -30737,7 +30737,6 @@ printf '           %-14s %-22s %-8.8s %-9s %.62s\n' "-" "-" "-" "-" "-"
                           fi;;
                     XLOG) IFS='|' read -r x_cur x_ckr x_old x_cbm x_cnt x_sz x_rest x_arch <<< "$line";;
                     REPL) IFS='|' read -r r_app r_state r_sync r_sent r_wr r_fl r_rp r_slot <<< "$line"
-                          n_repl=1   # ★这一帧确实有备库行 (见循环末尾 n_repl=0 的基线清理)
                           # ★LSN 四列按"每秒推进量"显示(user's call 2026-09-26),与全帧其它速率列同口径;
                           # 四个 lag 仍为瞬时值,由当前位点相减得到。首帧无基线 ⇒ 全 '-'
                           # ★窗口 = prev_rp_ms(本段基线盖章)→本帧 (2026-11-16 终版):
@@ -30801,9 +30800,9 @@ printf '           %-14s %-22s %-8.8s %-9s %.62s\n' "-" "-" "-" "-" "-"
                           n_top=$((n_top+1));;
                 esac
             done <<< "$db"
-            # ★REPL 段被 12s 帧截止砍掉时同样 n_repl=0, 与"真没备库"不可区分 —— 旧代码
-            #   在这里连基线一起清, 慢库上 REPL 四列永久 '-' 而 ISTAT 正常 (2026-11-17
-            #   独立复核)。对齐 ISTAT 段既立规矩: 空段不擦基线。假 sent/s 由过期守卫挡
+            # ★REPL 段被 12s 帧截止砍掉 (只发标记无行) 与"真没备库"(掉线/槽删)不可区分
+            #   —— 旧代码在这里连基线一起清, 慢库上 REPL 四列永久 '-' 而 ISTAT 正常
+            #   (2026-11-17 独立复核)。对齐 ISTAT 段既立规矩: 空段不擦基线。假 sent/s 由过期守卫挡
             #   (prev_rp_ms 太旧 ⇒ rp_w > rp_wmax ⇒ 速率跳过、下一帧重锚), 备库切换的
             #   倒退 delta 由速率块新加的负钳挡; 真清基线只剩 ESC 回主屏一条路。
             # ★no TOP SQL rows this frame -> keep the header's column structure readable with a
