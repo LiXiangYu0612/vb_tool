@@ -26447,7 +26447,7 @@ _vtop_net() {
              ifc = $1; sub(/:$/, "", ifc)
              if (ifc in sk) next
              if (ifc ~ /\./) next
-             if (ifc ~ /^(lo|veth.*|br-.*|docker.*|virbr.*|tap.*|tun.*|dummy.*|vxlan.*|cni.*|cali.*|flannel.*|kube-.*|lxc.*)$/) next
+             if (ifc ~ /^(lo|veth.*|br-.*|docker.*|virbr.*|tap.*|tun.*|dummy.*|vxlan.*|macvlan.*|macvr.*|ipvlan.*|cni.*|cali.*|flannel.*|kube-.*|lxc.*)$/) next
              rb+=$2; rp+=$3; re+=$4; rd+=$5; tb+=$10; tp+=$11; te+=$12; td+=$13
          }
          END{print rb+0, rp+0, re+0, rd+0, tb+0, tp+0, te+0, td+0}' /proc/net/dev
@@ -27657,7 +27657,10 @@ _vtop_screen_wait() { # WAIT page -- two blocks, both [SESS]-style (boxed banner
             [ "$_dw" -lt 0 ] && _dw=0     # counters restart on instance restart
             [ "$_dt" -lt 0 ] && _dt=0
         fi
-        if [ "$_dw" -gt 0 ] || [ "$_dt" -gt 0 ]; then
+        # ★两侧增量都必须 >0 才出数 (2026-11-17 三轮复核): 计数器重置窗里 _dw 被钳 0
+        #   而 _dt 仍为正 ⇒ 旧 "或" 条件会印 waits=0 | total>0 | avg 0us 的不可能行。
+        #   waits 没涨就没本窗数据, 该行当本窗没有这个事件。
+        if [ "$_dw" -gt 0 ] && [ "$_dt" -gt 0 ]; then
             _avg=0; [ "$_dw" -gt 0 ] && _avg=$(( _dt / _dw ))     # us per wait
             if [ "$we_ddbt" -gt 0 ]; then
                 _pct=$(awk -v d="$_dt" -v b="$we_ddbt" 'BEGIN{printf "%.2f", 100*d/b}')
@@ -27826,7 +27829,13 @@ from pg_ls_waldir() where name not like '%backup%' and length(name)=24")
     }
     xl_cbmw=$(xl_walname "${x_cbm:--}"); xl_srw=$(xl_walname "${x_sr:--}"); xl_mrw=$(xl_walname "${x_mr:--}")
     # health: same limit and same 16MB-segment lags xloghc compares
-    xl_lim=$(( ${xl_keepguc:-128} + 2 * ${xl_csegguc:-128} + 1 ))
+    # ★GUC 缺席不许拿 128 顶 (2026-11-17 三轮复核): checkpoint_segments 在目标构建被移除
+    #   时, ${xl_csegguc:-128} 会把滞后阈值凭空翻倍, "unhealthy" 被静默判成 healthy。
+    #   两个 GUC 都拿到数字才算阈值; 否则 xl_lim 空, 下面所有判据跳过, health 摆 '-'。
+    case "${xl_keepguc:-}${xl_csegguc:-}" in
+        ''|*[!0-9]*) xl_lim="";;
+        *)           xl_lim=$(( xl_keepguc + 2 * xl_csegguc + 1 ));;
+    esac
     for xl_k in "$(_vtop_lsn_gap "$x_cur_r" "$x_ckr"):checkpoint" \
                  "$(_vtop_lsn_gap "$x_cur_r" "$x_cbm"):cbm" \
                  "$(_vtop_lsn_gap "$x_cur_r" "$x_sr"):restart_lsn" \
@@ -27860,6 +27869,11 @@ from pg_ls_waldir() where name not like '%backup%' and length(name)=24")
     _vtop_p3 keep_xlog_size "$([ "$xl_keep" = "-" ] && echo - || echo "$((xl_keep * 16)) MB")" \
              total_xlog_size "${xl_size:--}" '' ''
     # ★health is the LAST line of the summary (user's call 2026-09-28)
+    # ★GUC 缺席时 health 摆 '-' (2026-11-17 三轮复核): 没有阈值就没法判, "healthy"
+    #   是编造的结论 (缺=不知道)。
+    if [ -z "$xl_lim" ] && [ "$xl_health" = "" ]; then
+        xl_health="- (wal_keep_segments/checkpoint_segments unavailable: limit unknown)"
+    fi
     _vtop_p1 health "${xl_health:-healthy}"
     # ---- Xlog Healthy Detail ----
     _vtop_sh 'Xlog Healthy Detail'
@@ -28658,18 +28672,40 @@ _vtop_screen_osmem() {
     # ---- 2. pressure: faults & reclaim (1s measured window) ----
     _vtop_sec "page faults & reclaim (/proc/vmstat, 1s window)"
     t0=$(date +%s%3N)
-    vs0=$(grep -E '^(pgfault|pgmajfault|pgscan_kswapd|pgscan_direct|pgsteal_kswapd|pgsteal_direct|slabs_scanned|kswapd_inodesteal|pgrotated|compact_stall|compact_fail|compact_success|oom_kill|thp_fault_alloc|thp_collapse_alloc) ' /proc/vmstat 2>/dev/null)
+    # ★回收四键必须带分 zone 兜底 (2026-11-17 三轮复核): pgscan_kswapd/pgscan_direct/
+    #   pgsteal_kswapd/pgsteal_direct 汇总项是 5.9+ 内核才有的; 3.10/4.19 (204 就是) 只有
+    #   pgscan_kswapd_normal 这类分 zone 键 —— 旧正则带尾随空格, 分 zone 键一个都抓不到,
+    #   四行回收速率恒 0.0/s、efficiency 假 100%。正则放宽到 (_| ) 二选一, 兜底在 awk 里做
+    #   (口径照抄 _vtop_pgc: 汇总优先、分 zone 求和、排除 _throttle/_khugepaged/_anon/_file)。
+    vs0=$(grep -E '^(pgfault|pgmajfault|slabs_scanned|kswapd_inodesteal|pgrotated|compact_stall|compact_fail|compact_success|oom_kill|thp_fault_alloc|thp_collapse_alloc) |^(pgscan_kswapd|pgscan_direct|pgsteal_kswapd|pgsteal_direct)(_| )' /proc/vmstat 2>/dev/null)
     sleep 1
-    vs1=$(grep -E '^(pgfault|pgmajfault|pgscan_kswapd|pgscan_direct|pgsteal_kswapd|pgsteal_direct|slabs_scanned|kswapd_inodesteal|pgrotated|compact_stall|compact_fail|compact_success|oom_kill|thp_fault_alloc|thp_collapse_alloc) ' /proc/vmstat 2>/dev/null)
+    vs1=$(grep -E '^(pgfault|pgmajfault|slabs_scanned|kswapd_inodesteal|pgrotated|compact_stall|compact_fail|compact_success|oom_kill|thp_fault_alloc|thp_collapse_alloc) |^(pgscan_kswapd|pgscan_direct|pgsteal_kswapd|pgsteal_direct)(_| )' /proc/vmstat 2>/dev/null)
     t1=$(date +%s%3N)
     [ -n "$vs1" ] || { printf '%s  !! /proc/vmstat unreadable%s\n' "${c_red:-}" "${c_off:-}"; printf '\n'; return 0; }
     [ "$t1" -gt "$t0" ] 2>/dev/null || t1=$((t0 + 1000))
     printf '%s\n\n%s\n' "$vs0" "$vs1" | awk -v ms=$((t1 - t0)) '
         NF == 0 { second = 1; next }
         { if (!second) A[$1] = $2 + 0; else B[$1] = $2 + 0 }
+        # ★分 zone 兜底 (2026-11-17 三轮复核, 口径照抄 _vtop_pgc): 汇总键缺失时按
+        #   同前缀分 zone 键求和补出汇总值; 排除 _throttle (sar pgscand 不含) 与
+        #   _khugepaged/_anon/_file (另一条通路/切面)。不能边遍历边插入 ⇒ 先收键名再求和。
+        function norm(M, k,    kk, n2, s, i) {
+            if (k in M) return
+            n2 = 0
+            for (kk in M) if (kk ~ ("^" k "_")) MKEYS[++n2] = kk
+            if (n2 == 0) return
+            s = 0
+            for (i = 1; i <= n2; i++) {
+                if (MKEYS[i] ~ /_throttle$/ || MKEYS[i] ~ /_khugepaged$/ || MKEYS[i] ~ /_(anon|file)$/) continue
+                s += M[MKEYS[i]]
+            }
+            M[k] = s
+        }
         function rate(k) { return (k in A && k in B) ? (B[k] - A[k]) * 1000 / ms : 0 }
         function p(k)   { if (k in A) printf "%-18s %10.1f/s  ", k, rate(k) }
         END {
+            norm(A, "pgscan_kswapd");  norm(A, "pgscan_direct");  norm(A, "pgsteal_kswapd");  norm(A, "pgsteal_direct")
+            norm(B, "pgscan_kswapd");  norm(B, "pgscan_direct");  norm(B, "pgsteal_kswapd");  norm(B, "pgsteal_direct")
             p("pgfault");        p("pgmajfault");      p("pgscan_kswapd");  p("pgscan_direct"); print ""
             p("pgsteal_kswapd"); p("pgsteal_direct");  p("slabs_scanned");  p("kswapd_inodesteal"); print ""
             p("pgrotated");      p("compact_stall");   p("compact_fail");   p("compact_success"); print ""
@@ -28679,7 +28715,10 @@ _vtop_screen_osmem() {
             }
             sc = rate("pgscan_kswapd") + rate("pgscan_direct")
             st = rate("pgsteal_kswapd") + rate("pgsteal_direct")
-            printf "reclaim efficiency: %.0f%% (steal/scan)", (sc > 0 ? st * 100 / sc : 100)
+            # ★sc<=0 印 '-' 不印 100% (2026-11-17 三轮复核): 空窗没有回收活动,
+            #   "100%" 是编造的测量值 (0=确认没有, 缺=不知道)。
+            if (sc > 0) printf "reclaim efficiency: %.0f%% (steal/scan)", st * 100 / sc
+            else        printf "reclaim efficiency: - (no reclaim activity in this window)"
         }'
     printf '\n'
 
@@ -28767,10 +28806,10 @@ _vtop_screen_osmem() {
             #   (实测 DMA32: 旧 32M / 真 1.8G), o0%..o4+% 也变成块数占比 (实测
             #   o4+ 5.3% vs 真实页占比 95.3%, 碎片结论完全反过来)。
             #   计数列仍按"块个数"显示 (o0..o4+ 语义不变), 页数只用于 free 与百分比。
-            total = 0; hi = 0
-            for (i = 5; i <= NF; i++) { w = 2 ^ (i - 5); total += $i * w; if (i >= 9) hi += $i * w }
+            total = 0; hi = 0; hib = 0
+            for (i = 5; i <= NF; i++) { w = 2 ^ (i - 5); total += $i * w; if (i >= 9) { hi += $i * w; hib += $i } }
             printf "%-12s %9s %7d %7d %7d %7d %8d %6.1f%% %6.1f%% %6.1f%% %6.1f%% %6.1f%%\n", zone, h(total * ps),
-                   $5, $6, $7, $8, hi,
+                   $5, $6, $7, $8, hib,
                    (total > 0 ? $5 * 100 / total : 0),     (total > 0 ? $6 * 2 * 100 / total : 0),
                    (total > 0 ? $7 * 4 * 100 / total : 0), (total > 0 ? $8 * 8 * 100 / total : 0),
                    (total > 0 ? hi * 100 / total : 0)
@@ -29819,8 +29858,10 @@ select (select case pg_is_in_recovery() when 'f' then pg_current_xlog_location()
        upper(to_hex((select redo_lsn from pg_control_checkpoint())>>32)||'/'||lpad(to_hex((select redo_lsn from pg_control_checkpoint())&4294967295),8,'0')),
        (select upper(coalesce(nullif(ltrim(substr(n,9,8),'0'),''),'0')||'/'||right(substr(n,17,8),2)||'000000') from (select pg_ls_dir n from pg_ls_dir('pg_xlog') where pg_ls_dir not like '%backup%' and pg_ls_dir not like '%archive_s%' and pg_ls_dir ~ '^[0-9A-F]{24}$' order by 1 limit 1) t),
        regexp_replace(pg_cbm_tracked_location()::text,'^0+([0-9A-F])','\1'),
-       (select count(*) from pg_ls_dir('pg_xlog') where pg_ls_dir not like '%backup%' and pg_ls_dir not like '%archive_s%'),
-       pg_size_pretty((select count(*)*16*1024*1024 from pg_ls_dir('pg_xlog') where pg_ls_dir not like '%backup%' and pg_ls_dir not like '%archive_s%')::numeric),
+       -- ★total 侧同样只数 24 位十六进制段名 (2026-11-17 三轮复核): 00000002.history
+       --   这类时间线文件会混进来, 且每条被按 16MB 计费 (total_size 虚高)。
+       (select count(*) from pg_ls_dir('pg_xlog') where pg_ls_dir not like '%backup%' and pg_ls_dir not like '%archive_s%' and pg_ls_dir ~ '^[0-9A-F]{24}$'),
+       pg_size_pretty((select count(*)*16*1024*1024 from pg_ls_dir('pg_xlog') where pg_ls_dir not like '%backup%' and pg_ls_dir not like '%archive_s%' and pg_ls_dir ~ '^[0-9A-F]{24}$')::numeric),
        (select min(restart_lsn) from pg_replication_slots)::text,
        (select upper(coalesce(nullif(ltrim(substr(n,9,8),'0'),''),'0')||'/'||right(substr(n,17,8),2)||'000000') from (select pg_ls_dir n from pg_ls_dir('pg_xlog/archive_status/') where pg_ls_dir not like '%backup%' and pg_ls_dir like '%.ready' order by 1 limit 1) t);
 \echo ===REPL
@@ -30272,7 +30313,7 @@ order by s.sz desc;"
     # needs CLK_TCK once and a first tree sample so frame 1 already shows a value
     clk=$(getconf CLK_TCK 2>/dev/null); case "$clk" in ''|*[!0-9]*) clk=100;; esac
     v0=$(_vtop_vbcpu "$(_vtop_vbcpu_pid)")
-    local first=1 sub_first=0
+    local first=1 sub_first=0 _vtop_notice_on=0
     while :; do
         if [ "$once" = "1" ]; then
             # ★--once 是"一帧快照"不是"主屏节律" (2026-11-17 复核): collect_log 的
@@ -30371,6 +30412,7 @@ order by s.sz desc;"
                             #   把 HINT 上半截涂掉、旧标记还留在下面。宽度不够一律退回
                             #   整帧 (整帧有 \033[H + \033[J, 折行也不残留)。
                             if [ "${vtop_ctl:-0}" = "1" ] && [ -z "$_vtop_notice" ] \
+                               && [ "${_vtop_notice_on:-0}" != "1" ] \
                                && [ "${_vtop_w:-0}" -ge 140 ]; then
                                 printf '\033[2A'
                                 _vtop_keys_hint main | while IFS= read -r _vtop_hl; do
@@ -30507,14 +30549,22 @@ order by s.sz desc;"
                 *)
                     if [ "$_wn" -le 151 ]; then _wn=$((_wn - 1)); else _wn=150; fi
                     [ "$_wn" -lt 100 ] && _wn=100
-                    [ "$_wn" != "${_vtop_w:-150}" ] && { _vtop_w=$_wn; db_dirty=1; }
+                    # ★绝不能为此置 db_dirty=1 (2026-11-17 三轮复核纠错): dbcache 里存的是
+                    #   未加框的原始行, boxify 每次打印都按当前 _vtop_w 重新加框 —— 宽度
+                    #   变化天然生效。若置 db_dirty 会强制全采路径把**同一份 db 文本重算**,
+                    #   基线上一帧已滚动 ⇒ 全部差分=0, 打出一帧"新时间戳+全 0 速率"假帧,
+                    #   还会把零帧写进 dbcache 持续回放 (与 Ctrl+Z 旧病同类)。
+                    [ "$_wn" != "${_vtop_w:-150}" ] && _vtop_w=$_wn
                     ;;
             esac
         fi
         # ★data dir 自愈 (2026-11-17 复核): 启动时实例 down / $PGDATA 端口不匹配 ⇒
         #   datadir 停在 unknown。每 30s 用同一条 show data_directory 再解析一次, 成功
         #   即补齐 DSK/I-O/FS/TOPSQL 与表空间链 (psql 有 5s 超时, 不会卡帧)。
-        if [ "$datadir" = "unknown" ] && [ "$(( $(date +%s%3N) - _dd_try_ms ))" -gt 30000 ]; then
+        # ★--once 跳过 (2026-11-17 三轮复核): --once 只出一帧且立即 break, 重试成功了也
+        #   没有下一帧能受益; 实例 down 时白白多等一次 5s 超时, collect_log 3 个采样段
+        #   平白多烧 ~15s。
+        if [ "$once" != "1" ] && [ "$datadir" = "unknown" ] && [ "$(( $(date +%s%3N) - _dd_try_ms ))" -gt 30000 ]; then
             _dd_try_ms=$(date +%s%3N)
             _vtop_resolve_datadir
         fi
@@ -31004,19 +31054,22 @@ printf '           %-14s %-22s %-8.8s %-9s %.62s\n' "-" "-" "-" "-" "-"
                                && [ "$i_nc" -ge "$prev_nc" ] && [ "$i_pw" -ge "$prev_pw" ] \
                                && [ "$i_dl" -ge "$prev_dl" ]; } 2>/dev/null; then
                               # ★every rate below is a DELTA over the sampling interval (user's spec)
-                              _qps=$(( (i_nc - prev_nc) * 1000 / ist_w ))
-                              _cm=$(( (i_xc - prev_xc) * 1000 / ist_w ))
-                              _rb=$(( (i_xr - prev_xr) * 1000 / ist_w ))
-                              _lg=$(( (i_br - prev_br + i_bh - prev_bh) * 1000 / ist_w * 8192 ))
-                              _ph=$(( (i_br - prev_br) * 1000 / ist_w * 8192 ))
-                              _rd=$(( (i_lsn - prev_lsn) * 1000 / ist_w ))
-                              _tp=$(( (i_tb - prev_tb) * 1000 / ist_w ))
+                              # ★全部走 awk 浮点 (2026-11-17 三轮复核): 旧 bash 整数式先截断再
+                              #   乘 —— delta=1 块/15s ⇒ (1*1000/15000)=0 ⇒ ×8192 还是 0, 帧上
+                              #   印 0B/0 次, 真值 546B/s。计数列四舍五入, 字节列先乘后取整。
+                              read -r _qps _cm _rb _dl _lg _ph _rd _tp _pw <<< "$(awk -v w="$ist_w" \
+                                  -v dq=$((i_nc - prev_nc)) -v dc=$((i_xc - prev_xc)) \
+                                  -v dr=$((i_xr - prev_xr)) -v ddl=$((i_dl - prev_dl)) \
+                                  -v dg=$((i_br - prev_br + i_bh - prev_bh)) -v dp=$((i_br - prev_br)) \
+                                  -v dlsn=$((i_lsn - prev_lsn)) -v dtp=$((i_tb - prev_tb)) \
+                                  -v dpw=$((i_pw - prev_pw)) 'BEGIN{
+                                  printf "%.0f %.0f %.0f %.0f %d %d %d %d %d",
+                                      dq*1000/w, dc*1000/w, dr*1000/w, ddl*1000/w,
+                                      dg*8000.0/w*1.024, dp*8000.0/w*1.024, dlsn*1000/w, dtp*8000.0/w*1.024, dpw*8000.0/w*1.024 }')"
                               # pagewrite: pagewriter 累计刷页数的间隔增量,再 ×8192 转字节
                               # (与 logical/physical 同口径;也即 AWR join 里的 pages × BLCKSZ 8K)
-                              _pw=$(( (i_pw - prev_pw) * 1000 / ist_w * 8192 ))
                               # deadlocks/s (user's call 2026-09-28): plain counter delta,
                               # same sampling-interval convention as every other rate here
-                              _dl=$(( (i_dl - prev_dl) * 1000 / ist_w ))
                               # values carry NO /s: the labels already say it (and the OS block
                               # never doubled it -- fault/s shows a bare number)
                               ist_qps=$_qps; ist_cm=$_cm; ist_roll=$_rb; ist_tps=$(( _cm + _rb ))
@@ -31180,6 +31233,10 @@ printf '           %-14s %-22s %-8.8s %-9s %.62s\n' "-" "-" "-" "-" "-"
         db_dirty=0
         fi
         # per-frame interactive zone (both full and compact frames append it)
+        # ★_vtop_notice_on (2026-11-17 三轮复核): 本帧印了通知就立旗 —— 通知只活一帧,
+        #   但它印在 HINT 上方; 下一次方向键快刷只重写 HINT 两行, 旧通知会残留在屏上。
+        #   快刷路径见旗就退回整帧 (整帧把旧行清干净)。
+        if [ -n "$_vtop_notice" ]; then _vtop_notice_on=1; else _vtop_notice_on=0; fi
         if [ "$interactive" = "1" ]; then
             { [ -n "$_vtop_notice" ] && printf '%s\n' "$_vtop_notice"
               _vtop_keys_hint "$screen"; } >> "$_vtop_f"
