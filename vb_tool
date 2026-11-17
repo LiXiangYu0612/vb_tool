@@ -27193,13 +27193,15 @@ group by case when client_addr is null and client_port is null then 'background'
               else client_addr::text end
 order by 2 desc limit 10")
     _vtop_q_warn
+    # ★client_ip 不截断 (2026-11-17 复核): IPv6 压缩文本可达 29~39 字符, %-20.20s 会把
+    #   同一 /64 上两个客户端印成同一个前缀, 逐客户端归因直接失效 (IPv4 ≤15 不受影响)。
     while IFS='|' read -r se_ip se_tc se_wi se_wt se_wa; do
         [ -z "${se_ip:-}" ] && continue
-        printf '%-20.20s %-9s %-7s %-8s %s\n' "$se_ip" "$se_tc" "$se_wi" "$se_wt" "$se_wa"
+        printf '%-20s %-9s %-7s %-8s %s\n' "$se_ip" "$se_tc" "$se_wi" "$se_wt" "$se_wa"
         se_n=$((se_n + 1))
     done <<< "$se_out"
     while [ "$se_n" -lt 10 ]; do
-        printf '%-20.20s %-9s %-7s %-8s %s\n' "-" "-" "-" "-" "-"
+        printf '%-20s %-9s %-7s %-8s %s\n' "-" "-" "-" "-" "-"
         se_n=$((se_n + 1))
     done
     # ---- 3. top 10 sessions by query duration desc (as: active session info).
@@ -27262,15 +27264,18 @@ where a.pid <> pg_backend_pid()
   and coalesce(a.application_name,'') <> 'workload'
 order by (extract(epoch from (now()-a.query_start))) desc nulls last limit 15")
     _vtop_q_warn
+    # ★sqlid 是标识符, 不截断 (2026-11-17 复核): 它是 sqlpatch -s 的唯一钥匙, 截成
+    #   前 11 位既不能回填也不唯一 —— 与本页 28458 起的既有规矩 (sid/LSN 去精度) 一致。
+    #   TOPSQL 页与主屏 [TOPSQL] 行的 sqlid 列同理, 一并去掉精度。
     while IFS='|' read -r se_ci se_sb se_id se_we se_du se_sq; do
         [ -z "${se_ci:-}" ] && continue
         [ "$se_du" != "-" ] && se_du=$(_vtop_age "$se_du")
-        printf '%-26.26s %-30s %-11.11s %-16.16s %-8s %.40s\n' \
+        printf '%-26.26s %-30s %-11s %-16.16s %-8s %.40s\n' \
             "$se_ci" "$se_sb" "$se_id" "$se_we" "$se_du" "$se_sq"
         se_cnt=$((se_cnt + 1))
     done <<< "$se_out"
     while [ "$se_cnt" -lt 15 ]; do
-        printf '%-26.26s %-30s %-11.11s %-16.16s %-8s %.40s\n' \
+        printf '%-26.26s %-30s %-11s %-16.16s %-8s %.40s\n' \
             "-" "-" "-" "-" "-" "-"
         se_cnt=$((se_cnt + 1))
     done
@@ -27318,11 +27323,11 @@ order by (extract(epoch from (now()-b.query_start))) desc nulls last")
     while IFS='|' read -r bk_ci bk_sb bk_id bk_we bk_du bk_st bk_sq; do
         [ -z "${bk_ci:-}" ] && continue
         [ "$bk_du" != "-" ] && bk_du=$(_vtop_age "$bk_du")
-        printf '%-26.26s %-30s %-11.11s %-16.16s %-8s %-9.9s %.40s\n' \
+        printf '%-26.26s %-30s %-11s %-16.16s %-8s %-9.9s %.40s\n' \
             "$bk_ci" "$bk_sb" "$bk_id" "$bk_we" "$bk_du" "$bk_st" "$bk_sq"
         bk_n=$((bk_n + 1))
     done <<< "$bk_out"
-    [ "$bk_n" -eq 0 ] && printf '%-26.26s %-30s %-11.11s %-16.16s %-8s %-9.9s %.40s\n' \
+    [ "$bk_n" -eq 0 ] && printf '%-26.26s %-30s %-11s %-16.16s %-8s %-9.9s %.40s\n' \
         "-" "-" "-" "-" "-" "-" "-"
     printf '\n'
 }
@@ -27411,7 +27416,7 @@ _vtop_screen_istat() { # ISTAT page -- awr "Load Profile" + "Cache Hit Ratio" as
     # ★Boxes + headers are the sess page's convention (user's call 2026-09-28:
     # 「所有子界面格式都要按sess的来啊 要有表头有方框」): every block opens
     # with a _vtop_sec banner, so _vtop_boxify frames it.
-    local is_sql is_a is_b is_dt is_t0 is_t1 is_s1 is_s2 is_s3 is_lb is_hit
+    local is_sql is_a is_b is_dt is_t0 is_t1 is_s1 is_s2 is_s3 is_lb is_hit is_lim
     local a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16 a17 a18 a19 a20
     local b1 b2 b3 b4 b5 b6 b7 b8 b9 b10 b11 b12 b13 b14 b15 b16 b17 b18 b19 b20
     _vtop_pg istat 'Instance Statistics' 'load profile -- rate over the interval since the previous render'
@@ -27555,7 +27560,7 @@ _vtop_screen_wait() { # WAIT page -- two blocks, both [SESS]-style (boxed banner
     # ~80% of all accumulated wait time on 204), and % DB time = 100 * delta(wait)
     # / delta(DB_TIME). Units use vtop's u/ms/s/min/h formatter, NOT awr's (s)/(ms)
     # -- the window is one render interval and seconds would round real events to 0.0.
-    local we_out we_ev we_cl we_w we_t we_n we_dbt we_pts we_pdb we_buf="" we_avg we_pct we_ddbt
+    local we_out we_ev we_cl we_w we_t we_n we_dbt we_pts we_pdb we_buf="" we_avg we_pct we_ddbt we_dbt_ok
     local we_lim
     local _dw _dt _avg _pct _e _w _t
     local we_f="${TMPDIR:-/tmp}/vbtop_wait.$$.prev"
@@ -27569,8 +27574,15 @@ _vtop_screen_wait() { # WAIT page -- two blocks, both [SESS]-style (boxed banner
     #   wait_status: the old form picked an ARBITRARY member of the group
     #   (alphabetically largest) and its count mixed rows whose wait_status
     #   differed. One row per exact combination is the truthful picture.
-    we_out=$(_vtop_q "select ev, ws, typ, count(*) from (
-  select case when w.wait_event is null or w.wait_event='none' then '(on cpu)' else w.wait_event end ev,
+    # ★count(distinct a.pid) (2026-11-17 复核): dbe_perf.wait_events 对个别事件有两行
+    #   ('extension'、'ReplicationOriginLock' 实测各两条, 407 行/405 个事件), left join
+    #   会把等待这些事件的会话复制成两行 ⇒ sessions 列虚高、还与本页"活动会话数"打架。
+    #   主屏 [WAIT] 行早就为此改成了 count(distinct pid), 这里对齐。
+    #   ★pid 必须在子查询里投影出来 (2026-11-17 实测): 外层 count(distinct a.pid)
+    #   直接报 missing FROM-clause entry for table "a"。
+    we_out=$(_vtop_q "select ev, ws, typ, count(distinct pid) from (
+  select a.pid,
+         case when w.wait_event is null or w.wait_event='none' then '(on cpu)' else w.wait_event end ev,
          coalesce(e.type,'-') typ,
          coalesce(w.wait_status,'-') ws
   from pg_stat_activity a
@@ -27594,7 +27606,9 @@ _vtop_screen_wait() { # WAIT page -- two blocks, both [SESS]-style (boxed banner
     _vtop_th "$(printf '%-28s %-14s %-10s %-16s %-12s %s' event_name wait_class waits total_wait_time avg_wait pct_db_time)"
     we_dbt=$(_vtop_q "select value from dbe_perf.global_instance_time where stat_name='DB_TIME'")
     _vtop_q_warn
-    we_out=$(_vtop_q "select event, coalesce(type,'-'), wait, total_wait_time from dbe_perf.wait_events")
+    # ★一行一事件 (2026-11-17 复核): wait_events 里同事件可能有两行, 直接 select 会
+    #   印出两条同名列, 而基线 map 只留最后一条 —— 两行都拿错的基线做差。按 event 聚合。
+    we_out=$(_vtop_q "select event, max(coalesce(type,'-')), max(wait), max(total_wait_time) from dbe_perf.wait_events group by event")
     _vtop_q_warn
     we_pts=""; we_pdb=""
     if [ -f "$we_f" ]; then
@@ -27731,7 +27745,9 @@ _vtop_screen_xlog() { # XLOG page -- `vb_tool xloghc`'s two sections, rendered i
     #   + 1, the same limit xloghc computes.
     local xl_out xl_k xl_k2 xl_k3 xl_n2 xl_cur
     local x_node x_role x_ver x_tl x_cur_r x_ckr x_ckl x_cbm x_sr x_mr x_na x_la
-    local xl_cnt xl_size xl_old xl_oldm xl_new xl_newm xl_cmax xl_cmin xl_keep xl_lim xl_health=""
+    # ★xl_keepguc/xl_csegguc 也必须是 local (2026-11-17 复核): 它们不在列表里时,
+    #   第二段查询读短了 (或整条失败) 会留着上一帧的值, 页面把旧 GUC 当成本帧数值。
+    local xl_cnt xl_size xl_old xl_oldm xl_new xl_newm xl_keepguc xl_csegguc xl_cmax xl_cmin xl_keep xl_lim xl_health=""
     local xl_arch xl_archseg
     local xl_cbmw xl_srw xl_mrw
     _vtop_pg xlog 'XLOG' 'xloghc: healthy summary + detail + GUCs (live)'
@@ -27784,7 +27800,7 @@ _vtop_screen_xlog() { # XLOG page -- `vb_tool xloghc`'s two sections, rendered i
        --   globally earliest mtime and belongs to a different file)
        (select to_char(modification,'YYYY-MM-DD HH24:MI:SS') from pg_ls_waldir() where name not like '%backup%' and length(name)=24 order by name limit 1),
        -- ★newest 侧同样要 length(name)=24 (2026-11-17 复核): pg_xlog 里还躺着
-       --   00000002.history / *.partial 这类文件, 它们 mtime 更新时会当上"最新 WAL"
+       --   00000002.history / *.partial 这类文件, 它们 mtime 更新时会当上「最新 WAL」
        --   ⇒ _vtop_segno 解析空 ⇒ keep 数与 archive lag 判定整段静默跳过。
        (select name from pg_ls_waldir() where name not like '%backup%' and length(name)=24 order by modification desc limit 1),
        (select to_char(modification,'YYYY-MM-DD HH24:MI:SS') from pg_ls_waldir() where name not like '%backup%' and length(name)=24 order by modification desc limit 1),
@@ -28276,11 +28292,11 @@ order by round(sum(tmp.cpu_usage),2)::numeric desc limit 15")
     while IFS='|' read -r ts_a ts_b ts_c ts_d ts_sql; do
         [ -z "${ts_a:-}" ] && continue
         [ "$ts_d" != "-" ] && ts_d=$(_vtop_age "$ts_d")
-        printf '%-11.11s %-11.11s %-8s %-13s %.40s\n' "$ts_a" "$ts_b" "$ts_c" "$ts_d" "$ts_sql"
+        printf '%-11s %-11s %-8s %-13s %.40s\n' "$ts_a" "$ts_b" "$ts_c" "$ts_d" "$ts_sql"
         ts_n=$((ts_n + 1))
     done <<<"$ts_out"
     while [ "$ts_n" -lt 15 ]; do
-        printf '%-11.11s %-11.11s %-8s %-13s %.40s\n' "-" "-" "-" "-" "-"
+        printf '%-11s %-11s %-8s %-13s %.40s\n' "-" "-" "-" "-" "-"
         ts_n=$((ts_n + 1))
     done
     _vtop_sec "top I/O usage"
@@ -28321,11 +28337,11 @@ order by sum(tmp.kb_rd)::numeric + sum(tmp.kb_wr)::numeric desc limit 10")
     while IFS='|' read -r ts_a ts_b ts_c ts_d ts_e ts_sql; do
         [ -z "${ts_a:-}" ] && continue
         [ "$ts_e" != "-" ] && ts_e=$(_vtop_age "$ts_e")
-        printf '%-12.12s %-12.12s %-11.11s %-8s %-13s %.40s\n' "$ts_a" "$ts_b" "$ts_c" "$ts_d" "$ts_e" "$ts_sql"
+        printf '%-12.12s %-12.12s %-11s %-8s %-13s %.40s\n' "$ts_a" "$ts_b" "$ts_c" "$ts_d" "$ts_e" "$ts_sql"
         ts_n=$((ts_n + 1))
     done <<<"$ts_out"
     while [ "$ts_n" -lt 10 ]; do
-        printf '%-12.12s %-12.12s %-11.11s %-8s %-13s %.40s\n' "-" "-" "-" "-" "-" "-"
+        printf '%-12.12s %-12.12s %-11s %-8s %-13s %.40s\n' "-" "-" "-" "-" "-" "-"
         ts_n=$((ts_n + 1))
     done
     printf '\n'
@@ -29314,7 +29330,11 @@ _vtop_boxify() { # $1 = frame file, rewritten in place
             saw = 1
             next
         }
-        if (plain ~ /^(HINT |unknown command|command line )/) {
+        # ★"!!" 通知同样按"帧外文本"处理 (2026-11-17 复核): PGDATA 端口不匹配 /
+        #   窄终端 / 非 UTF-8 locale 三条通知都以 "!! " 开头; 旧正则不认识 ⇒ 它们
+        #   落在 LWLOCK 方框内, 被垫成一行数据 (┊ 前缀+右边框), 与 HINT 等其它通知
+        #   两种长相, 还让方框看起来多了一行假数据。
+        if (plain ~ /^(HINT |unknown command|command line |!! )/) {
             if (inbox) { print bot(); inbox = 0 }
             print $0
             next
@@ -29384,6 +29404,17 @@ _vtop_cleanup() {
     # the ioctl on the tty itself still works.
     [ -n "${_vtop_stty:-}" ] && { stty echo icanon 2>/dev/null || stty -F /dev/tty echo icanon 2>/dev/null; }
     return 0
+}
+
+# ---- vtop 挂起 (Ctrl+Z) ------------------------------------------------------
+# ★与 _vtop_cleanup 分开 (2026-11-17 复核): 挂起不是退出 —— 循环在 fg 之后原地继续,
+#   文件和数据都必须还在。旧版复用 _vtop_cleanup, 它 rm 掉帧文件与 dbcache, 恢复后
+#   第一帧被迫走全采路径、却拿旧 db 文本重算, 打出一帧"新时间戳 + 全 0 速率"的假数据。
+#   这里只做挂起真正需要的两件事: tty 还回去 (挂起期间终端不能是 -echo), 真停。
+_vtop_suspend() {
+    [ "${BASHPID:-$$}" = "$$" ] || return 0
+    [ -n "${_vtop_stty:-}" ] && { stty echo icanon 2>/dev/null || stty -F /dev/tty echo icanon 2>/dev/null; }
+    kill -STOP "$$"
 }
 
 sqlpatch_help() {
@@ -29531,6 +29562,87 @@ SQLEOF
     fi
 }
 
+# ---- vtop: 解析 data dir 与数据盘 (2026-11-17 复核抽成函数) -------------------
+# 原来是"启动时一次性": 实例 down 时 `show data_directory` 失败 ⇒ datadir=unknown
+# 永久空着 —— 实例恢复后 DSK/I-O/FS/TOPSQL 与表空间链整场 '-', 一帧半活半死
+# (_vtop_vbcpu_pid 早就是每帧重锚, 这里对齐)。结果写**调用者的局部变量** (动态作用域):
+# datadir dev devs ndev devinfos d_pick tsdevs devinfo
+_vtop_resolve_datadir() {
+    local _pgd_port="" _xdevs _vd _t _tdir _tdev _d
+    datadir="${PGDATA:-}"
+    # ★$PGDATA 必须与本次连接的端口是同一个实例 (2026-11-17 复核): 一台机器多实例时
+    #   PGDATA 完全可能是"另一个库"的 (204 上 su - vastbase 的 .bashrc 就把 PGPORT 劫持
+    #   到 9432, 而 PGDATA 还指着 5432 的 data dir)。不信的后果: DSK/I-O/FS 行描述的是
+    #   另一个实例的盘, [TOPSQL] 拿错 pid 的 top -p 恒空而静默 '-', 整帧自相矛盾。
+    #   判据照抄 _vtop_vbcpu_pid: postmaster.pid 第 4 行 = 端口, 必须等于 $(PGPORT)。
+    #   实例 down / pid 文件不可读时无法证伪, 保留 $PGDATA (data dir 本身仍然有意义)。
+    if [ -n "$datadir" ] && [ -d "$datadir" ]; then
+        if [ -r "$datadir/postmaster.pid" ]; then
+            _pgd_port=$(sed -n '4p' "$datadir/postmaster.pid" 2>/dev/null | tr -d ' \t\r')
+        fi
+        if [ -n "$_pgd_port" ] && [ "$_pgd_port" != "${PGPORT:-5432}" ]; then
+            datadir=""
+            _vtop_notice="!! \$PGDATA ($_pgd_port) is a different instance than port ${PGPORT:-5432}: data-dir rows resolved from the DB"
+        fi
+    fi
+    if [ -z "$datadir" ] || [ ! -d "$datadir" ]; then
+        datadir=$(PGCONNECT_TIMEOUT=5 timeout 5 psql -d postgres -tAc "show data_directory" 2>/dev/null | head -1 | tr -d ' ')
+    fi
+    dev=""
+    if [ -n "$datadir" ] && [ -d "$datadir" ]; then
+        dev=$(_vtop_disk_dev "$datadir")
+    fi
+    # ★partition lifted to the PARENT WHOLE DISK (user 2026-11-17: '都是vda 为什么
+    #   是vda1??'). df resolves the data fs to its partition (vda1), but everything
+    # around it already speaks whole-disk: the DSK row's queue attrs (sched/qdepth/
+    #   nr_rq) read the PARENT, the multi-disk path lifts leaf partitions to parents
+    #   for its counters, and the iostat page's stack lifts partitions too -- a plain
+    #   single-partition fs showing vda1 made the main screen disagree with iostat on
+    #   the same box, and partition-line io_ticks would under-report util when a
+    #   NEIGHBOUR partition is the one saturating the physical disk. dm/md fs devices
+    #   are NOT lifted (no sysfs partition file): the dm layer is the fs's own device
+    #   and keeps 2026-11-01's dm-on-one-disk semantics. The [FS] row still carries
+    #   the filesystem view (fstype/fs-size/mount), so nothing is lost by this.
+    if [ -n "$dev" ] && [ -f "/sys/class/block/$dev/partition" ]; then
+        dev=$(_vtop_parent_dev "$dev")
+    fi
+    # ★multi-disk filesystem (user 2026-11-01): the data fs spanning several
+    # physical disks (LVM/RAID) used to show ONE averaged dm/md line, which
+    # hides the straggler -- DSK/I-O rows now follow the WORST disk by read+
+    # write service time. Single physical disk behind the fs (incl. dm on one
+    # disk): unchanged view.
+    devs="$dev"; ndev=1; devinfos=""; d_pick="$dev"
+    if [ -n "$dev" ] ; then
+        _xdevs=$(_vtop_disk_expand "$dev")
+        if [ "$(printf '%s\n' "$_xdevs" | wc -w)" -gt 1 ]; then
+            devs="$_xdevs"; ndev=$(printf '%s\n' "$devs" | wc -w); d_pick="${devs%% *}"
+            for _vd in $devs; do
+                devinfos=$(printf '%s%s|%s\n' "$devinfos" "$_vd" "$(_vtop_devinfo "$_vd")")
+            done
+        fi
+    fi
+    datadir="${datadir:-unknown}"
+    # Custom tablespaces (and a relocated WAL dir) can live on OTHER
+    # filesystems: their device stacks are resolved ONCE here and reused by
+    # the iostat page every frame (same-fs ones dedup away silently).
+    tsdevs=""
+    if [ -d "$datadir/pg_tblspc" ]; then
+        for _t in "$datadir"/pg_tblspc/* "$datadir"/pg_xlog "$datadir"/pg_wal; do
+            [ -L "$_t" ] || continue
+            _tdir=$(readlink -f "$_t" 2>/dev/null)
+            [ -n "$_tdir" ] && [ -d "$_tdir" ] || continue
+            _tdev=$(_vtop_disk_dev "$_tdir") || continue
+            for _d in $(_vtop_disk_stack "$_tdev"); do
+                case " $tsdevs " in *" $_d "*) ;; *) tsdevs="$tsdevs $_d";; esac
+            done
+        done
+        tsdevs="${tsdevs# }"
+    fi
+    devinfo=""
+    [ -n "$dev" ] && devinfo=$(_vtop_devinfo "$dev")
+    return 0
+}
+
 run_vtop() {
     local interval=15 osint=3 dbsub=5 ossub=3 dbint="" once=0 want_color="" want_plain=0
     while [ $# -gt 0 ]; do
@@ -29589,81 +29701,13 @@ run_vtop() {
     interval=$((10#$interval))
 
     # ---- one-time setup ----
+    # ★datadir/dev/表空间链的解析抽到 _vtop_resolve_datadir (2026-11-17 复核):
+    #   实例 down 时启动 ⇒ 解析不出就永远 unknown, 实例恢复后 DSK/I-O/FS/TOPSQL
+    #   整场 '-'。循环里每 30s 在 unknown 状态下重试一次, 成功即自愈。
     local datadir dev devinfo cores
-    datadir="${PGDATA:-}"
-    # ★$PGDATA 必须与本次连接的端口是同一个实例 (2026-11-17 复核): 一台机器多实例时
-    #   PGDATA 完全可能是"另一个库"的 (204 上 su - vastbase 的 .bashrc 就把 PGPORT 劫持
-    #   到 9432, 而 PGDATA 还指着 5432 的 data dir)。不信的后果: DSK/I-O/FS 行描述的是
-    #   另一个实例的盘, [TOPSQL] 拿错 pid 的 top -p 恒空而静默 '-', 整帧自相矛盾。
-    #   判据照抄 _vtop_vbcpu_pid: postmaster.pid 第 4 行 = 端口, 必须等于 $(PGPORT)。
-    #   实例 down / pid 文件不可读时无法证伪, 保留 $PGDATA (data dir 本身仍然有意义)。
-    if [ -n "$datadir" ] && [ -d "$datadir" ]; then
-        local _pgd_port=""
-        if [ -r "$datadir/postmaster.pid" ]; then
-            _pgd_port=$(sed -n '4p' "$datadir/postmaster.pid" 2>/dev/null | tr -d ' \t\r')
-        fi
-        if [ -n "$_pgd_port" ] && [ "$_pgd_port" != "${PGPORT:-5432}" ]; then
-            datadir=""
-            _vtop_notice="!! \$PGDATA ($_pgd_port) is a different instance than port ${PGPORT:-5432}: data-dir rows resolved from the DB"
-        fi
-    fi
-    if [ -z "$datadir" ] || [ ! -d "$datadir" ]; then
-        datadir=$(PGCONNECT_TIMEOUT=5 timeout 5 psql -d postgres -tAc "show data_directory" 2>/dev/null | head -1 | tr -d ' ')
-    fi
-    dev=""
-    if [ -n "$datadir" ] && [ -d "$datadir" ]; then
-        dev=$(_vtop_disk_dev "$datadir")
-    fi
-    # ★partition lifted to the PARENT WHOLE DISK (user 2026-11-17: '都是vda 为什么
-    #   是vda1??'). df resolves the data fs to its partition (vda1), but everything
-    # around it already speaks whole-disk: the DSK row's queue attrs (sched/qdepth/
-    #   nr_rq) read the PARENT, the multi-disk path lifts leaf partitions to parents
-    #   for its counters, and the iostat page's stack lifts partitions too -- a plain
-    #   single-partition fs showing vda1 made the main screen disagree with iostat on
-    #   the same box, and partition-line io_ticks would under-report util when a
-    #   NEIGHBOUR partition is the one saturating the physical disk. dm/md fs devices
-    #   are NOT lifted (no sysfs partition file): the dm layer is the fs's own device
-    #   and keeps 2026-11-01's dm-on-one-disk semantics. The [FS] row still carries
-    #   the filesystem view (fstype/fs-size/mount), so nothing is lost by this.
-    if [ -n "$dev" ] && [ -f "/sys/class/block/$dev/partition" ]; then
-        dev=$(_vtop_parent_dev "$dev")
-    fi
-    # ★multi-disk filesystem (user 2026-11-01): the data fs spanning several
-    # physical disks (LVM/RAID) used to show ONE averaged dm/md line, which
-    # hides the straggler -- DSK/I-O rows now follow the WORST disk by read+
-    # write service time. Single physical disk behind the fs (incl. dm on one
-    # disk): unchanged view.
-    local devs ndev=1 devinfos="" d_pick=""
-    devs="$dev"; d_pick="$dev"
-    if [ -n "$dev" ] ; then
-        local _xdevs _vd
-        _xdevs=$(_vtop_disk_expand "$dev")
-        if [ "$(printf '%s\n' "$_xdevs" | wc -w)" -gt 1 ]; then
-            devs="$_xdevs"; ndev=$(printf '%s\n' "$devs" | wc -w); d_pick="${devs%% *}"
-            for _vd in $devs; do
-                devinfos=$(printf '%s%s|%s\n' "$devinfos" "$_vd" "$(_vtop_devinfo "$_vd")")
-            done
-        fi
-    fi
-    datadir="${datadir:-unknown}"
-    # Custom tablespaces (and a relocated WAL dir) can live on OTHER
-    # filesystems: their device stacks are resolved ONCE here and reused by
-    # the iostat page every frame (same-fs ones dedup away silently).
-    tsdevs=""
-    if [ -d "$datadir/pg_tblspc" ]; then
-        for _t in "$datadir"/pg_tblspc/* "$datadir"/pg_xlog "$datadir"/pg_wal; do
-            [ -L "$_t" ] || continue
-            _tdir=$(readlink -f "$_t" 2>/dev/null)
-            [ -n "$_tdir" ] && [ -d "$_tdir" ] || continue
-            _tdev=$(_vtop_disk_dev "$_tdir") || continue
-            for _d in $(_vtop_disk_stack "$_tdev"); do
-                case " $tsdevs " in *" $_d "*) ;; *) tsdevs="$tsdevs $_d";; esac
-            done
-        done
-        tsdevs="${tsdevs# }"
-    fi
-    devinfo=""
-    [ -n "$dev" ] && devinfo=$(_vtop_devinfo "$dev")
+    local devs ndev devinfos d_pick tsdevs
+    local _dd_try_ms=0
+    _vtop_resolve_datadir
     fsinfo=""        # data_dir filesystem (df asked about that one path), per frame
     local l_soc l_cor l_thr l_ncpu l_numa kver _n _nn
     l_ncpu=$(timeout 3 nproc 2>/dev/null || grep -c ^processor /proc/cpuinfo)
@@ -30116,6 +30160,16 @@ order by s.sz desc;"
     _vtop_traps_bak=$(trap -p EXIT INT TERM HUP QUIT TSTP CONT)
     umask 077
     _vtop_f=$(mktemp "${TMPDIR:-/tmp}/vbtop_frame.XXXXXX")
+    # ★mktemp 失败必须当场退出 (2026-11-17 复核): TMPDIR 不可写时 _vtop_f 为空,
+    #   之后每帧 `> ""` 失败, _vtop_boxify 还会在 cwd 里建 .box 文件, 屏幕上只剩
+    #   一串 "No such file or directory" 而循环永不退出 (DB 采集那边 26931 早就有
+    #   同类守卫, 这里补齐)。此时 7 个 trap 还没装, 只需把 umask 还回去。
+    if [ -z "$_vtop_f" ] || [ ! -f "$_vtop_f" ]; then
+        printf '%s!! cannot create frame file under %s (TMPDIR not writable?)%s\n' \
+               "${c_red:-}" "${TMPDIR:-/tmp}" "${c_off:-}" >&2
+        umask "$_vtop_umask_bak"
+        return 1
+    fi
     # ★上次异常终止 (SIGKILL/OOM/断电) 留下的帧文件: 只删 1 小时前的 —— 不碰另一个
     # 正在运行的 vtop 的帧文件 (它的 mtime 是秒级)。同一个用户才有权限删, 失败无所谓。
     # ★清扫目录必须与创建目录同源 (2026-09-28 修): 这些文件是用 ${TMPDIR:-/tmp} 建的,
@@ -30156,10 +30210,26 @@ order by s.sz desc;"
     # resumed with fg -- without the CONT trap the resumed screen would leak
     # every key press as caret noise (^[ from ESC-led sequences).
     trap '_vtop_cleanup; exit 131' QUIT
-    trap '_vtop_cleanup; kill -STOP "$$"' TSTP
+    # ★Ctrl+Z 不能走 _vtop_cleanup (2026-11-17 复核): 它把帧文件与 dbcache 一起删了,
+    #   而本循环在 fg 之后还要继续 —— 缓存没了 ⇒ 下一帧走"全采"路径, 却复用手上那份旧
+    #   db 文本重算, ISTAT 基线被迫归零, 屏幕上就是"新时间戳 + 全 0 速率"的假帧。
+    #   挂起只需要: 把 tty 还回去 (否则挂起期间终端哑巴), 然后真停; 文件留着。
+    trap '_vtop_suspend' TSTP
     trap '[ "$interactive" = "1" ] && [ -t 0 ] && stty -echo 2>/dev/null' CONT
     local _vtop_dbcache
     _vtop_dbcache=$(mktemp "${TMPDIR:-/tmp}/vbtop_dbcache.XXXXXX")
+    # ★同上 (2026-11-17 复核): dbcache 建不出来时每帧的 `awk > ""` 都会报错, 而紧凑帧
+    #   靠 `-s "$_vtop_dbcache"` 判空 ⇒ 永远走全采, DB 段每帧重跑。直接按"临时目录不可用"
+    #   处理 —— 此时 trap 已装好, 走 _vtop_cleanup 收尾。
+    if [ -z "$_vtop_dbcache" ] || [ ! -f "$_vtop_dbcache" ]; then
+        printf '%s!! cannot create db-cache file under %s (TMPDIR not writable?)%s\n' \
+               "${c_red:-}" "${TMPDIR:-/tmp}" "${c_off:-}" >&2
+        _vtop_cleanup
+        trap - EXIT INT TERM HUP QUIT TSTP CONT
+        [ -n "${_vtop_traps_bak:-}" ] && eval "$_vtop_traps_bak"
+        [ -n "${_vtop_umask_bak:-}" ] && umask "$_vtop_umask_bak"
+        return 1
+    fi
     local db_next=0 db_ok=0 db_dirty=1 prev_ist_ms=0 prev_rp_ms=0   # schedule, reachability, unrendered flag, per-section baseline stamps (ms)
     local screen="main"          # active screen: main | mem (one screen runs at a time)
     local interactive=0 # key legend line: only when a human is
@@ -30205,7 +30275,10 @@ order by s.sz desc;"
     local first=1 sub_first=0
     while :; do
         if [ "$once" = "1" ]; then
-            sleep "$interval"
+            # ★--once 是"一帧快照"不是"主屏节律" (2026-11-17 复核): collect_log 的
+            #   vtop 段文档写每帧 ~6s (两次采样), 实际却睡了整个 -i (默认 15s) ——
+            #   3 帧 45s+, 且每个速率是 15s 均值而不是文档说的 ~5s 窗。封顶 5s。
+            if [ "$interval" -gt 5 ]; then sleep 5; else sleep "$interval"; fi
         elif [ "$first" = "1" ]; then
             sleep 1; first=0          # first frame lands fast on a 1s mini-window
         else
@@ -30292,7 +30365,13 @@ order by s.sz desc;"
                             #   截止) + 重置 t0/d0 基线 (连按方向键把速率窗截成 200ms)。
                             #   光标移动不产生任何新数据, 原地改最后两行足够; 帧数据的
                             #   旧值仍留在屏上, 下一次正常刷新照常整帧覆盖。
-                            if [ "${vtop_ctl:-0}" = "1" ] && [ -z "$_vtop_notice" ]; then
+                            # ★窄终端不许走两行重画 (2026-11-17 复核): HINT 一行是
+                            #   125 字符 (+【】2) 再加 "HINT    " 前缀 ⇒ 134~136 列,
+                            #   终端窄于它时这一行会折成两行, `\033[2A` 就退到折行中间,
+                            #   把 HINT 上半截涂掉、旧标记还留在下面。宽度不够一律退回
+                            #   整帧 (整帧有 \033[H + \033[J, 折行也不残留)。
+                            if [ "${vtop_ctl:-0}" = "1" ] && [ -z "$_vtop_notice" ] \
+                               && [ "${_vtop_w:-0}" -ge 140 ]; then
                                 printf '\033[2A'
                                 _vtop_keys_hint main | while IFS= read -r _vtop_hl; do
                                     printf '%s\033[K\n' "$_vtop_hl"
@@ -30304,6 +30383,11 @@ order by s.sz desc;"
                         fi
                     elif [ "$screen" != "main" ]; then
                         screen=main
+                        # ★光标一并撤掉 (2026-11-17 复核): hint_cur 若跨子屏存活, 回到
+                        #   主屏后的第一次 Enter 会直接再进该子屏, 而不是文档写的命令行
+                        #   —— 与主屏 ESC 清光标 (30336 附近) 的语义保持一致: ESC 永远
+                        #   回到"无光标的素主屏", 光标要靠方向键重新激活。
+                        hint_cur=0
                         # fresh sampling baseline: without this the first main frame
                         # after coming back would average over the whole sub-screen
                         # stay (tps / iops / EVENT would show a bogus value)
@@ -30405,6 +30489,34 @@ order by s.sz desc;"
                 [ "$interactive" = "1" ] && printf '\n%sstdin closed -- exiting%s\n' "${c_dim:-}" "${c_off:-}"
                 break
             fi
+        fi
+        # ★终端宽度每帧复核 (2026-11-17 复核): 宽度原来只在启动时取一次, 且没有
+        #   SIGWINCH 处理 ⇒ 用户拖一下窗口, 整屏框线永远错位 (拉窄就每行折行、拉宽
+        #   就留一条空白边), 只有重启才恢复。这里每帧 ioctl 一次 (stty size 走 fd 9,
+        #   su 会话没有控制终端也能取到), 变了就换 _vtop_w; 下一段整帧 \033[H 重绘,
+        #   宽窄变化都不会留残影。
+        if [ "$interactive" = "1" ] && [ -t 1 ]; then
+            local _ws _wn
+            exec 9>&1
+            _ws=$(stty size 2>/dev/null <&9)
+            exec 9>&-
+            [ -n "$_ws" ] || _ws=$(stty size 2>/dev/null)
+            _wn=${_ws##* }
+            case "$_wn" in
+                ''|*[!0-9]*) ;;
+                *)
+                    if [ "$_wn" -le 151 ]; then _wn=$((_wn - 1)); else _wn=150; fi
+                    [ "$_wn" -lt 100 ] && _wn=100
+                    [ "$_wn" != "${_vtop_w:-150}" ] && { _vtop_w=$_wn; db_dirty=1; }
+                    ;;
+            esac
+        fi
+        # ★data dir 自愈 (2026-11-17 复核): 启动时实例 down / $PGDATA 端口不匹配 ⇒
+        #   datadir 停在 unknown。每 30s 用同一条 show data_directory 再解析一次, 成功
+        #   即补齐 DSK/I-O/FS/TOPSQL 与表空间链 (psql 有 5s 超时, 不会卡帧)。
+        if [ "$datadir" = "unknown" ] && [ "$(( $(date +%s%3N) - _dd_try_ms ))" -gt 30000 ]; then
+            _dd_try_ms=$(date +%s%3N)
+            _vtop_resolve_datadir
         fi
         # ---- sub-screen: its own frame, main-screen collection skipped entirely ----
         # the renderer is picked by name: adding an entry = key map + _vtop_screen_<name>
@@ -30987,7 +31099,7 @@ printf '           %-14s %-22s %-8.8s %-9s %.62s\n' "-" "-" "-" "-" "-"
                           local sql_col=""
                           awk -v c="$r_cpu" 'BEGIN{exit !(c>=90)}' && sql_col=$c_red
                           printf '%s' "$sql_col"
-                          printf '           %-11.11s %-15s %-10s %-13s %.82s\n' "$r_sqlid" "$r_rn" "${r_cpu}%" "$r_et" "$r_sql"
+                          printf '           %-11s %-15s %-10s %-13s %.82s\n' "$r_sqlid" "$r_rn" "${r_cpu}%" "$r_et" "$r_sql"
                           printf '%s' "$c_off"
                           n_top=$((n_top+1));;
                 esac
@@ -31001,7 +31113,7 @@ printf '           %-14s %-22s %-8.8s %-9s %.62s\n' "-" "-" "-" "-" "-"
             # "-" row (user's call 2026-09-26, same rule as LTX/LOCK). TOPMEM gets the same
             # treatment at the ===TOP marker above, because its rows have to be flushed
             # BEFORE the TOPSQL header is printed.
-            [ "${n_top:-0}" -eq 0 ] && printf '           %-11.11s %-15s %-10s %-13s %.82s\n' "-" "-" "-" "-" "-"
+            [ "${n_top:-0}" -eq 0 ] && printf '           %-11s %-15s %-10s %-13s %.82s\n' "-" "-" "-" "-" "-"
             # ★LOCK is a 2-line SUMMARY (user's call 2026-09-26: "能不能打印一个总览??
             # 主屏这边尽量控制在 2 行"). The per-session blocker chain used to print 1+N
             # rows -- the ONLY unbounded section in the frame -- and moves to a sub-screen.
