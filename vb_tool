@@ -26354,10 +26354,15 @@ _vtop_sockstat() {
     local out=""
     if command -v ss >/dev/null 2>&1; then
         out=$(timeout -k 2 10 ss -tanH "sport = :${PGPORT:-5432}" 2>/dev/null | awk '
-            { s = tolower($1); if (s == "estab") s = "established"; cnt[s]++ }
-            END { n = split("listen|established|syn-recv|syn-sent|fin-wait-1|fin-wait-2|time-wait|close-wait|last-ack|closing|other", ord, "|")
-                  for (i = 1; i <= n; i++) printf "%s%d", (i > 1 ? " " : ""), cnt[ord[i]] + 0
-                  printf "\n" }')
+            # ★other 列以前恒 0 (2026-11-17 复核): 计数只写已知状态名, 输出却读
+            #   cnt["other"] —— 一个没人写的键。UNCONN/TCP_CLOSE 等落进来就静默消失,
+            #   违反"固定集合枚举恒写行, 0=确认没有, 缺=不知道"。现在未知状态真计入 other。
+            BEGIN { n = split("listen|established|syn-recv|syn-sent|fin-wait-1|fin-wait-2|time-wait|close-wait|last-ack|closing", ord, "|")
+                    for (i = 1; i <= n; i++) known[ord[i]] = 1 }
+            { s = tolower($1); if (s == "estab") s = "established"
+              if (s in known) cnt[s]++; else oth++ }
+            END { for (i = 1; i <= n; i++) printf "%s%d", (i > 1 ? " " : ""), cnt[ord[i]] + 0
+                  printf " %d\n", oth + 0 }')
     fi
     # same all-or-nothing guard as _vtop_cpufreq: 11 fields or "-", never a
     # half line (read() would leave the tail at its previous-frame values)
@@ -26426,8 +26431,25 @@ _vtop_dthreads() {
 # rx_bytes rx_pkts rx_errs rx_drop tx_bytes tx_pkts tx_errs tx_drop
 # (sum of physical-ish interfaces; sar -n DEV/-n EDEV counters, all from /proc/net/dev)
 _vtop_net() {
-    timeout 3 awk 'NR>2 && $1 !~ /^(lo|veth|br-|docker|virbr|tap)[0-9:a-z]*:?$/ {sub(":","",$1);
-         rb+=$2; rp+=$3; re+=$4; rd+=$5; tb+=$10; tp+=$11; te+=$12; td+=$13}
+    # ★不重复计数 (2026-11-17 复核): ①bond0/br0 被收编的从属口 (eth0/eth1:
+    #   /sys/class/net/<if>/master 存在) 不再单加 —— 否则 bond + 两块从属口 = 3 行,
+    #   RX/TX 直接翻倍; ②VLAN 子接口 (eth0.100) 的流量父口已计一份, 跳过; ③虚拟
+    #   网卡名单补齐 tun/vxlan/cali/cni/flannel/kube-/lxc, 以及 docker_gwbridge 这类
+    #   带 '_' 的名字 (旧字符类 [0-9:a-z] 漏掉 '_' 与 '-')。
+    local _vn_skip=" " _p
+    for _p in /sys/class/net/*/master; do
+        [ -e "$_p" ] || continue
+        _p=${_p%/master}; _vn_skip="$_vn_skip${_p##*/} "
+    done
+    timeout 3 awk -v skip="$_vn_skip" '
+         BEGIN { n = split(skip, a, " "); for (i = 1; i <= n; i++) if (a[i] != "") sk[a[i]] = 1 }
+         NR > 2 {
+             ifc = $1; sub(/:$/, "", ifc)
+             if (ifc in sk) next
+             if (ifc ~ /\./) next
+             if (ifc ~ /^(lo|veth.*|br-.*|docker.*|virbr.*|tap.*|tun.*|dummy.*|vxlan.*|cni.*|cali.*|flannel.*|kube-.*|lxc.*)$/) next
+             rb+=$2; rp+=$3; re+=$4; rd+=$5; tb+=$10; tp+=$11; te+=$12; td+=$13
+         }
          END{print rb+0, rp+0, re+0, rd+0, tb+0, tp+0, te+0, td+0}' /proc/net/dev
 }
 
@@ -27072,12 +27094,17 @@ _vtop_cmd_line() { # $1 = text that arrived right behind the ESC (may be empty)
             $'\x1b')
                 _vtop_drain_keys            # lone ESC cancels; arrow keys are eaten
                 if [ -z "$_vtop_drain_seq" ]; then
-                    printf '\n'              # just end the prompt line -- no "(cancelled)"
-                                                # text, no notice: ESC was deliberate and
-                                                # does not need announcing (user's call
-                                                # 2026-09-26); the idle/EOF cancels below
-                                                # DO keep their notice (unexpected events)
-                    return 0
+                    # ★ESC 后面紧跟的"真实按键"不能丢 (2026-11-17 复核): drain 的契约
+                    #   就是把那个字节交回来 (_vtop_drain_ret), 主屏入口拿它当前缀
+                    #   (30215); 命令行这里原来只在 -z seq 时直接 return, 把字节扔掉 ——
+                    #   用户 ESC 取消再快速敲字母/回车, 键就凭空消失。这里按普通按键处理。
+                    case "${_vtop_drain_ret:-}" in
+                        '') printf '\n'; return 0 ;;   # 真·裸 ESC = 取消
+                        $'\n'|$'\r') printf '\n'; break ;;   # 紧跟回车 = 确认
+                        $'\x7f'|$'\x08') { [ -n "$buf" ] && { buf="${buf%?}"; printf '\b \b'; }; } ;;
+                        *) buf="$buf$_vtop_drain_ret"; printf '%s' "$_vtop_drain_ret" ;;
+                    esac
+                    continue
                 fi
                 ;;
             $'\n'|$'\r'|"")
@@ -27138,6 +27165,9 @@ _vtop_screen_sess() { # SESS page -- three blocks (user's spec 2026-09-27):
 from pg_stat_activity where pid <> pg_backend_pid()")
     _vtop_q_warn
     IFS='|' read -r se_i se_it se_a <<<"$se_out"
+    # ★查询失败时不许印 0 (2026-11-17 复核): 空结果 = 不知道, 印 "0 0 0" 是在说
+    #   "实例一个会话都没有" —— 与全工具 '-' 口径冲突 (本页其它块本来就跳过空行)。
+    [ -n "${se_out:-}" ] || { se_i="-"; se_it="-"; se_a="-"; }
     _vtop_sec "state summary"
     _vtop_th "$(printf '%-14s %-14s %s' idle idle_tx active)"
     printf '%-14s %-14s %s\n' "${se_i:-0}" "${se_it:-0}" "${se_a:-0}"
@@ -27330,6 +27360,8 @@ where a.state in ('active','idle in transaction')
   and a.pid <> pg_backend_pid()")
     _vtop_q_warn
     IFS='|' read -r lx_a lx_i <<<"$lx_out"
+    # ★同上: 汇总查询失败 => '-' 而不是 0 (2026-11-17 复核)
+    [ -n "${lx_out:-}" ] || { lx_a="-"; lx_i="-"; }
     printf '%-12s %s\n' "${lx_a:-0}" "${lx_i:-0}"
     _vtop_sec "long transactions (top 30)"
     _vtop_th "$(printf '%-14s %-9s %-9s %-8s %-8s %-19s %s' sid user db state xact_age event sqltext)"
@@ -27471,7 +27503,10 @@ from pg_stat_database"
     #   这两处漏了, 页面自相矛盾)。b20 空的 `${b20:-0}` 会把 postmaster_uptime 说成 0s
     #   ("刚启动"), 同样是吓人的假读数。
     if [ -n "$b3" ] || [ -n "$b4" ]; then is_lb="$(_vtop_hitpct "$b3" "$b4")%"; else is_lb="-"; fi
-    if [ "$is_dt" -gt 0 ] && { [ -n "$a3" ] || [ -n "$a4" ]; }; then
+    # ★守卫必须看本次样本 b3/b4, 不是基线 a3/a4 (2026-11-17 复核): is_dt>0 时基线
+    #   必然非空, 旧守卫恒真 —— 本帧计数器查询失败 (超时/视图缺失) 时 b3/b4 是空,
+    #   _vtop_delta 把空当 0 就算出 "0.00%", 编造了一个触目惊心的假结论。
+    if [ "$is_dt" -gt 0 ] && { [ -n "$b3" ] || [ -n "$b4" ]; } && { [ -n "$a3" ] || [ -n "$a4" ]; }; then
         is_hit=$(_vtop_hitpct "$(_vtop_delta "$a3" "$b3")" "$(_vtop_delta "$a4" "$b4")")%
     else
         is_hit="-"
@@ -27584,7 +27619,13 @@ _vtop_screen_wait() { # WAIT page -- two blocks, both [SESS]-style (boxed banner
     #   下限 20s 会整页判过期, 复核实证的回归; 查询数进 floor 修正。
     we_lim=$(_vtop_lim_ms "${dbsub:-5}" 3)
     if [ -n "$we_pts" ] && [ "$(( $(date +%s%3N) - we_pts ))" -gt "$we_lim" ]; then
-        we_pt=(); we_pw=(); we_pdb=0
+        # ★清空关联数组不能用 `we_pt=()` (2026-11-17 复核): bash 4.2/4.3 (CentOS/RHEL 7
+        #   自带, 本脚本其它处也按 4.2 兼容写) 会在复合赋值后把 -A 属性丢掉, 数组退回
+        #   索引数组 ⇒ 之后 we_pw["$事件名"] 被当算术下标, 全部挤到 0 号槽, 整页发明
+        #   数据。逐键 unset 在 4.2+ 全版本都保留属性。
+        for _we_k in "${!we_pt[@]}"; do unset "we_pt[$_we_k]" "we_pw[$_we_k]"; done
+        unset _we_k
+        we_pdb=0
     fi
     # ★DB_TIME 成功标志必须在兜底前抓 (2026-11-17 独立复核): 下一行 ${we_dbt:-0} 把
     #   查询失败的空值变 "0", 写基线的守卫若直接 [ -n "$we_dbt" ] 便恒真 —— 失败帧照
@@ -27742,11 +27783,14 @@ _vtop_screen_xlog() { # XLOG page -- `vb_tool xloghc`'s two sections, rendered i
        -- ★the mtime of the OLDEST-NAMED file, not min(modification) (that is the
        --   globally earliest mtime and belongs to a different file)
        (select to_char(modification,'YYYY-MM-DD HH24:MI:SS') from pg_ls_waldir() where name not like '%backup%' and length(name)=24 order by name limit 1),
-       (select name from pg_ls_waldir() where name not like '%backup%' order by modification desc limit 1),
-       (select to_char(modification,'YYYY-MM-DD HH24:MI:SS') from pg_ls_waldir() where name not like '%backup%' order by modification desc limit 1),
+       -- ★newest 侧同样要 length(name)=24 (2026-11-17 复核): pg_xlog 里还躺着
+       --   00000002.history / *.partial 这类文件, 它们 mtime 更新时会当上"最新 WAL"
+       --   ⇒ _vtop_segno 解析空 ⇒ keep 数与 archive lag 判定整段静默跳过。
+       (select name from pg_ls_waldir() where name not like '%backup%' and length(name)=24 order by modification desc limit 1),
+       (select to_char(modification,'YYYY-MM-DD HH24:MI:SS') from pg_ls_waldir() where name not like '%backup%' and length(name)=24 order by modification desc limit 1),
        (select setting::int from pg_settings where name='wal_keep_segments'),
        (select setting::int from pg_settings where name='checkpoint_segments')
-from pg_ls_waldir() where name not like '%backup%'")
+from pg_ls_waldir() where name not like '%backup%' and length(name)=24")
     _vtop_q_warn
     IFS='|' read -r xl_cnt xl_size xl_old xl_oldm xl_new xl_newm xl_keepguc xl_csegguc <<<"$xl_out"
     xl_cmin=$(_vtop_segno "$xl_old"); xl_cmax=$(_vtop_segno "$xl_new")
@@ -27758,7 +27802,9 @@ from pg_ls_waldir() where name not like '%backup%'")
         case "$1" in ''|-) printf '%s' '-'; return 0;; esac   # no LSN -> no WAL name
         case "$1" in */*) ;; *) printf '%s' '-'; return 0;; esac
         hi=${1%%/*}; lo=${1##*/}
-        printf '%s%s%s' "$(printf '%08d' "$tl")" \
+        # ★时间线是十六进制 (2026-11-17 复核): 旧 %08d 在 timeline>=10 时印出
+        #   "00000016..." 而真实文件是 "00000010..." —— 名字错、页却是"healthy"。
+        printf '%s%s%s' "$(printf '%08x' "$tl")" \
             "$(printf '%08s' "$hi" | tr ' ' 0)" \
             "$(printf '%08s' "$(printf '%s' "$lo" | cut -c1-2)" | tr ' ' 0)"
     }
@@ -28415,13 +28461,13 @@ ORDER BY chain_key, lvl LIMIT 50")
         #   ⇒ 第 1 层就是 16 字符, `%-15.15s` 会**截掉 sessionid 最后一位**, 深链直接显示
         #   一个错的 sid (是标识符, 不是指标, 截断等于给错数据)。去掉精度后超宽只会把
         #   后面的列往右推, 不再丢字符; 0 层(14 字符)仍然对齐。
-        printf '%-4s %-8.8s %-24s %-8.8s %-7s %-13s %.52s\n' \
+        printf '%-4s %-8.8s %-24s %-8s %-7s %-13s %.52s\n' \
             "$lk_lvl" "$lk_st" "$lk_ind$lk_sid" "$lk_usr" "$lk_bl" "$(_vtop_age "$lk_age")" "$lk_sql"
         lk_n=$((lk_n + 1))
     done <<<"$lk_out"
     # ★空态不再打 '(no blocking chains right now)' (用户 2026-09-28): 按子页惯例
     #   默认预留**一行 '-' 占位**(表头始终可见, 缺行=不知道 的歧义消失)。
-    [ "$lk_n" -eq 0 ] && printf '%-4s %-8.8s %-24s %-8.8s %-7s %-13s %.52s\n' "-" "-" "-" "-" "-" "-" "-"
+    [ "$lk_n" -eq 0 ] && printf '%-4s %-8.8s %-24s %-8s %-7s %-13s %.52s\n' "-" "-" "-" "-" "-" "-" "-"
 
     printf '\n'
     _vtop_sec "prepared transactions (2PC)"
@@ -28433,11 +28479,14 @@ from pg_prepared_xacts order by prepared limit 10")
     lk_n=0
     while IFS='|' read -r lk_a lk_b lk_c lk_d lk_e; do
         [ -z "${lk_a:-}" ] && continue
-        printf '%-16.16s %-12.12s %-12.12s %-14s %s\n' "$lk_a" "$lk_b" "$lk_c" "$(_vtop_age "$lk_d")" "$lk_e"
+        # ★gid/database/owner 是标识符, 一律不截断 (2026-11-17 复核): gid 是应用给的
+        #   任意文本, 也是 `ROLLBACK PREPARED '<gid>'` 的唯一钥匙 —— 16 字符截断后
+        #   印出的是一个"看着合理的错值" (同本页 28410-28417 的既有规矩)。
+        printf '%-16s %-12s %-12s %-14s %s\n' "$lk_a" "$lk_b" "$lk_c" "$(_vtop_age "$lk_d")" "$lk_e"
         lk_n=$((lk_n + 1))
     done <<<"$lk_out"
     # ★空态同上: 一行 '-' 占位, 不再打 '(no prepared transactions)'
-    [ "$lk_n" -eq 0 ] && printf '%-16.16s %-12.12s %-12.12s %-14s %s\n' "-" "-" "-" "-" "-"
+    [ "$lk_n" -eq 0 ] && printf '%-16s %-12s %-12s %-14s %s\n' "-" "-" "-" "-" "-"
 
     printf '\n'
 }
@@ -28643,7 +28692,11 @@ _vtop_screen_osmem() {
             fp = int(fl * (W - 1) + 0.5)
             ov = ""
             if (fp < 0)          { fp = 0; ov = "!" }
-            if (fp > W - 1)      { fp = W - 1; if (fl >= 1) ov = sprintf("%.1fx-high", fl) }
+            # ★溢出口径 (2026-11-17 复核): 标的是"free 是 high 的几倍", 所以分母
+            #   必须是 high。旧写用 fl=(free-min)/(high-min) 的仪表刻度值直接标
+            #   "N.Nx-high" —— min 偏移把它放大 high/(high-min) 倍 (204 实测 82.1x
+            #   而真实 28.0x), 运维会高估回收余量。
+            if (fp > W - 1)      { fp = W - 1; if (free > high) ov = sprintf("%.1fx-high", free / high) }
             c[fp] = "F"
             o = "["
             for (i = 0; i < W; i++) o = o c[i]
@@ -28693,13 +28746,17 @@ _vtop_screen_osmem() {
         }
         {
             z = $2; sub(/,/, "", z); zone = z " " $4
+            # ★buddyinfo 的数按 order 是"块的个数", 不是页数 (2026-11-17 复核):
+            #   order N 的一块 = 2^N 页。旧代码把块数当页数求和, "free" 低估 1~1024 倍
+            #   (实测 DMA32: 旧 32M / 真 1.8G), o0%..o4+% 也变成块数占比 (实测
+            #   o4+ 5.3% vs 真实页占比 95.3%, 碎片结论完全反过来)。
+            #   计数列仍按"块个数"显示 (o0..o4+ 语义不变), 页数只用于 free 与百分比。
             total = 0; hi = 0
-            for (i = 5; i <= NF; i++) total += $i
-            for (i = 9; i <= NF; i++) hi += $i          # order 4..10
+            for (i = 5; i <= NF; i++) { w = 2 ^ (i - 5); total += $i * w; if (i >= 9) hi += $i * w }
             printf "%-12s %9s %7d %7d %7d %7d %8d %6.1f%% %6.1f%% %6.1f%% %6.1f%% %6.1f%%\n", zone, h(total * ps),
                    $5, $6, $7, $8, hi,
-                   (total > 0 ? $5 * 100 / total : 0), (total > 0 ? $6 * 100 / total : 0),
-                   (total > 0 ? $7 * 100 / total : 0), (total > 0 ? $8 * 100 / total : 0),
+                   (total > 0 ? $5 * 100 / total : 0),     (total > 0 ? $6 * 2 * 100 / total : 0),
+                   (total > 0 ? $7 * 4 * 100 / total : 0), (total > 0 ? $8 * 8 * 100 / total : 0),
                    (total > 0 ? hi * 100 / total : 0)
         }
         END { if (NR == 0) exit 1 }
@@ -28747,7 +28804,7 @@ _vtop_screen_iostat() {
     # sampler); 2x1s samples + slop. Parse: buffer resets at every "Device:"
     # header, so END holds exactly the last block; no header at all (bad device
     # name, empty sysstat) falls through to the visible error line.
-    timeout 8 iostat -xmd 1 2 $dset 2>/dev/null | awk '
+    LC_ALL=C timeout 8 iostat -xmd 1 2 $dset 2>/dev/null | awk '
         /^Device:/     { buf = $0 "\n"; next }
         buf != "" && NF > 1 { buf = buf $0 "\n" }
         END { if (buf == "") exit 1; printf "%s", buf }
@@ -28829,6 +28886,11 @@ _vtop_procio() { # -> "pid comm read/s write/s" ranked rows, or a no-IO note
                 if (!(p in Ar)) continue
                 dr = Br[p] - Ar[p]; dw = Bw[p] - Aw[p]
                 ds = Bs[p] - As[p]; dx = Bx[p] - Ax[p]
+                # ★TID 复用 (2026-11-17 复核): 线程在 1s 采样窗内退出、tid 又被新线程
+                #   复用 ⇒ 新线程的小计数减旧线程的大计数 = 大负数, 会印出 "-1.4G/s"。
+                #   与本帧其它所有差分块同规矩: 负增量钳 0。
+                if (dr < 0) dr = 0; if (dw < 0) dw = 0
+                if (ds < 0) ds = 0; if (dx < 0) dx = 0
                 if (dr + dw > 0 || ds + dx > 0) { n++; P[n] = p; D[n] = dr + dw; R[n] = dr; W[n] = dw; SR[n] = ds; SW[n] = dx }
             }
             if (n == 0) { print "(窗口内无线程块设备 IO, 或仅其他用户的线程不可读)"; exit }
@@ -28912,7 +28974,7 @@ _vtop_screen_cpu() { # mpstat -P ALL: per-core split the main screen lacks
     # ★单拍即真 1s 窗 (用户令 2026-11-16: "为什么要2 执行一次不就好了"): 204 实测
     #   mpstat -P ALL 1 1 单拍值≠开机均值(2.05/93.85 vs 7.79/88.56), 无 iostat 式
     #   首拍 since-boot 毛病, 2 拍白等 1s; vmstat 页例外(首行真是开机均值, 保留 2)。
-    timeout 8 mpstat -P ALL 1 1 2>/dev/null | _vtop_sar_lastblock | awk '
+    LC_ALL=C timeout 8 mpstat -P ALL 1 1 2>/dev/null | _vtop_sar_lastblock | awk '
         NR == 1 { hdr = $0; next }
         NR == 2 { allr = $0; next }
         { rows[++n] = $0; busy[n] = 100 - $NF }
@@ -28960,7 +29022,7 @@ _vtop_screen_vmstat() { # vmstat: mem/swap/paging + cpu overview, procps (no sys
         printf '%s  !! vmstat not found (procps)%s\n' "${c_red:-}" "${c_off:-}"
         return 0
     fi
-    timeout 8 vmstat 1 2 2>/dev/null \
+    LC_ALL=C timeout 8 vmstat 1 2 2>/dev/null \
         | awk 'NR <= 2 { print; next } { l = $0 } END { if (l != "") print l; else exit 1 }' \
         || printf '%s  !! vmstat produced no rows%s\n' "${c_red:-}" "${c_off:-}"
     printf '\n'
@@ -29055,7 +29117,7 @@ _vtop_screen_net() { # sar -n DEV: per-interface rates (main NET row sums physic
         return 0
     fi
     # ★单拍即真 1s 窗 (同 cpu 页 2026-11-16 实测, 2 拍白等 1s)
-    timeout 8 sar -n DEV 1 1 2>/dev/null | _vtop_sar_lastblock \
+    LC_ALL=C timeout 8 sar -n DEV 1 1 2>/dev/null | _vtop_sar_lastblock \
         || printf '%s  !! sar produced no rows%s\n' "${c_red:-}" "${c_off:-}"
     _vtop_sec "nstat top deltas"
     _vtop_nstat || printf '%s  !! /proc/net/netstat or /proc/net/snmp unreadable%s\n' "${c_red:-}" "${c_off:-}"
@@ -29529,6 +29591,22 @@ run_vtop() {
     # ---- one-time setup ----
     local datadir dev devinfo cores
     datadir="${PGDATA:-}"
+    # ★$PGDATA 必须与本次连接的端口是同一个实例 (2026-11-17 复核): 一台机器多实例时
+    #   PGDATA 完全可能是"另一个库"的 (204 上 su - vastbase 的 .bashrc 就把 PGPORT 劫持
+    #   到 9432, 而 PGDATA 还指着 5432 的 data dir)。不信的后果: DSK/I-O/FS 行描述的是
+    #   另一个实例的盘, [TOPSQL] 拿错 pid 的 top -p 恒空而静默 '-', 整帧自相矛盾。
+    #   判据照抄 _vtop_vbcpu_pid: postmaster.pid 第 4 行 = 端口, 必须等于 $(PGPORT)。
+    #   实例 down / pid 文件不可读时无法证伪, 保留 $PGDATA (data dir 本身仍然有意义)。
+    if [ -n "$datadir" ] && [ -d "$datadir" ]; then
+        local _pgd_port=""
+        if [ -r "$datadir/postmaster.pid" ]; then
+            _pgd_port=$(sed -n '4p' "$datadir/postmaster.pid" 2>/dev/null | tr -d ' \t\r')
+        fi
+        if [ -n "$_pgd_port" ] && [ "$_pgd_port" != "${PGPORT:-5432}" ]; then
+            datadir=""
+            _vtop_notice="!! \$PGDATA ($_pgd_port) is a different instance than port ${PGPORT:-5432}: data-dir rows resolved from the DB"
+        fi
+    fi
     if [ -z "$datadir" ] || [ ! -d "$datadir" ]; then
         datadir=$(PGCONNECT_TIMEOUT=5 timeout 5 psql -d postgres -tAc "show data_directory" 2>/dev/null | head -1 | tr -d ' ')
     fi
@@ -30010,7 +30088,7 @@ order by s.sz desc;"
         if [ -t 1 ]; then
             case "${_wc:-}" in
                 ''|*[!0-9]*) ;;
-                *) [ "$_wc" -lt 101 ] && _vtop_notice="!! terminal width ${_wc} < 101: frame lines wrap -- widen the window" ;;
+                *) [ "$_wc" -lt 101 ] && _vtop_notice="${_vtop_notice:+${_vtop_notice} | }!! terminal width ${_wc} < 101: frame lines wrap -- widen the window" ;;
             esac
             case "${LC_ALL:-${LANG:-}}" in
                 ''|*[Uu][Tt][Ff]*) ;;
@@ -30029,6 +30107,13 @@ order by s.sz desc;"
     #   LSN (dbc 车道输出、vbtop_q.err、三个 .prev 基线), 共用跳板机上其他本地用户
     #   不可读; 与 awr 快照/报告的既有 umask 077 口径一致。mktemp 本就 0600, 这里
     #   补的是重定向创建的文件与 dbc 目录。
+    # ★trap/umask 是进程级状态, 返回前必须还原 (2026-11-17 复核): run_vtop --once
+    #   被 collect_log 在同一条 shell 里直接调用 (10536), 本函数返回后 7 个 trap 与
+    #   077 全都还挂着 —— 之后一次 Ctrl+C 会执行 _vtop_cleanup 的 `pkill -P`, 把当时
+    #   正在跑的采集子进程一起杀掉; umask 077 也会把后续产物改成 0600/0700。
+    local _vtop_umask_bak _vtop_traps_bak
+    _vtop_umask_bak=$(umask)
+    _vtop_traps_bak=$(trap -p EXIT INT TERM HUP QUIT TSTP CONT)
     umask 077
     _vtop_f=$(mktemp "${TMPDIR:-/tmp}/vbtop_frame.XXXXXX")
     # ★上次异常终止 (SIGKILL/OOM/断电) 留下的帧文件: 只删 1 小时前的 —— 不碰另一个
@@ -30193,17 +30278,29 @@ order by s.sz desc;"
                         # ★方向键 = 主屏 HINT 光标 (用户令 2026-11-17: 上下左右移动光标
                         #   到子屏条目、回车进对应屏, 且不影响父屏刷新): A=up/D=left
                         #   = 前一项, B=down/C=right = 后一项, 15 项环形回绕; 0=未激活,
-                        #   首次按方向键从 1 号起。改光标后落到本循环底部的渲染 (与
-                        #   超时帧同一条路径) ⇒ 按键即见【】标记; 纯键派发+渲染, 不碰
-                        #   采样节律/基线。其它序列 (PgUp/F1 等) 在主屏仍惰性, 子屏
-                        #   方向键维持原语义 (=refresh)。
+                        #   首次按 ↓/→ 从 1 号起, 首次按 ↑/← 从 15 号起 (环形语义:
+                        #   1 号的前一项就是末项)。其它序列 (PgUp/F1 等) 在主屏仍惰性,
+                        #   子屏方向键维持原语义 (=refresh)。
                         if [ "$screen" = "main" ]; then
                             case "${_vtop_drain_fin:-}" in
                                 A|D) if [ "${hint_cur:-0}" -le 1 ]; then hint_cur=15; else hint_cur=$((hint_cur-1)); fi ;;
                                 B|C) if [ "${hint_cur:-0}" -eq 0 ] || [ "${hint_cur:-0}" -ge 15 ]; then hint_cur=1; else hint_cur=$((hint_cur+1)); fi ;;
                                 *) continue ;;
                             esac
-                            # fall through: render this frame so the cursor move shows now
+                            # ★光标移动只重画 HINT 两行, 不跑整帧 (2026-11-17 复核): 落到
+                            #   帧底 = 一次完整采样 (20+ fork) + 可能正好踩中 DB 采集 (12s
+                            #   截止) + 重置 t0/d0 基线 (连按方向键把速率窗截成 200ms)。
+                            #   光标移动不产生任何新数据, 原地改最后两行足够; 帧数据的
+                            #   旧值仍留在屏上, 下一次正常刷新照常整帧覆盖。
+                            if [ "${vtop_ctl:-0}" = "1" ] && [ -z "$_vtop_notice" ]; then
+                                printf '\033[2A'
+                                _vtop_keys_hint main | while IFS= read -r _vtop_hl; do
+                                    printf '%s\033[K\n' "$_vtop_hl"
+                                done
+                                printf '\033[J'
+                                continue
+                            fi
+                            # 非 ANSI 终端 (vtop_ctl=0) 或本帧有 notice 要显示: 退回整帧
                         fi
                     elif [ "$screen" != "main" ]; then
                         screen=main
@@ -30231,6 +30328,12 @@ order by s.sz desc;"
                         # main screen: ESC opens the command line. A key that arrived
                         # right behind the ESC (coalesced/scripted input) pre-fills it --
                         # bash cannot push a byte back to stdin.
+                        # ★ESC 同时清掉 HINT 光标 (2026-11-17 复核): hint_cur 原先只有
+                        #   0→1 和环形移动, 没有任何回 0 的路径 ⇒ 误按一次方向键后, 主屏
+                        #   Enter 永远变成"进所选子屏", 用户文档里的 Enter=cmd 再也回不来。
+                        #   ESC 本就是"原路径/命令行"的入口 (用户令 "原有进入方式也支持"),
+                        #   用它顺手把光标撤掉, 两种 Enter 语义就都能到达。
+                        hint_cur=0
                         _vtop_cmd_exec "$_vtop_drain_ret"
                         [ "$_vtop_cmd_quit" = "1" ] && break
                     fi
@@ -30318,12 +30421,16 @@ order by s.sz desc;"
         t1=$(date +%s%3N); d1=$(_vtop_dsample); c1=$(_vtop_cpustat); n1=$(_vtop_net)
         v1=$(_vtop_vbcpu "$(_vtop_vbcpu_pid)")
         dt=$(( t1 - t0 )); [ "$dt" -le 0 ] && dt=1
-        read -r a_user a_nice a_sys a_idle a_iowait a_irq a_softirq a_steal <<< "$(awk -v a="$c0" -v b="$c1" 'BEGIN{split(a,x);split(b,y);d=y[1]-x[1];if(d<=0)d=1;
+        read -r a_user a_nice a_sys a_idle a_iowait a_irq a_softirq a_steal <<< "$(awk -v a="$c0" -v b="$c1" 'BEGIN{split(a,x);split(b,y);
             # ★逐状态钳非负 (2026-09-28): 累计值变小只有一种来源 —— CPU 热插拔/下线
             # (VM 减核) 或 suspends。只把总窗口 d 兜到 1 是**不够**的: 被离线的那颗核
             # 的 idle 增量会是 -75000 这种量级, 乘以 100/1 直接打出 -7500000% 的垃圾值。
             # 钳法与本帧其它三块 (I/O、NET、PGCACHE) 完全一致。
             for(i=2;i<=9;i++) if(y[i]<x[i]) y[i]=x[i];
+            # ★窗口分母改用"钳后逐状态增量之和" (2026-11-17 复核): 减核会让总数 y[1]-x[1]
+            #   变成负数/0 ⇒ 旧版 d=1, 于是每列都是几百倍的百分比 (剩余核的真实增量
+            #   除以 1)。求和既等于正常帧的总增量, 又天然与钳过的分子同口径。
+            d=0; for(i=2;i<=9;i++) d+=y[i]-x[i]; if(d<=0) d=1;
             printf "%.1f %.1f %.1f %.1f %.1f %.1f %.1f %.1f", (y[2]-x[2])*100/d, (y[3]-x[3])*100/d, (y[4]-x[4])*100/d, (y[5]-x[5])*100/d, (y[6]-x[6])*100/d, (y[7]-x[7])*100/d, (y[8]-x[8])*100/d, (y[9]-x[9])*100/d}')"
         # ★vbcpu% (user 2026-11-14, first column of the CPU row): CPU of the
         # instance vtop itself talks to, PER-CORE scale (top's IRIX style, user's
@@ -30972,6 +31079,14 @@ printf '           %-14s %-22s %-8.8s %-9s %.62s\n' "-" "-" "-" "-" "-"
         t0=$t1; d0=$d1; c0=$c1; n0=$n1; p0=$p_cur; g0=$g_cur; v0=$v1
     done
     rm -f "$_vtop_f" "$_vtop_dbcache"
+    # ★进程级状态还原 (2026-11-17 复核, 安装处有完整注释): 先做一次自己的清理
+    #   (idempotent), 再把 7 个 trap 复位成进入前的样子, umask 也还回去。信号路径
+    #   不在这里 —— 那些路径直接 exit, 由 trap 自己收尾。
+    _vtop_cleanup
+    _vtop_stty=""; _vtop_f=""
+    trap - EXIT INT TERM HUP QUIT TSTP CONT
+    [ -n "${_vtop_traps_bak:-}" ] && eval "$_vtop_traps_bak"
+    [ -n "${_vtop_umask_bak:-}" ] && umask "$_vtop_umask_bak"
     return 0
 }
 
@@ -31916,11 +32031,14 @@ _awr_collect() {
     # fine as the DB user, root is not needed. Fixed state order, zeros
     # included, same always-display rule as the fd classes.
     timeout -k 2 10 ss -tanH "sport = :${PGPORT:-5432}" 2>/dev/null | awk '
+        # other 列与 vtop 同一修法 (2026-11-17): 未知状态名真计入 other, 不再恒 0
+        BEGIN { n = split("listen|established|syn-recv|syn-sent|fin-wait-1|fin-wait-2|time-wait|close-wait|last-ack|closing", ord, "|")
+                for (i = 1; i <= n; i++) known[ord[i]] = 1 }
         { s = tolower($1)
           if (s == "estab") s = "established"
-          cnt[s]++ }
-        END { n = split("listen|established|syn-recv|syn-sent|fin-wait-1|fin-wait-2|time-wait|close-wait|last-ack|closing|other", ord, "|")
-              for (i = 1; i <= n; i++) print ord[i] "|" cnt[ord[i]]+0 }' \
+          if (s in known) cnt[s]++; else oth++ }
+        END { for (i = 1; i <= n; i++) print ord[i] "|" cnt[ord[i]]+0
+              print "other|" oth+0 }' \
         > "$osd/db_tcp_states" 2>/dev/null
     # sysctl: FULL kernel parameter dump via `sysctl -a` (user 2026-09-17:
     # the complete set, not a curated list). Keys the collector user cannot
