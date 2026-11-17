@@ -26819,24 +26819,26 @@ _vtop_hum() { # kB -> human
 #   out=$(_vtop_q ...), which forks, so a variable assigned inside _vtop_q
 #   would never make it back to the caller. $$ is the main shell's pid even
 #   inside a command substitution, so both sides compute the same path.
-_vtop_q() { # $1 = SQL; rows on stdout ('|'-separated); errors -> /tmp/vbtop_q.$$.err
+_vtop_q() { # $1 = SQL; rows on stdout ('|'-separated); errors -> ${TMPDIR:-/tmp}/vbtop_q.$$.err
     local _qrc
     # ★连接库写死 postgres = 用户拍板 (2026-11-16: "写死postgres 没事的啊"),
     #   勿再"修"; 曾评估过跟随 PGDATABASE 以覆盖每库一份的 dbe_perf 视图, 已否。
+    # ★err 路径 2026-11-17 复核改 ${TMPDIR:-/tmp}: 与启动清扫/EXIT 清扫同源
+    #   (旧硬编码 /tmp, 设 TMPDIR 的机器上清扫扫不到它的 SIGKILL 残留)。
     PGCONNECT_TIMEOUT=5 PGOPTIONS='-c statement_timeout=5000' \
-        timeout 12 psql -d postgres -X -q -A -t -F'|' -c "$1" 2>"/tmp/vbtop_q.$$.err"
+        timeout 12 psql -d postgres -X -q -A -t -F'|' -c "$1" 2>"${TMPDIR:-/tmp}/vbtop_q.$$.err"
     _qrc=$?
-    if [ "$_qrc" -ne 0 ] && [ ! -s "/tmp/vbtop_q.$$.err" ]; then
+    if [ "$_qrc" -ne 0 ] && [ ! -s "${TMPDIR:-/tmp}/vbtop_q.$$.err" ]; then
         if [ "$_qrc" -eq 124 ]; then
-            printf 'query timed out after 12s\n' >"/tmp/vbtop_q.$$.err"
+            printf 'query timed out after 12s\n' >"${TMPDIR:-/tmp}/vbtop_q.$$.err"
         else
-            printf 'psql exited %s (connection lost?)\n' "$_qrc" >"/tmp/vbtop_q.$$.err"
+            printf 'psql exited %s (connection lost?)\n' "$_qrc" >"${TMPDIR:-/tmp}/vbtop_q.$$.err"
         fi
     fi
     return $_qrc
 }
 _vtop_q_warn() { # print the LAST query's error (if any) as one red line, then clear it
-    local _wf="/tmp/vbtop_q.$$.err"
+    local _wf="${TMPDIR:-/tmp}/vbtop_q.$$.err"
     if [ -s "$_wf" ]; then
         printf '%s  !! %s%s\n' "${c_red:-}" "$(tr '\n' ' ' <"$_wf")" "${c_off:-}"
     fi
@@ -26883,7 +26885,7 @@ _vtop_db_collect() { # $1 = the combined VT_SQL+VT_TOP text -> the ===MARK-annot
     [ -n "$_mark" ] && { _M+=("$_mark"); _Q+=("$_sql"); }
     local _n=${#_M[@]} _i _w _rc _out _data=0
     [ "$_n" -eq 0 ] && return 0
-    local _d="/tmp/vbtop_dbc.$$"
+    local _d="${TMPDIR:-/tmp}/vbtop_dbc.$$"
     rm -rf "$_d" 2>/dev/null
     mkdir "$_d" 2>/dev/null || return 0      # /tmp unusable: same footing as a dead DB (the
                                              # error-file path already depends on /tmp)
@@ -27404,8 +27406,10 @@ from pg_stat_database"
     #   下限 20s(一帧渲染最坏 ~12s psql 预算 + 余量, 慢机器不误判); 单位毫秒
     #   (is_t1 是 %s%3N 毫秒, 阈值也必须毫秒 —— rp_lim 第一版写成秒的教训在案)。
     # ★min(3×节律,15) 壳已废 (用户 2026-11-16: 四旗标后节律全是显式值, 不再派生);
-    #   阈值统一走 _vtop_lim_ms (本页 1 条查询, 慢帧保护进 floor)。
-    is_lim=$(_vtop_lim_ms "${dbsub:-5}" 1)
+    #   阈值统一走 _vtop_lim_ms (2026-11-17 复核修 q: 本页每帧串行 2 条查询 = is_b
+    #   计数器 + is_s1 命中率; q 少报 1 时慢实例最坏帧 5+2×12=29s > 阈值 25s,
+    #   每帧恒判过期整页 '-'。wait 页传 3 是对的, 本页对齐)。
+    is_lim=$(_vtop_lim_ms "${dbsub:-5}" 2)
     [ "$is_dt" -gt "$is_lim" ] && is_dt=0
     # no baseline (first render) -> is_a empty and is_dt 0: every rate renders '-'
     # (_vtop_istrow prints dashes when its begin value is empty), exactly like the
@@ -27563,6 +27567,11 @@ _vtop_screen_wait() { # WAIT page -- two blocks, both [SESS]-style (boxed banner
     if [ -n "$we_pts" ] && [ "$(( $(date +%s%3N) - we_pts ))" -gt "$we_lim" ]; then
         we_pt=(); we_pw=(); we_pdb=0
     fi
+    # ★DB_TIME 成功标志必须在兜底前抓 (2026-11-17 独立复核): 下一行 ${we_dbt:-0} 把
+    #   查询失败的空值变 "0", 写基线的守卫若直接 [ -n "$we_dbt" ] 便恒真 —— 失败帧照
+    #   写基线 0, 下一帧 we_ddbt=终身 DB_TIME、pct 全≈0, 正是 2026-10-10 那笔要堵的
+    #   路径被 09-28 的兜底行重新打开。
+    we_dbt_ok=${we_dbt:+1}
     we_dbt=${we_dbt:-0}; we_pdb=${we_pdb:-0}
     we_ddbt=$(( we_dbt - we_pdb ))
     while IFS='|' read -r we_ev we_cl we_w we_t; do
@@ -27606,7 +27615,7 @@ _vtop_screen_wait() { # WAIT page -- two blocks, both [SESS]-style (boxed banner
     #   we_dbt 落空成 0, 若照写 ⇒ 下一帧 we_pdb=0 ⇒ we_ddbt=终身 DB_TIME, 所有
     #   pct_db_time 严重偏小。istat 页同类场景是整体跳过写基线([ -n "$is_b" ]),
     #   口径对齐: 查询失败的帧不落盘, 保留旧基线(过期判定会兜住太旧的)。
-    if [ -n "$we_out" ] && [ -n "$we_dbt" ]; then
+    if [ -n "$we_out" ] && [ "$we_dbt_ok" = "1" ]; then
         {
             printf '%s %s\n' "$(date +%s%3N)" "$we_dbt"
             printf '%s\n' "$we_out" | awk -F'|' 'NF>=4 {print $1 "\t" $3 "\t" $4}'
@@ -27896,9 +27905,10 @@ order by a.application_name")
     # ★单位必须与时间戳一致: rp_t1 是 date +%s%3N 的**毫秒**, 所以阈值也要毫秒
     #   (第一版写成秒了 ⇒ 5.1 秒的窗口 5157 > 45 恒成立 ⇒ 每帧都判过期、速率列永远 '-'。
     #    插桩实测抓到)。公式: 节律(秒) ×3 再 ×1000, 下限 20 秒。
-    # ★阈值 = _vtop_lim_ms(dbsub, 1) (2026-11-16): min(3×节律,15) 壳已废(用户拍板,
-    #   四旗标后节律全显式), 统一走 helper, 本页 1 条查询。
-    rp_lim=$(_vtop_lim_ms "${dbsub:-5}" 1)
+    # ★阈值 = _vtop_lim_ms(dbsub, 2) (2026-11-17 复核修 q): min(3×节律,15) 壳已废
+    #   (用户拍板, 四旗标后节律全显式), 统一走 helper; 本页每帧串行 2 条查询
+    #   (rp_out 主行 + wal_receiver 侧行), q=1 少报与 istat 页同款。
+    rp_lim=$(_vtop_lim_ms "${dbsub:-5}" 2)
     [ "$rp_dt" -gt "$rp_lim" ] && rp_dt=0
     printf '\n'
     _vtop_sec "REPL STAT"
@@ -28556,8 +28566,10 @@ _vtop_screen_osmem() {
             if (row != "") print row
         }' /proc/meminfo 2>/dev/null || printf '%s  !! /proc/meminfo unreadable%s\n' "${c_red:-}" "${c_off:-}"
     # swap devices (per-device usage; totals are already in meminfo)
+    # ★freeK = Size-Used (2026-11-17 独立复核): /proc/swaps $3=Size $4=Used,
+    #   旧写 $4-$3 = Used-Size, swap 用量>0 的机器 freeK 必现负值。
     [ -r /proc/swaps ] && tail -n +2 /proc/swaps 2>/dev/null | awk '
-        { printf "%-30s %-10s %12s %12s %6s\n", $1, $2, $4, $4 - $3, $5 }' | sed '1i device                         type       usedK       freeK  prio'
+        { printf "%-30s %-10s %12s %12s %6s\n", $1, $2, $4, $3 - $4, $5 }' | sed '1i device                         type       usedK       freeK  prio'
 
     # ---- 2. pressure: faults & reclaim (1s measured window) ----
     _vtop_sec "page faults & reclaim (/proc/vmstat, 1s window)"
@@ -29266,12 +29278,12 @@ _vtop_print_frame() { # $1=frame file: redraw in place, or plain dump
 _vtop_cleanup() {
     [ "${BASHPID:-$$}" = "$$" ] || return 0
     pkill -P "$BASHPID" 2>/dev/null
-    rm -f "${_vtop_f:-}" "${_vtop_f:-}.box."* "${_vtop_dbcache:-}" "/tmp/vbtop_q.$$.err" \
+    rm -f "${_vtop_f:-}" "${_vtop_f:-}.box."* "${_vtop_dbcache:-}" "${TMPDIR:-/tmp}/vbtop_q.$$.err" \
           "${TMPDIR:-/tmp}/vbtop_wait.$$.prev" "${TMPDIR:-/tmp}/vbtop_istat.$$.prev" "${TMPDIR:-/tmp}/vbtop_repl.$$.prev" \
           "${TMPDIR:-/tmp}"/vbtop_stack."$$".* "${TMPDIR:-/tmp}"/vbtop_stkch."$$".* "${TMPDIR:-/tmp}"/vbtop_stkagg."$$".* 2>/dev/null
-    # ★主屏并行采集的分段结果目录 (信号打断帧时车道文件会残留; 下次运行也会自愈清掉,
-    #   这里退出时一并收走, 客户机上不留垃圾)
-    rm -rf "/tmp/vbtop_dbc.$$" 2>/dev/null
+    # ★主屏并行采集的分段结果目录 (信号打断帧时车道文件会残留; SIGKILL 后启动清扫
+    #   也会回收 vbtop_dbc.* , 这里退出时一并收走, 客户机上不留垃圾)
+    rm -rf "${TMPDIR:-/tmp}/vbtop_dbc.$$" 2>/dev/null
     # ★`stty echo ICANON` -- icanon too: bash's own `read -n1` switches the tty
     # to non-canonical while it reads, and a signal landing mid-read (Ctrl+C)
     # unwinds that restore; we are the reason the tty was touched at all, so
@@ -29971,7 +29983,7 @@ order by s.sz desc;"
     # exit, then Enter just re-printed prompts with no echo). The signal traps
     # fire while run_vtop is still on the stack, which is why Ctrl+C restored
     # echo and masked the hole for so long.
-    _vtop_f=$(mktemp /tmp/vbtop_frame.XXXXXX)
+    _vtop_f=$(mktemp "${TMPDIR:-/tmp}/vbtop_frame.XXXXXX")
     # ★上次异常终止 (SIGKILL/OOM/断电) 留下的帧文件: 只删 1 小时前的 —— 不碰另一个
     # 正在运行的 vtop 的帧文件 (它的 mtime 是秒级)。同一个用户才有权限删, 失败无所谓。
     # ★清扫目录必须与创建目录同源 (2026-09-28 修): 这些文件是用 ${TMPDIR:-/tmp} 建的,
@@ -29992,6 +30004,12 @@ order by s.sz desc;"
     find "$_vtop_tmpdir" -maxdepth 1 -name 'vbtop_stack.*' -mmin +60 -delete 2>/dev/null
     find "$_vtop_tmpdir" -maxdepth 1 -name 'vbtop_stkch.*' -mmin +60 -delete 2>/dev/null
     find "$_vtop_tmpdir" -maxdepth 1 -name 'vbtop_stkagg.*' -mmin +60 -delete 2>/dev/null
+    # ★dbc 车道目录 + dbcache (2026-11-17 复核): SIGKILL/断电残留且此前无任何回收
+    #   ("下次运行自愈"不成立——下次 $$ 不同); dbc 是目录, -delete 只删空目录, 用
+    #   -exec rm -rf。同一条 +60min 年龄门: 正在运行的第二个 vtop 的文件是秒级新鲜
+    #   mtime, 不会被误删。
+    find "$_vtop_tmpdir" -maxdepth 1 -name 'vbtop_dbc.*' -mmin +60 -exec rm -rf {} + 2>/dev/null
+    find "$_vtop_tmpdir" -maxdepth 1 -name 'vbtop_dbcache.*' -mmin +60 -delete 2>/dev/null
     _vtop_stty=""                # set when WE turned terminal echo off (restore at exit; GLOBAL -- see above)
     # ★一个清理函数 + 四个 trap (2026-09-26): 原来只有 EXIT, 于是被 SIGTERM/SIGINT 打死时
     # tty 留在 -echo (用户终端变哑巴)、临时文件也不删。HUP 尤其重要: 终端/ssh 断开时
@@ -30009,7 +30027,7 @@ order by s.sz desc;"
     trap '_vtop_cleanup; kill -STOP "$$"' TSTP
     trap '[ "$interactive" = "1" ] && [ -t 0 ] && stty -echo 2>/dev/null' CONT
     local _vtop_dbcache
-    _vtop_dbcache=$(mktemp /tmp/vbtop_dbcache.XXXXXX)
+    _vtop_dbcache=$(mktemp "${TMPDIR:-/tmp}/vbtop_dbcache.XXXXXX")
     local db_next=0 db_ok=0 db_dirty=1 prev_ist_ms=0 prev_rp_ms=0   # schedule, reachability, unrendered flag, per-section baseline stamps (ms)
     local screen="main"          # active screen: main | mem (one screen runs at a time)
     local interactive=0 # key legend line: only when a human is
@@ -30099,7 +30117,10 @@ order by s.sz desc;"
             #   自带采样窗, cpu 页 mpstat 1 2 就 ≈2s)。下一拍扣除上一帧实测工作量,
             #   "refresh Ns"=帧落地节律; 工作量≥节律时扣到 1s, 墙钟=物理最短。
             _wk=$(( _last_work_ms / 1000 ))
-            [ "$_wk" -gt 0 ] && [ "$rd_tmo" -gt "$_wk" ] && rd_tmo=$(( rd_tmo - _wk ))
+            # ★无条件扣再钳 1 (2026-11-17 复核): 旧门 [ rd_tmo > _wk ] 让工作量≥节律时
+            #   减法整个跳过 (iostat 页工作量 ~4s > ossub 3s ⇒ 实际周期 ~7s, 横幅却印
+            #   refresh 3s); 扣到负由下一行钳 1, 墙钟 = 物理最短。
+            [ "$_wk" -gt 0 ] && rd_tmo=$(( rd_tmo - _wk ))
             [ "$rd_tmo" -lt 1 ] && rd_tmo=1
             IFS= read -r -t "$rd_tmo" -n 1 key
             rrc=$?
@@ -30731,20 +30752,32 @@ printf '           %-14s %-22s %-8.8s %-9s %.62s\n' "-" "-" "-" "-" "-"
                           # 原来困在速率守卫里, 首帧/ESC 返回/断库恢复帧会连 lag 一起
                           # 清成 '-' —— 恰恰是用户盯着看延迟的时刻; 子屏 REPL 一直就是
                           # 无基线也渲染 lag 的, 主屏对齐。仅需本行值非空。
-                          if [ -n "$r_sent" ]; then
+                          # ★四列全非空才算 (2026-11-17 独立复核): walsender startup/重连
+                          #   态 sent 可用而 write/flush/replay 为 NULL, psql 空字段进 bash
+                          #   算术按 0 ⇒ net_lag/total_lag = 整个 WAL 偏移的假延迟、r_fs
+                          #   负值被 fmt_b 钳 0B 假追平。子屏同位置走 _vtop_delta, 这里对齐。
+                          if [ -n "$r_sent" ] && [ -n "$r_wr" ] && [ -n "$r_fl" ] && [ -n "$r_rp" ]; then
                               r_net=$(( r_sent - r_wr )); r_fs=$(( r_wr - r_fl ))
                               r_ap=$(( r_fl - r_rp )); r_tot=$(( r_sent - r_rp ))
                           fi
-                          if [ -n "$prev_rsent" ] && [ -n "$r_sent" ] && [ "$rp_w" -gt 0 ] 2>/dev/null; then
+                          if [ -n "$prev_rsent" ] && [ -n "$r_sent" ] && [ -n "$r_wr" ] && [ -n "$r_fl" ] && [ -n "$r_rp" ] && [ "$rp_w" -gt 0 ] 2>/dev/null; then
                               r_dsent=$(( (r_sent - prev_rsent) * 1000 / rp_w ))
                               r_dwr=$(( (r_wr - prev_rwr) * 1000 / rp_w ))
                               r_dfl=$(( (r_fl - prev_rfl) * 1000 / rp_w ))
                               r_drp=$(( (r_rp - prev_rrp) * 1000 / rp_w ))
+                              # 备库切换/重启: 位点可倒退, 负 delta 钳 0 (对齐 _vtop_delta;
+                              #   2026-11-17 起基线不再被 n_repl=0 清, 此钳是倒退防线)
+                              [ "$r_dsent" -lt 0 ] && r_dsent=0
+                              [ "$r_dwr" -lt 0 ] && r_dwr=0
+                              [ "$r_dfl" -lt 0 ] && r_dfl=0
+                              [ "$r_drp" -lt 0 ] && r_drp=0
                           fi
                           # ★基线只在行值非空时滚动 (2026-11-16 复核修, 对齐 ISTAT 段):
                           # walsender 重连/startup 态某帧 LSN 列可为 NULL, 无条件滚动
                           # 会把 prev 写成空串, 下一帧守卫 [ -n ] 失败多空一帧。
-                          if [ -n "$r_sent" ]; then
+                          # ★基线四列全非空才滚动 (2026-11-17 复核): 只守 sent 会把部分
+                          #   NULL 的行写进 prev, 下一帧守卫失败多空一帧。
+                          if [ -n "$r_sent" ] && [ -n "$r_wr" ] && [ -n "$r_fl" ] && [ -n "$r_rp" ]; then
                               prev_rsent=$r_sent; prev_rwr=$r_wr; prev_rfl=$r_fl; prev_rrp=$r_rp
                               prev_rp_ms=$t1
                           fi;;
@@ -30768,10 +30801,11 @@ printf '           %-14s %-22s %-8.8s %-9s %.62s\n' "-" "-" "-" "-" "-"
                           n_top=$((n_top+1));;
                 esac
             done <<< "$db"
-            # ★这一帧一行备库行都没有(备库掉线 / 槽被删) ⇒ 连**基线**一起清: 显示值已被
-            # 上面的每帧复位清成 '-' 了, 但 prev_r* 若留着, 备库重连后的第一帧就会拿
-            # 几分钟前的旧位点去减, 算出一个巨大的假 sent/s。与 ESC 回主屏那条路径同规矩。
-            [ "${n_repl:-0}" -eq 0 ] && { prev_rsent=""; prev_rwr=""; prev_rfl=""; prev_rrp=""; prev_rp_ms=0; }
+            # ★REPL 段被 12s 帧截止砍掉时同样 n_repl=0, 与"真没备库"不可区分 —— 旧代码
+            #   在这里连基线一起清, 慢库上 REPL 四列永久 '-' 而 ISTAT 正常 (2026-11-17
+            #   独立复核)。对齐 ISTAT 段既立规矩: 空段不擦基线。假 sent/s 由过期守卫挡
+            #   (prev_rp_ms 太旧 ⇒ rp_w > rp_wmax ⇒ 速率跳过、下一帧重锚), 备库切换的
+            #   倒退 delta 由速率块新加的负钳挡; 真清基线只剩 ESC 回主屏一条路。
             # ★no TOP SQL rows this frame -> keep the header's column structure readable with a
             # "-" row (user's call 2026-09-26, same rule as LTX/LOCK). TOPMEM gets the same
             # treatment at the ===TOP marker above, because its rows have to be flushed
