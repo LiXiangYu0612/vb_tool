@@ -28168,10 +28168,10 @@ _vtop_screen_topsql() { # TOPSQL page -- EXACTLY the two rankings the `as` scrip
     #   (a null row) drop out as well.
     local ts_out ts_pairs ts_a ts_b ts_c ts_d ts_e ts_sql ts_n ts_pm
     _vtop_pg topsql 'Top SQL' 'top cpu usage + top I/O usage, per OS thread (as script)'
-    ts_pm="${pm_pid:-}"
-    if [ -z "$ts_pm" ] && [ -n "${datadir:-}" ]; then
-        ts_pm=$(head -1 "$datadir/postmaster.pid" 2>/dev/null | tr -d ' ')
-    fi
+    # ★每帧现读 postmaster.pid (2026-11-17 三道复核): 不再沿用启动时的 pm_pid ——
+    #   停在本页期间实例重启的话旧 pid 已死, top -p 恒空, 整页静默 '-'。
+    ts_pm=""
+    [ -n "${datadir:-}" ] && [ -f "$datadir/postmaster.pid" ] && ts_pm=$(head -1 "$datadir/postmaster.pid" 2>/dev/null | tr -d ' ')
     printf '\n'
     # ★box: a _vtop_sec banner is what _vtop_boxify keys on, so these two blocks
     #   get the same ┌┈ label ┈┐ frame the sess page has (user's call 2026-09-27:
@@ -29148,13 +29148,13 @@ _vtop_drain_keys() { # ESC arrived: eat the escape-sequence tail, nothing else
     # tell WHICH arrow it was (cursor feature 2026-11-17).
     local _d
     _vtop_drain_ret=""; _vtop_drain_seq=""; _vtop_drain_fin=""
-    IFS= read -r -t 0.03 -n 1 _d || return 0
+    IFS= read -r -t 0.08 -n 1 _d || return 0
     case "$_d" in
         '['|'O') ;;                              # CSI / SS3 introducer: eat the tail
         *) _vtop_drain_ret="$_d"; return 0 ;;    # real key: hand back, stop reading
     esac
     _vtop_drain_seq=1
-    while IFS= read -r -t 0.03 -n 1 _d; do
+    while IFS= read -r -t 0.08 -n 1 _d; do
         case "$_d" in
             [0-9\;\?\ ]) : ;;                    # parameter bytes
             *) _vtop_drain_fin="$_d"; return 0 ;;# final byte: sequence complete
@@ -29985,6 +29985,19 @@ order by s.sz desc;"
         case "$_wc" in ''|*[!0-9]*) _wc=150;; esac
         if [ "$_wc" -le 151 ]; then _vtop_w=$((_wc - 1)); fi
         [ "$_vtop_w" -lt 100 ] && _vtop_w=100
+        # ★首帧一次性提醒 (2026-11-17 三道复核): 窄终端 (<101 列, 帧被地板抬回 100 列
+        #   必换行涂抹) 与非 UTF-8 locale (框线字符乱码) 不阻断运行, 但要让用户知道
+        #   为什么花屏; _vtop_notice 是全局变量、只活一帧, 恰好承载"首帧提示"。
+        if [ -t 1 ]; then
+            case "${_wc:-}" in
+                ''|*[!0-9]*) ;;
+                *) [ "$_wc" -lt 101 ] && _vtop_notice="!! terminal width ${_wc} < 101: frame lines wrap -- widen the window" ;;
+            esac
+            case "${LC_ALL:-${LANG:-}}" in
+                ''|*[Uu][Tt][Ff]*) ;;
+                *) _vtop_notice="${_vtop_notice:+${_vtop_notice} | }!! locale not UTF-8: box chars garble (set LANG=*.UTF-8)" ;;
+            esac
+        fi
     fi
     # ★_vtop_f / _vtop_stty are GLOBAL on purpose (not local): the EXIT trap
     # runs AFTER run_vtop has returned, so a local would already be destroyed
@@ -29993,6 +30006,11 @@ order by s.sz desc;"
     # exit, then Enter just re-printed prompts with no echo). The signal traps
     # fire while run_vtop is still on the stack, which is why Ctrl+C restored
     # echo and masked the hole for so long.
+    # ★umask 077 (2026-11-17 三道复核): vtop 的 /tmp 中间件携带业务 SQL 文本/用户名/
+    #   LSN (dbc 车道输出、vbtop_q.err、三个 .prev 基线), 共用跳板机上其他本地用户
+    #   不可读; 与 awr 快照/报告的既有 umask 077 口径一致。mktemp 本就 0600, 这里
+    #   补的是重定向创建的文件与 dbc 目录。
+    umask 077
     _vtop_f=$(mktemp "${TMPDIR:-/tmp}/vbtop_frame.XXXXXX")
     # ★上次异常终止 (SIGKILL/OOM/断电) 留下的帧文件: 只删 1 小时前的 —— 不碰另一个
     # 正在运行的 vtop 的帧文件 (它的 mtime 是秒级)。同一个用户才有权限删, 失败无所谓。
@@ -30394,6 +30412,13 @@ order by s.sz desc;"
         # 此前 2026-08-21 的 -d0.3 -n2(取第二帧瞬时值) 与 as 的 -n1 数字对不上, 用户
         # 以 as 为准。as 的 -n1 首帧偶发毛刺 (当年实测 1/10) 一并继承 —— 与 as 完全
         # 同算法是本口径的第一优先级。
+        # ★pm_pid 每帧现读 (2026-11-17 三道复核): 只在启动时解析一次的话, 挂机期间
+        #   实例重启 ⇒ postmaster.pid 换新 pid ⇒ 旧 pid 已死 ⇒ top -p 恒空 ⇒
+        #   cpupairs 恒 "0,0" ⇒ TOPSQL 主屏行整个会话静默 '-' 无报错 (对照
+        #   _vtop_vbcpu_pid 的逐帧重锚设计, 全文件的重启自愈基调)。实例 down 时
+        #   pid 文件缺失 ⇒ pm_pid 空 ⇒ 跳过采样 (down 本就没有 topsql)。
+        pm_pid=""
+        [ -n "${datadir:-}" ] && [ -f "$datadir/postmaster.pid" ] && pm_pid=$(head -1 "$datadir/postmaster.pid" 2>/dev/null | tr -d ' ')
         if [ -n "$pm_pid" ]; then
             cpupairs=$(LC_ALL=C timeout 5 top -b -n1 -H -p "$pm_pid" 2>/dev/null \
                 | awk '/^ *PID USER/ {ci=0; for(i=1;i<=NF;i++) if($i=="%CPU") ci=i; while (getline) if(ci && $ci!="") print $1 "," $ci}' \
