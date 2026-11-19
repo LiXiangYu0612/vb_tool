@@ -6571,7 +6571,7 @@ run_as() {
 \echo '================================'
 \echo 'long transaction info(limit 10) '
 \echo '================================'
-SELECT  case when client_addr is null then a.datname else concat(a.datname,':',client_addr) end client_info,
+SELECT  case when client_addr is null then a.datname else concat(a.datname,':',client_addr::text) end client_info,
         concat(a.sessionid,':',decode(w.block_sessionid,null,'not wait',w.block_sessionid::text)) sid_bsid
         ,a.unique_sql_id
         ,w.wait_event
@@ -6585,7 +6585,7 @@ ORDER BY etime DESC nulls last limit 10;
 \echo '================================'
 \echo 'active session info(limit 30)   '
 \echo '================================'
-SELECT case when client_addr is null then a.datname else concat(a.datname,':',client_addr) end client_info,
+SELECT case when client_addr is null then a.datname else concat(a.datname,':',client_addr::text) end client_info,
         concat(a.sessionid,':',decode(w.block_sessionid,null,'not wait',w.block_sessionid::text)) sid_bsid
         ,a.unique_sql_id
         ,w.wait_event
@@ -6645,7 +6645,7 @@ psql -P footer=off -d postgres -c "with tmp as (SELECT split_part(result, ',', 1
 \echo '================================'
 \echo 'long transaction info(limit 10)   '
 \echo '================================'
-SELECT concat(a.datname, ':',':',client_addr) client_info,
+SELECT concat(a.datname, ':',':',client_addr::text) client_info,
         concat(a.sessionid,':',decode(w.block_sessionid,null,'not wait',w.block_sessionid::text)) sid_bsid
         ,a.query_id as unique_sql_id
         ,w.wait_event
@@ -6658,7 +6658,7 @@ ORDER BY etime DESC nulls last limit 10;
 \echo '================================'
 \echo 'active session info(limit 30)   '
 \echo '================================'
-SELECT concat(a.datname, ':',':',client_addr) client_info,
+SELECT concat(a.datname, ':',':',client_addr::text) client_info,
         concat(a.sessionid,':',decode(w.block_sessionid,null,'not wait',w.block_sessionid::text)) sid_bsid
         --,a.unique_sql_id
 		,a.query_id
@@ -27248,7 +27248,7 @@ order by 2 desc limit 10")
     se_out=$(_vtop_q "select case when a.client_addr is null and a.client_port is null
                  then coalesce(a.application_name,'-')
             when a.client_addr is null then concat(coalesce(a.usename,'-'),':',coalesce(a.application_name,'-'))
-            else concat(coalesce(a.usename,'-'),':',a.client_addr) end,
+            else concat(coalesce(a.usename,'-'),':',a.client_addr::text) end,
        concat(a.sessionid::text,':',case when w.block_sessionid is null then 'not wait' else w.block_sessionid::text end),
        coalesce(nullif(a.unique_sql_id::text,'0'),'-'),
        coalesce(w.wait_event,'-'),
@@ -27309,7 +27309,7 @@ order by (extract(epoch from (now()-a.query_start))) desc nulls last limit 15")
     bk_out=$(_vtop_q "select case when b.client_addr is null and b.client_port is null
                  then coalesce(b.application_name,'-')
             when b.client_addr is null then concat(coalesce(b.usename,'-'),':',coalesce(b.application_name,'-'))
-            else concat(coalesce(b.usename,'-'),':',b.client_addr) end,
+            else concat(coalesce(b.usename,'-'),':',b.client_addr::text) end,
        concat(b.sessionid::text,':',case when wb.block_sessionid is null then 'not wait' else wb.block_sessionid::text end),
        coalesce(nullif(b.unique_sql_id::text,'0'),'-'),
        coalesce(wb.wait_event,'-'),
