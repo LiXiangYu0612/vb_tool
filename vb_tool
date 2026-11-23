@@ -145,7 +145,6 @@ as_help() {
     echo "             is auto-resolved (ss TCP listener first, then"
     echo "             \$PGDATA/postmaster.pid)"
     echo "  vastbase_pid: explicit instance pid, skips auto-resolution"
-    echo "  -P <port>: global option as for any command (changes \$PGPORT)"
     echo ""
 }
 
