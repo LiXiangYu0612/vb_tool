@@ -6555,7 +6555,7 @@ EOF
 
 
 
-# ---- as: port -> gaussdb pid resolution + multi-instance loop -------------
+# ---- as: port -> vastbase pid resolution + multi-instance loop -------------
 # _as_find_pid_by_port: TCP listener first (ss; every network listener),
 # then $PGDATA/postmaster.pid with the line-4 port cross-check (covers
 # socket-only instances ss cannot see). Prints the pid, or nothing on failure.
@@ -6617,14 +6617,14 @@ _run_as_multi() {
                 if [ "$_as_rc" = 2 ]; then
                     echo "Error: port $p is listening but its pid belongs to another OS user (ss -p needs the instance owner or root); run as that user or pass the pid explicitly" >&2
                 else
-                    echo "Error: cannot resolve port $p to a gaussdb pid (no listener on :$p, \$PGDATA/postmaster.pid mismatch); pass pid explicitly: vb_tool as <pid>" >&2
+                    echo "Error: cannot resolve port $p to a vastbase pid (no listener on :$p, \$PGDATA/postmaster.pid mismatch); pass pid explicitly: vb_tool as <pid>" >&2
                 fi
                 rc_all=1
                 continue
             fi
         fi
         echo "=========================================================="
-        echo "instance port=$p  gaussdb pid=$pid"
+        echo "instance port=$p  vastbase pid=$pid"
         echo "=========================================================="
         export PGPORT="$p"
         run_as "$pid" || rc_all=1
