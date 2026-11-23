@@ -19,8 +19,7 @@ show_help() {
     echo "Global Option:"
     echo "  -P <port>              database port for multi-instance; accepted by any"
     echo "                         command, effective for the DB clients (psql/psql);"
-    echo "                         without -P the current \$PGPORT environment applies;"
-    echo "                         repeatable for 'as': every port gets scanned"
+    echo "                         without -P the current \$PGPORT environment applies"
     echo ""
     echo "Available Commands:"
     echo "  analyze_log     analyze database logs (slow queries or plans)"
@@ -139,15 +138,14 @@ show_list() {
 }
 
 as_help() {
-    echo "Usage: vb_tool as [-P <port>] [-P <port> ...] [vastbase_pid]"
+    echo "Usage: vb_tool as [vastbase_pid]"
     echo "Description: Display active session info (long txn / active / client /"
-    echo "             top slow sql / top cpu / top io) per instance."
-    echo "  -P <port>: target instance port; repeatable for multiple instances"
-    echo "             (e.g. -P 5432 -P 6432 scans both in one run)"
-    echo "  no -P    : default instance = current \$PGPORT (then 5432)"
-    echo "  vastbase_pid: optional; auto-resolved from the port when omitted"
-    echo "             (ss TCP listener first, then \$PGDATA/postmaster.pid);"
-    echo "             only valid when targeting a single instance"
+    echo "             top slow sql / top cpu / top io) for one instance."
+    echo "  no pid    : instance = current \$PGPORT (then 5432); the vastbase pid"
+    echo "             is auto-resolved (ss TCP listener first, then"
+    echo "             \$PGDATA/postmaster.pid)"
+    echo "  vastbase_pid: explicit instance pid, skips auto-resolution"
+    echo "  -P <port>: global option as for any command (changes \$PGPORT)"
     echo ""
 }
 
@@ -6587,50 +6585,30 @@ _as_find_pid_by_port() { # $1 = port -> pid | ""; rc 2 = live listener, pid hidd
     return 1
 }
 
-# _run_as_multi: 'vb_tool as' entry. Targets = every -P (dedup, order kept);
-# no -P = current $PGPORT (then 5432). Explicit positional pid (the old
-# 'vb_tool as <pid>' form) applies to a single target only. Per port:
-# resolve pid, export PGPORT so every psql inside run_as lands on that
-# instance, print a plain instance banner before the report.
-_run_as_multi() {
-    local explicit_pid="${1:-}"
-    local ports=() p q dup pid _as_rc rc_all=0
-    local _saved_pgport="${PGPORT:-}"
-    for p in ${_vb_g_ports[@]+"${_vb_g_ports[@]}"}; do
-        dup=0
-        for q in ${ports[@]+"${ports[@]}"}; do
-            [ "$q" = "$p" ] && { dup=1; break; }
-        done
-        [ "$dup" = 0 ] && ports+=("$p")
-    done
-    [ ${#ports[@]} -eq 0 ] && ports=("${PGPORT:-5432}")
-    if [ -n "$explicit_pid" ] && [ "${#ports[@]}" -gt 1 ]; then
-        echo "Error: explicit pid targets ONE instance; drop it or give a single -P" >&2
-        return 2
-    fi
-    for p in ${ports[@]+"${ports[@]}"}; do
-        pid="$explicit_pid"
+# _run_as_entry: 'vb_tool as' entry. Instance = current $PGPORT (then 5432);
+# the global -P changes $PGPORT exactly like for every other command, so
+# 'vb_tool -P <port> as' needs no as-specific option. Optional positional pid
+# (the old 'vb_tool as <pid>' form) skips auto-resolution.
+_run_as_entry() {
+    local port="${PGPORT:-5432}"
+    local pid="${1:-}"
+    local prc=0
+    if [ -z "$pid" ]; then
+        pid=$(_as_find_pid_by_port "$port")
+        prc=$?
         if [ -z "$pid" ]; then
-            pid=$(_as_find_pid_by_port "$p")
-            _as_rc=$?
-            if [ -z "$pid" ]; then
-                if [ "$_as_rc" = 2 ]; then
-                    echo "Error: port $p is listening but its pid belongs to another OS user (ss -p needs the instance owner or root); run as that user or pass the pid explicitly" >&2
-                else
-                    echo "Error: cannot resolve port $p to a vastbase pid (no listener on :$p, \$PGDATA/postmaster.pid mismatch); pass pid explicitly: vb_tool as <pid>" >&2
-                fi
-                rc_all=1
-                continue
+            if [ "$prc" = 2 ]; then
+                echo "Error: port $port is listening but its pid belongs to another OS user (ss -p needs the instance owner or root); run as that user or pass the pid explicitly" >&2
+            else
+                echo "Error: cannot resolve port $port to a vastbase pid (no listener on :$port, \$PGDATA/postmaster.pid mismatch); pass pid explicitly: vb_tool as <pid>" >&2
             fi
+            return 1
         fi
-        echo "=========================================================="
-        echo "instance port=$p  vastbase pid=$pid"
-        echo "=========================================================="
-        export PGPORT="$p"
-        run_as "$pid" || rc_all=1
-    done
-    if [ -n "$_saved_pgport" ]; then export PGPORT="$_saved_pgport"; else unset PGPORT; fi
-    return $rc_all
+    fi
+    echo "=========================================================="
+    echo "instance port=$port  vastbase pid=$pid"
+    echo "=========================================================="
+    run_as "$pid"
 }
 
 run_as() {
@@ -31381,8 +31359,6 @@ printf '           %-14s %-22s %-8.8s %-9s %.62s\n' "-" "-" "-" "-" "-"
 # NOTE: keep this block OUTSIDE the awr region (above its header): the awr
 # build/merge chain replaces [awr header .. column-0 'case "$1" in'] verbatim.
 _vb_port_args=()
-_vb_g_ports=()   # every -P value in order (last one still wins for $PGPORT;
-                 # the full list is read by 'as' multi-instance support below)
 while [ $# -gt 0 ]; do
     case "$1" in
         -P)
@@ -31390,14 +31366,14 @@ while [ $# -gt 0 ]; do
                 echo "Error: -P expects a port number (1-65535), e.g. -P 5433" >&2
                 exit 2
             fi
-            export PGPORT="$2"; _vb_g_ports+=("$2"); shift 2;;
+            export PGPORT="$2"; shift 2;;
         -P[0-9]*)
             _vb_p="${1#-P}"
             if ! printf '%s' "$_vb_p" | grep -qE '^[0-9]+$' || [ "$_vb_p" -lt 1 ] || [ "$_vb_p" -gt 65535 ]; then
                 echo "Error: -P expects a port number (1-65535), e.g. -P 5433" >&2
                 exit 2
             fi
-            export PGPORT="$_vb_p"; _vb_g_ports+=("$_vb_p"); shift
+            export PGPORT="$_vb_p"; shift
             unset _vb_p;;
         *)
             _vb_port_args+=("$1"); shift;;
@@ -31405,8 +31381,6 @@ while [ $# -gt 0 ]; do
 done
 set -- ${_vb_port_args[@]+"${_vb_port_args[@]}"}
 unset _vb_port_args
-# _vb_g_ports deliberately NOT unset: in-process readers ('as') consume it
-# after dispatch; every other command only sees the last-wins $PGPORT as before.
 
 # ================== se: show-event knowledge base (oerr style) ==================
 # vb_tool se <event>     exact match -> unique substring -> candidate list;
@@ -44100,7 +44074,7 @@ case "$1" in
             as_help
             exit 0
         fi
-        _run_as_multi "${2:-}"
+        _run_as_entry "${2:-}"
         rc=$?
         if [ "$rc" -ne 0 ]; then
             # only print full help on arg/syntax errors (rc=2);
