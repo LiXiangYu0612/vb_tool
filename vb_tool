@@ -35959,8 +35959,8 @@ def filesystem_usage_html(win):
         _idc = '<td>%s</td><td>%s</td><td>%s</td>' % (esc(dev), esc(mnt), esc(re_.get("type", "")))
         h.append('<tr><td>Begin</td>%s'
                  '<td class="n">%s</td><td class="n">%s</td><td class="n">%s</td><td class="n">%s</td>'
-                 '<td class="n" rowspan="2" style="text-align:center">%s</td>'
-                 '<td class="n" rowspan="2" style="text-align:center">%s</td></tr>'
+                 '<td class="n" rowspan="2" style="text-align:center;vertical-align:middle">%s</td>'
+                 '<td class="n" rowspan="2" style="text-align:center;vertical-align:middle">%s</td></tr>'
                  % (_idc,
                     _cell(it_b, fmt_int), _cell(if_b, fmt_int),
                     _cell(kt_b, lambda v: fmt_bytes(v * 1024)),
