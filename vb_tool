@@ -32380,8 +32380,9 @@ _awr_collect() {
     fi
     # df_fs: filesystem inventory at snap time -- space (df -TPk, 1K blocks,
     # Available) and inodes (df -TPi) dumped raw into ONE file with an '@ino@'
-    # separator; the renderer merges by (device, mount). Pseudo/kernel fs types
-    # are filtered at RENDER time so the raw file stays complete. Each df runs
+    # separator; the renderer merges by (device, mount). NOTHING is filtered
+    # (user 2026-11-24: tmpfs must be visible); df's own zero-size hiding
+    # (proc/sysfs) applies. Each df runs
     # under `timeout 10` + line-buffered (stdbuf -oL; same coreutils package as
     # df, always present together): a hard-mounted network fs with a dead
     # network blocks statfs in the kernel -- the kill keeps the snapshot alive
@@ -35880,20 +35881,17 @@ _LIM_DISP = {"Max cpu time": "Max CPU Time", "Max file size": "Max File Size",
              "Max realtime timeout": "Max Realtime Timeout"}
 
 # pseudo / kernel filesystem types filtered from the Filesystem Usage table
-# (they carry no meaningful capacity for a DBA; df itself already hides the
-# zero-size ones like proc/sysfs, tmpfs still shows and is dropped here)
-_DF_PSEUDO_FS = {"proc", "sysfs", "devpts", "devtmpfs", "tmpfs", "ramfs",
-                 "cgroup", "cgroup2", "cpuset", "overlay", "squashfs",
-                 "iso9660", "securityfs", "debugfs", "pstore", "tracefs",
-                 "configfs", "fusectl", "mqueue", "hugetlbfs", "binfmt_misc",
-                 "autofs", "systemd-1", "rpc_pipefs", "nsfs", "bpf",
-                 "efivarfs", "devfs", "cgmfs", "none"}
+# Pseudo-filesystem filter REMOVED (user 2026-11-24): show everything df -T
+# itself lists -- tmpfs (/dev/shm etc.) carries real DBA signal (shared mem,
+# tmp tables, pgsql_tmp spills). df's own default hiding of zero-size kernel
+# mounts (proc/sysfs) stays, so no python-side filter is needed anymore.
 
 def parse_df_fs(txt):
     """os/df_fs = two raw dumps in one file, '@ino@'-separated: `df -TPk`
     (space, 1K blocks, Available) then `df -TPi` (inodes). Merged here by
     (device, mount) -> {(dev, mount): {type, kb_total, kb_avail, ino_total,
-    ino_free}}; pseudo fs types dropped. '-' inode fields (fs without inode
+    ino_free}}; NOTHING is filtered (tmpfs included; df already hides
+    zero-size kernel mounts). '-' inode fields (fs without inode
     stats, e.g. some NFS) leave the ino_* keys absent."""
     if not txt:
         return {}
@@ -35917,7 +35915,7 @@ def parse_df_fs(txt):
     _half(halves[0], False)
     if len(halves) > 1:
         _half(halves[1], True)
-    return {k: v for k, v in out.items() if v.get("type") not in _DF_PSEUDO_FS}
+    return out
 
 def filesystem_usage_html(win):
     """OS Statistics sub-section 'Filesystem Usage' (awrrpt only -- same policy
@@ -35961,7 +35959,8 @@ def filesystem_usage_html(win):
         _idc = '<td>%s</td><td>%s</td><td>%s</td>' % (esc(dev), esc(mnt), esc(re_.get("type", "")))
         h.append('<tr><td>Begin</td>%s'
                  '<td class="n">%s</td><td class="n">%s</td><td class="n">%s</td><td class="n">%s</td>'
-                 '<td class="n" rowspan="2">%s</td><td class="n" rowspan="2">%s</td></tr>'
+                 '<td class="n" rowspan="2" style="text-align:center">%s</td>'
+                 '<td class="n" rowspan="2" style="text-align:center">%s</td></tr>'
                  % (_idc,
                     _cell(it_b, fmt_int), _cell(if_b, fmt_int),
                     _cell(kt_b, lambda v: fmt_bytes(v * 1024)),
