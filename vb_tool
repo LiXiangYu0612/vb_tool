@@ -32396,6 +32396,48 @@ _awr_collect() {
           [ -n "$_dfto" ] && printf '# df-timeout\n'; } > "$osd/df_fs"
         [ -s "$osd/df_fs" ] || rm -f "$osd/df_fs"
     fi
+    # dirsz: du -k totals of the instance's own trees at snap time (user
+    # 2026-11-24): data_dir + the WAL dir + every custom tablespace target.
+    # data_dir from the postmaster's cwd (same trick as the fd walk; cron
+    # safe, no env needed); tablespaces via the pg_tblspc symlink registry +
+    # readlink -f -- a tablespace's files resolve at the TARGET, not under
+    # pg_tblspc, and du does not follow symlinks mid-traversal, so the
+    # data_dir total never double-counts an OUTSIDE target. A target under
+    # $PGDATA (pg_location style) IS inside the data_dir total -- the
+    # renderer marks such rows instead of subtracting. Names come from
+    # pg_tablespace by oid (symlink basename; fallback = oid when the psql
+    # probe fails). Every du runs under `timeout 120`: a multi-TB walk must
+    # not wedge the snapshot; a timed-out row keeps its label with '-'.
+    # Lines: <label>|<path>|<KB or -> ; no postmaster / no data dir -> no
+    # file -> renderer hides the table (old snaps unaffected).
+    {
+        _dspid=$(timeout -k 2 10 ss -lntp 2>/dev/null | grep -oP ":${PGPORT:-5432}\b.*pid=\K[0-9]+" | head -1)
+        _dsd=""
+        [ -n "$_dspid" ] && _dsd=$(readlink "/proc/$_dspid/cwd" 2>/dev/null)
+        if [ -n "$_dsd" ] && [ -d "$_dsd" ]; then
+            _dsk=$(timeout -k 2 120 du -sk "$_dsd" 2>/dev/null | awk '{print $1}')
+            printf 'data_dir|%s|%s\n' "$_dsd" "${_dsk:--}"
+            _dsxl=""
+            for _dsc in pg_xlog pg_wal; do [ -d "$_dsd/$_dsc" ] && _dsxl="$_dsd/$_dsc" && break; done
+            if [ -n "$_dsxl" ]; then
+                _dsk=$(timeout -k 2 120 du -sk "$_dsxl" 2>/dev/null | awk '{print $1}')
+                printf 'pg_xlog|%s|%s\n' "$_dsxl" "${_dsk:--}"
+            fi
+            if [ -d "$_dsd/pg_tblspc" ]; then
+                _dsnames=$(PGCONNECT_TIMEOUT=3 PGOPTIONS='-c statement_timeout=5000' psql -d postgres -tAc "select oid||' '||spcname from pg_tablespace" 2>/dev/null)
+                for _dst in "$_dsd"/pg_tblspc/*; do
+                    [ -L "$_dst" ] || continue
+                    _dstt=$(readlink -f "$_dst" 2>/dev/null)
+                    [ -n "$_dstt" ] && [ -d "$_dstt" ] || continue
+                    _dsnm=$(printf '%s\n' "$_dsnames" | awk -v o="${_dst##*/}" '$1==o{print $2; exit}')
+                    [ -n "$_dsnm" ] || _dsnm="${_dst##*/}"
+                    _dsk=$(timeout -k 2 120 du -sk "$_dstt" 2>/dev/null | awk '{print $1}')
+                    printf 'tblspc %s|%s|%s\n' "$_dsnm" "$_dstt" "${_dsk:--}"
+                done
+            fi
+        fi
+    } > "$osd/dirsz"
+    [ -s "$osd/dirsz" ] || rm -f "$osd/dirsz"
     # ---- NUMA topology + numastat (per-node cumulative counters; renderer computes end-begin) ----
     # File format (one stanza per node, blank-line separated):
     #   node <id>
@@ -33232,7 +33274,7 @@ def load_window(d):
         except Exception:
             w["meta"] = {}
     for phase in ("begin", "end"):
-        for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi", "softnet_stat", "buddyinfo", "bonding", "net_rtt", "df_fs", "file_nr", "db_proc", "limits", "db_fd_types", "db_tcp_states", "sysctl", "dmesg", "irq_affinity", "irq_node", "db_numa_maps", "db_cgroup"):
+        for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi", "softnet_stat", "buddyinfo", "bonding", "net_rtt", "df_fs", "dirsz", "file_nr", "db_proc", "limits", "db_fd_types", "db_tcp_states", "sysctl", "dmesg", "irq_affinity", "irq_node", "db_numa_maps", "db_cgroup"):
             p = os.path.join(d, "os", phase, f)
             w["os"][(phase, f)] = _read_os_text(p) if os.path.isfile(p) else ""
         for t in ("statement", "statement_mem", "wait_events", "instance_time", "database", "pagewriter",
@@ -33263,7 +33305,7 @@ def load_snap(d, tables=None):
             s["meta"] = json.load(open(mp))
         except Exception:
             s["meta"] = {}
-    for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi", "softnet_stat", "buddyinfo", "bonding", "net_rtt", "df_fs", "file_nr", "db_proc", "limits", "db_fd_types", "db_tcp_states", "sysctl", "dmesg", "irq_affinity", "irq_node", "db_numa_maps", "db_cgroup"):
+    for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi", "softnet_stat", "buddyinfo", "bonding", "net_rtt", "df_fs", "dirsz", "file_nr", "db_proc", "limits", "db_fd_types", "db_tcp_states", "sysctl", "dmesg", "irq_affinity", "irq_node", "db_numa_maps", "db_cgroup"):
         p = os.path.join(d, "os", f)
         s["os"][f] = _read_os_text(p) if os.path.isfile(p) else ""
     _DB_TABLES = ("statement", "statement_mem", "wait_events", "instance_time", "database", "pagewriter",
@@ -33366,7 +33408,7 @@ def build_window_from_snaps(begin_dir, end_dir, sqltext_root=None, load_sqltext=
     b = load_snap(begin_dir, db_tables)
     e = load_snap(end_dir, db_tables)
     win = {"meta": {}, "os": {}, "db": {}}
-    for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi", "softnet_stat", "buddyinfo", "bonding", "net_rtt", "df_fs", "file_nr", "db_proc", "limits", "db_fd_types", "db_tcp_states", "sysctl", "dmesg", "irq_affinity", "irq_node", "db_numa_maps", "db_cgroup"):
+    for f in ("stat", "net_dev", "net_snmp", "net_netstat", "diskstats", "interrupts", "softirqs", "vmstat", "loadavg", "meminfo", "cpuinfo", "numa", "blockdev_meta", "netdev_meta", "dmi", "softnet_stat", "buddyinfo", "bonding", "net_rtt", "df_fs", "dirsz", "file_nr", "db_proc", "limits", "db_fd_types", "db_tcp_states", "sysctl", "dmesg", "irq_affinity", "irq_node", "db_numa_maps", "db_cgroup"):
         win["os"][("begin", f)] = b["os"].get(f, "")
         win["os"][("end", f)] = e["os"].get(f, "")
     for t in ("statement", "statement_mem", "wait_events", "instance_time", "database", "pagewriter",
@@ -35935,6 +35977,47 @@ def filesystem_usage_html(win):
     if vanished:
         h.append('<div class="note">%d filesystem(s) present at only one end of '
                  'the window are not listed.</div>' % vanished)
+    # ---- directory sizes (du): data_dir / WAL dir / custom tablespaces ----
+    # os/dirsz lines <label>|<path>|<KB or ->; KB '-' = the du hit its 120 s
+    # timeout (multi-TB tree). A tablespace target under data_dir (pg_location
+    # style) is marked -- its bytes are already inside the data_dir row, do
+    # not sum. Old snaps have no dirsz -> table hidden.
+    def _dirsz(txt):
+        out = {}
+        for ln in (txt or "").splitlines():
+            f = ln.split("|")
+            if len(f) == 3:
+                out[f[0]] = (f[1], f[2].strip())
+        return out
+    dz_b = _dirsz(win["os"].get(("begin", "dirsz"), ""))
+    dz_e = _dirsz(win["os"].get(("end", "dirsz"), ""))
+    if dz_b or dz_e:
+        dd_path = (dz_e.get("data_dir") or dz_b.get("data_dir") or ("", ""))[0].rstrip("/")
+        def _dufmt(v):
+            try:
+                return fmt_bytes(int(v) * 1024)
+            except (TypeError, ValueError):
+                return "-"
+        h.append('<table class="t"><tr><th>Directory</th><th>Path</th>'
+                 '<th class="n">Size (Begin)</th><th class="n">Size (End)</th>'
+                 '<th class="n">Delta</th></tr>')
+        for k in (list(dz_e) + [x for x in dz_b if x not in dz_e]):
+            pb, pe = dz_b.get(k), dz_e.get(k)
+            path = (pe or pb or ("", ""))[0]
+            _in_dd = (dd_path and k.startswith("tblspc")
+                      and path.startswith(dd_path + "/"))
+            try:
+                dlt = (fmt_bytes((int(pe[1]) - int(pb[1])) * 1024)
+                       if pb and pe and pb[1] != "-" and pe[1] != "-" else "-")
+            except (TypeError, ValueError):
+                dlt = "-"
+            h.append('<tr><td>%s%s</td><td>%s</td><td class="n">%s</td>'
+                     '<td class="n">%s</td><td class="n">%s</td></tr>'
+                     % (esc(k), ' <span class="note">(inside data_dir)</span>' if _in_dd else "",
+                        esc(path),
+                        _dufmt(pb[1]) if pb else "-",
+                        _dufmt(pe[1]) if pe else "-", dlt))
+        h.append('</table>')
     return "".join(h)
 
 def parse_net_rtt(txt):
