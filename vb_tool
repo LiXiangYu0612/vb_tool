@@ -35950,25 +35950,29 @@ def filesystem_usage_html(win):
         dkb = (kt_e - ka_e) - (kt_b - ka_b) if None not in (kt_b, ka_b, kt_e, ka_e) else None
         rows.append((k, rb, re_, it_b, it_e, if_b, if_e,
                      kt_b, kt_e, ka_b, ka_e, dino, dkb))
-    h = ['<table class="t"><tr><th>Device</th><th>Mount</th><th>Type</th>'
-         '<th class="n">Inode Total (Begin)</th><th class="n">Inode Total (End)</th>'
-         '<th class="n">Inode Free (Begin)</th><th class="n">Inode Free (End)</th>'
-         '<th class="n">Space Total (Begin)</th><th class="n">Space Total (End)</th>'
-         '<th class="n">Space Free (Begin)</th><th class="n">Space Free (End)</th>'
+    # Begin/End as the FIRST column, two rows per filesystem (user 2026-11-24:
+    # the old 13-column Begin/End-pairs layout was too wide); the two Delta
+    # cells ride a rowspan over the pair.
+    h = ['<table class="t"><tr><th></th><th>Device</th><th>Mount</th><th>Type</th>'
+         '<th class="n">Inode Total</th><th class="n">Inode Free</th>'
+         '<th class="n">Space Total</th><th class="n">Space Free</th>'
          '<th class="n">Delta Inodes Used</th><th class="n">Delta Space Used</th></tr>']
     for (dev, mnt), rb, re_, it_b, it_e, if_b, if_e, kt_b, kt_e, ka_b, ka_e, dino, dkb in rows:
-        h.append('<tr><td>%s</td><td>%s</td><td>%s</td>'
-                 % (esc(dev), esc(mnt), esc(re_.get("type", ""))))
-        h.append('<td class="n">%s</td><td class="n">%s</td><td class="n">%s</td><td class="n">%s</td>'
-                 % (_cell(it_b, fmt_int), _cell(it_e, fmt_int),
-                    _cell(if_b, fmt_int), _cell(if_e, fmt_int)))
-        h.append('<td class="n">%s</td><td class="n">%s</td><td class="n">%s</td><td class="n">%s</td>'
-                 % (_cell(kt_b, lambda v: fmt_bytes(v * 1024)),
-                    _cell(kt_e, lambda v: fmt_bytes(v * 1024)),
+        _idc = '<td>%s</td><td>%s</td><td>%s</td>' % (esc(dev), esc(mnt), esc(re_.get("type", "")))
+        h.append('<tr><td>Begin</td>%s'
+                 '<td class="n">%s</td><td class="n">%s</td><td class="n">%s</td><td class="n">%s</td>'
+                 '<td class="n" rowspan="2">%s</td><td class="n" rowspan="2">%s</td></tr>'
+                 % (_idc,
+                    _cell(it_b, fmt_int), _cell(if_b, fmt_int),
+                    _cell(kt_b, lambda v: fmt_bytes(v * 1024)),
                     _cell(ka_b, lambda v: fmt_bytes(v * 1024)),
+                    _cell(dino, fmt_int), _cell(dkb, lambda v: fmt_bytes(v * 1024))))
+        h.append('<tr><td>End</td>%s'
+                 '<td class="n">%s</td><td class="n">%s</td><td class="n">%s</td><td class="n">%s</td></tr>'
+                 % (_idc,
+                    _cell(it_e, fmt_int), _cell(if_e, fmt_int),
+                    _cell(kt_e, lambda v: fmt_bytes(v * 1024)),
                     _cell(ka_e, lambda v: fmt_bytes(v * 1024))))
-        h.append('<td class="n">%s</td><td class="n">%s</td></tr>'
-                 % (_cell(dino, fmt_int), _cell(dkb, lambda v: fmt_bytes(v * 1024))))
     h.append('</table>')
     if "# df-timeout" in raw_b or "# df-timeout" in raw_e:
         h.append('<div class="note">filesystem inventory incomplete: df hit the '
@@ -35998,6 +36002,8 @@ def filesystem_usage_html(win):
                 return fmt_bytes(int(v) * 1024)
             except (TypeError, ValueError):
                 return "-"
+        # data_dir / pg_xlog / tablespaces: few columns -> Begin/End stay
+        # COLUMNS (user 2026-11-24); only the wide df table above transposes.
         h.append('<table class="t"><tr><th>Directory</th><th>Path</th>'
                  '<th class="n">Size (Begin)</th><th class="n">Size (End)</th>'
                  '<th class="n">Delta</th></tr>')
