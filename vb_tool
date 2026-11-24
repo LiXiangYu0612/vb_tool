@@ -39480,7 +39480,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     # from the END snapshot's csv (user ruling 2026-11-24: report the
     # window-end state, not a live query). '-' = role-only (any database) /
     # db-only (any role) entry.
-    parts.append('<div class="sub">Role / Database-level GUC Overrides (pg_db_role_setting)</div>')
+    parts.append('<div class="sub">Role / Database-level GUC</div>')
     pgrs = win["db"].get(("end", "pg_db_role_setting"), [])
     parts.append('<table class="t params"><colgroup>'
                  '<col style="width:16%"><col style="width:16%"><col style="width:26%"><col style="width:42%">'
@@ -40496,7 +40496,7 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     # "captured, genuinely no overrides" so the empty case stays explicit.
     _prs1 = win1["db"].get(("end", "pg_db_role_setting"), [])
     _prs2 = win2["db"].get(("end", "pg_db_role_setting"), [])
-    parts.append('<div class="sub">Role / Database-level GUC Overrides - changed only</div>')
+    parts.append('<div class="sub">Role / Database-level GUC - changed only</div>')
     parts.append('<table class="t params"><colgroup>'
                  '<col style="width:14%"><col style="width:14%"><col style="width:24%">'
                  '<col style="width:24%"><col style="width:24%">'
