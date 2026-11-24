@@ -32584,6 +32584,11 @@ _awr_collect() {
 \copy (SELECT contextname, count(*) AS cnt, sum(totalsize) AS total FROM gs_session_memory_detail GROUP BY contextname) TO '$dbd/session_memory.csv' WITH CSV HEADER
 \copy (SELECT sessid, sum(totalsize) AS total FROM gs_session_memory_detail GROUP BY sessid) TO '$dbd/session_by_sess.csv' WITH CSV HEADER
 \copy (SELECT name,setting,unit,context,short_desc FROM pg_settings ORDER BY name) TO '$dbd/pg_settings.csv' WITH CSV HEADER
+-- role/database-level GUC overrides (ALTER ROLE|DATABASE ... SET land in
+-- pg_db_role_setting; pg_settings above only shows instance-level values).
+-- One row per parameter; unnest lives in a subquery because the 9.2 kernel
+-- has no LATERAL. '-' marks role-only (any database) / db-only (any role).
+\copy (SELECT COALESCE(r.rolname,'-') AS rolname, COALESCE(d.datname,'-') AS datname, split_part(u.p,'=',1) AS param, substr(u.p, position('=' in u.p)+1) AS value FROM (SELECT setrole, setdatabase, unnest(setconfig) AS p FROM pg_db_role_setting) u LEFT JOIN pg_roles r ON r.oid=u.setrole LEFT JOIN pg_database d ON d.oid=u.setdatabase ORDER BY 1,2,3) TO '$dbd/pg_db_role_setting.csv' WITH CSV HEADER
 \copy (SELECT application_name, client_addr, state, sync_state, sender_sent_location, receiver_write_location, receiver_flush_location, receiver_replay_location FROM pg_stat_replication ORDER BY application_name) TO '$dbd/replication.csv' WITH CSV HEADER
 \copy (SELECT slot_name, plugin, slot_type, database, active, xmin, catalog_xmin, restart_lsn, dummy_standby, ${slots_cf} FROM pg_replication_slots ORDER BY slot_name) TO '$dbd/replication_slots.csv' WITH CSV HEADER
 \copy (SELECT sum(phywrts) phywrts, sum(phyblkwrt) phyblkwrt, sum(writetim) writetim FROM dbe_perf.file_redo_iostat) TO '$dbd/file_redo_iostat.csv' WITH CSV HEADER
@@ -32886,7 +32891,7 @@ import csv, glob, os, sys
 dbd = sys.argv[1]
 ORDER = ["statement", "statement_mem", "wait_events", "instance_time", "database",
          "pagewriter", "memory_node_detail", "shared_memory", "session_memory",
-         "session_by_sess", "pg_settings", "replication", "replication_slots",
+         "session_by_sess", "pg_settings", "pg_db_role_setting", "replication", "replication_slots",
          "walreceiver", "file_redo_iostat", "rel_iostat", "ash_cnt", "ash_event",
          "ash_sql", "ash_waitchain", "object_tables", "object_dead",
          "object_iostat", "object_index_iostat"]
@@ -33263,7 +33268,7 @@ def load_snap(d, tables=None):
         s["os"][f] = _read_os_text(p) if os.path.isfile(p) else ""
     _DB_TABLES = ("statement", "statement_mem", "wait_events", "instance_time", "database", "pagewriter",
                  "memory_node_detail", "shared_memory", "session_memory", "session_by_sess",
-                 "pg_settings",
+                 "pg_settings", "pg_db_role_setting",
                  "object_tables", "object_dead", "object_iostat", "object_index_iostat", "walreceiver",
                  "replication", "replication_slots",
                  "rel_iostat", "file_redo_iostat")
@@ -33366,12 +33371,21 @@ def build_window_from_snaps(begin_dir, end_dir, sqltext_root=None, load_sqltext=
         win["os"][("end", f)] = e["os"].get(f, "")
     for t in ("statement", "statement_mem", "wait_events", "instance_time", "database", "pagewriter",
               "memory_node_detail", "shared_memory", "session_memory", "session_by_sess",
-              "pg_settings",
+              "pg_settings", "pg_db_role_setting",
               "object_tables", "object_dead", "object_iostat", "object_index_iostat", "walreceiver",
               "replication", "replication_slots",
               "rel_iostat", "file_redo_iostat"):
         win["db"][("begin", t)] = b["db"].get(t, [])
         win["db"][("end", t)] = e["db"].get(t, [])
+    # pg_db_role_setting: the csv being ABSENT (snap predates the capture) and
+    # being HEADER-ONLY (instance genuinely has no role-level GUC overrides --
+    # the common case) both load as []; the renderer must tell them apart, so
+    # record file presence per phase. gz checked first -- _awr_create gzips
+    # every db csv in place before the renderer ever sees the snap dir.
+    def _rgc(d):
+        return (os.path.isfile(os.path.join(d, "db", "pg_db_role_setting.csv.gz"))
+                or os.path.isfile(os.path.join(d, "db", "pg_db_role_setting.csv")))
+    win["_role_guc_captured"] = {"begin": _rgc(begin_dir), "end": _rgc(end_dir)}
     bm, em = b["meta"], e["meta"]
     bx = str(bm.get("snap_id", "?"))
     ex = str(em.get("snap_id", "?"))
@@ -39459,6 +39473,31 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             parts.append('<tr><td title="%s">%s</td><td title="%s">%s</td><td>%s</td><td class="wrap">%s</td></tr>'
                          % (esc(_n), esc(_n), esc(_s), esc(_s), esc(_c), esc(_d)))
     parts.append('</table>')
+    # ---- Role / Database-level GUC overrides (pg_db_role_setting) ----
+    # VB supports per-user GUC overrides (ALTER ROLE ... SET, plus the
+    # per-role-per-database and per-database forms); none of those appear in
+    # pg_settings above (instance-level view), so list them here. Values come
+    # from the END snapshot's csv (user ruling 2026-11-24: report the
+    # window-end state, not a live query). '-' = role-only (any database) /
+    # db-only (any role) entry.
+    parts.append('<div class="sub">Role / Database-level GUC Overrides (pg_db_role_setting)</div>')
+    pgrs = win["db"].get(("end", "pg_db_role_setting"), [])
+    parts.append('<table class="t params"><colgroup>'
+                 '<col style="width:16%"><col style="width:16%"><col style="width:26%"><col style="width:42%">'
+                 '</colgroup><tr><th>Role</th><th>Database</th>'
+                 '<th>Parameter</th><th>Value</th></tr>')
+    if not win.get("_role_guc_captured", {}).get("end"):
+        note("pg_db_role_setting not captured in the end snapshot (snapshot "
+             "predates this capture); role-level GUC overrides unavailable.")
+        parts.append('<tr><td colspan="4" class="note">(not captured in end snapshot)</td></tr>')
+    elif not pgrs:
+        parts.append('<tr><td colspan="4" class="note">no role-level or database-level GUC overrides set</td></tr>')
+    else:
+        for r in pgrs:
+            parts.append('<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>'
+                         % (esc(r.get("rolname", "")), esc(r.get("datname", "")),
+                            esc(r.get("param", "")), esc(r.get("value", ""))))
+    parts.append('</table>')
     # ================= OS Kernel Parameters =================
     # curated sysctl set captured as vastbase (unreadable/absent entries were
     # filtered at collection); single Value column from END, a mid-window
@@ -40448,6 +40487,44 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                              % (esc(_n), esc(_n), esc(_s1), esc(_s1), esc(_s2), esc(_s2),
                                 esc(_u), esc(_c), esc(_d)))
             note("%d GUC parameter(s) changed between Period 1 and Period 2." % len(_changed))
+    parts.append('</table>')
+    # ---- Role / Database-level GUC overrides - changed only ----
+    # STATE snapshot per period (END snap's pg_db_role_setting.csv), one row
+    # per (role, database, parameter); shows added / changed / removed entries
+    # between the two period ends, mirroring the pg_settings table above.
+    # win["_role_guc_captured"] separates "csv not captured" (old snap) from
+    # "captured, genuinely no overrides" so the empty case stays explicit.
+    _prs1 = win1["db"].get(("end", "pg_db_role_setting"), [])
+    _prs2 = win2["db"].get(("end", "pg_db_role_setting"), [])
+    parts.append('<div class="sub">Role / Database-level GUC Overrides - changed only</div>')
+    parts.append('<table class="t params"><colgroup>'
+                 '<col style="width:14%"><col style="width:14%"><col style="width:24%">'
+                 '<col style="width:24%"><col style="width:24%">'
+                 '</colgroup><tr><th>Role</th><th>Database</th><th>Parameter</th>'
+                 '<th>Period 1 Value</th><th>Period 2 Value</th></tr>')
+    def _prmap(rows):
+        m = {}
+        for r in rows:
+            k = (r.get("rolname"), r.get("datname"), r.get("param"))
+            m[k] = r.get("value", "")
+        return m
+    if not win1.get("_role_guc_captured", {}).get("end") or not win2.get("_role_guc_captured", {}).get("end"):
+        note("pg_db_role_setting not captured in one or both periods (snap predates "
+             "this capture); role-level parameter diff unavailable.")
+        parts.append('<tr><td colspan="5" class="note">(role-level parameter diff not available)</td></tr>')
+    else:
+        _m1, _m2 = _prmap(_prs1), _prmap(_prs2)
+        _rchg = [k for k in sorted(set(_m1) | set(_m2)) if _m1.get(k, "") != _m2.get(k, "")]
+        if not _rchg:
+            note("No role-level GUC override changes between Period 1 (snap end) and Period 2 (snap end).")
+            parts.append('<tr><td colspan="5" class="note">No role-level GUC override changes between Period 1 and Period 2.</td></tr>')
+        else:
+            for k in _rchg:
+                parts.append('<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>'
+                             % (esc(k[0] or ""), esc(k[1] or ""), esc(k[2] or ""),
+                                esc(_m1.get(k, "-")), esc(_m2.get(k, "-"))))
+            note("%d role-level GUC override entr%s added, changed or removed between Period 1 and Period 2."
+                 % (len(_rchg), "y" if len(_rchg) == 1 else "ies"))
     parts.append('</table>')
 
     _toc_html = ('<div class="toc" id="toc"><b>Contents</b><ul>' + "".join(
