@@ -526,8 +526,11 @@ memhist_help() {
 
 relxlog_help() {
     echo "Options for relxlog:"
-    echo "  Usage: vb_tool relxlog <start_wal> <end_wal> [wal_dir]"
+    echo "  Usage: vb_tool relxlog <start_wal|lsn> <end_wal|lsn> [wal_dir]"
     echo "  Description: analyze WAL records for relations"
+    echo "  start/end: WAL segment name (e.g. 000000010000000800000042)"
+    echo "             or LSN (e.g. 8/42000028, resolved to its segment automatically,"
+    echo "             reading starts/ends exactly at the LSN via pg_xlogdump -s/-e)"
     echo "  wal_dir: WAL file directory (default: \$PGDATA/pg_xlog)"
     echo ""
 }
@@ -7271,20 +7274,57 @@ END \$\$;
 " 2>&1 | awk '{gsub(/INFO:/, ""); print}'
 }
 
+# Resolve a relxlog WAL argument: segment filename or LSN (X/Y).
+# For an LSN, locate the containing segment file in wal_dir (echo its name,
+# return nonzero if not found or ambiguous across timelines).
+relxlog_resolve_wal() {
+    local arg="$1" wal_dir="$2"
+    if [[ "$arg" =~ ^[0-9A-Fa-f]{1,8}/[0-9A-Fa-f]{1,8}$ ]]; then
+        local hi lo suffix candidates
+        hi=$((16#${arg%%/*}))
+        lo=$((16#${arg##*/}))
+        suffix=$(printf "%08X%08X" "$hi" $(( (lo >> 24) & 0xFF )))
+        candidates=$(ls "$wal_dir" 2>/dev/null | grep -E "^[0-9A-Fa-f]{8}${suffix}$" | sort -u)
+        if [ -z "$candidates" ]; then
+            echo "Error: LSN $arg falls in WAL segment *${suffix}, no matching file in $wal_dir" >&2
+            return 1
+        fi
+        if [ "$(echo "$candidates" | wc -l)" -gt 1 ]; then
+            echo "Error: LSN $arg matches WAL files on multiple timelines in $wal_dir:" >&2
+            echo "$candidates" | sed 's/^/  /' >&2
+            echo "Please specify the segment filename directly." >&2
+            return 1
+        fi
+        echo "$candidates"
+    elif [[ "$arg" =~ ^[0-9A-Fa-f]{24}$ ]]; then
+        echo "$arg"
+    else
+        echo "Error: invalid WAL argument '$arg' (expect 24-hex segment name or LSN like 8/42000028)" >&2
+        return 1
+    fi
+}
+
 run_relxlog() {
-    
+
     start_wal="$1"
     end_wal="$2"
     local wal_dir="${3:-${PGDATA}/pg_xlog}"
-	
+
     if [ -z "$start_wal" ] || [ -z "$end_wal" ]; then
         echo "Error: Missing required parameters" >&2
-        echo "Usage: vb_tool relxlog <start_wal> <end_wal> [wal_dir]" >&2
+        echo "Usage: vb_tool relxlog <start_wal|lsn> <end_wal|lsn> [wal_dir]" >&2
         echo "Example: vb_tool relxlog 000000010000000800000042 00000001000000080000004C" >&2
+        echo "         vb_tool relxlog 8/42000028 8/4C000000" >&2
         exit 1
     fi
-    
-    pg_xlogdump -p "$wal_dir" "$start_wal" "$end_wal" |
+
+    local start_file end_file lsn_opts=()
+    start_file=$(relxlog_resolve_wal "$start_wal" "$wal_dir") || exit 1
+    end_file=$(relxlog_resolve_wal "$end_wal" "$wal_dir") || exit 1
+    [[ "$start_wal" == */* ]] && lsn_opts+=(-s "$start_wal")
+    [[ "$end_wal" == */* ]] && lsn_opts+=(-e "$end_wal")
+
+    pg_xlogdump -p "$wal_dir" ${lsn_opts[@]+"${lsn_opts[@]}"} "$start_file" "$end_file" |
     awk '/REDO/{
         type=$19" - "$21;
         size=$15;
