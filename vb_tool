@@ -10578,7 +10578,14 @@ run_collect_log(){
         echo "[INFO ] System logs collected. Switching to $db_user..."
         # Use printf %q to escape arguments safely, preserving spaces and special characters
         local quoted_args=$(printf " %q" "${pass_args[@]}")
-		local script_path=$(realpath "$0")
+        # ★PATH 方式调用时 $0 不带路径, realpath "$0" 解析失败产空串 → su 子命令变裸
+        # collect_log 必败 (2026-11-26)。先 command -v 解析再 realpath, 仍解析不出则报错退出。
+        local script_path
+        script_path=$(realpath "$(command -v -- "$0" 2>/dev/null || printf '%s' "$0")" 2>/dev/null)
+        if [ -z "$script_path" ] || [ ! -f "$script_path" ]; then
+            echo "Error: cannot resolve vb_tool script path (invoked as '$0')" >&2
+            exit 1
+        fi
         su - "$db_user" -c "export EXISTING_LOGNAME='$logname'; $script_path $quoted_args"
         exit $?
     fi
@@ -10726,6 +10733,9 @@ run_collect_log_nodes_info() {
     echo "[INFO ] Processing Node: [$node]"
     
     local remote_cmd=$(cat <<EOF
+		# ★退出时自清本进程的函数库/包装脚本 (2026-11-26): 收尾禁 rm /tmp/vb_funcs_* 通配
+		#   (会删掉同机并发实例的 BASH_ENV 文件, 采集静默缺段)。只删自己 \$\$ 的文件。
+		trap 'rm -f /tmp/vb_funcs_\$\$.sh' EXIT
 		[ -f /etc/profile ] && . /etc/profile;
         [ -f ~/.profile ] && . ~/.profile;
         [ -f ~/.bashrc ] && . ~/.bashrc;
@@ -10736,9 +10746,10 @@ run_collect_log_nodes_info() {
         # heredoc build time (local node eval sees the caller's locals anyway)
         begin_time='$begin_time'
         end_time='$end_time'
-        vb_tool_path='$0'
+        vb_tool_path="$(realpath "$(command -v -- "$0" 2>/dev/null || printf '%s' "$0")" 2>/dev/null || printf '%s' "$0")"
         if [ ! -x "\$vb_tool_path" ]; then
-            for _vt_cand in "\$HOME/vb_tool_dev" "/home/vastbase/vb_tool_dev" "\$(command -v vb_tool 2>/dev/null)"; do
+            # ★禁写死 /home/vastbase (vb309 双用户令): 只按 \$HOME 和 PATH 兜底
+            for _vt_cand in "\$HOME/vb_tool_dev" "\$(command -v vb_tool 2>/dev/null)"; do
                 [ -x "\$_vt_cand" ] && vb_tool_path="\$_vt_cand" && break
             done
         fi
@@ -10910,14 +10921,16 @@ $(declare -f run_collect_log_vtop run_vtop $(compgen -A function | grep '^_vtop_
             # only in transit); the outermost bundle tar stays the only packaging
             ssh -C "$node" "cd '$output_dir' && tar -cf - '$node'" | tar -xf - -C "$output_dir" 2>/dev/null
             if [ -n "$(ls -A "$output_dir/$node" 2>/dev/null)" ]; then
-                ssh "$node" "rm -rf $output_dir /tmp/vb_funcs_*" >/dev/null 2>&1
+                # ★远程函数库文件由远程脚本自己的 trap EXIT 清理, 这里只清采集目录
+                ssh "$node" "rm -rf $output_dir" >/dev/null 2>&1
                 echo "[INFO ] Transfer and clean up node [$node] info finished..."
             else
                 echo -e "\n[ERROR] Node [$node] transfer failed; raw files kept on remote at $output_dir"
             fi
             echo "--------------------------------------------------------------"
 		else
-		   rm -f /tmp/vb_funcs_*
+		   # ★只删自己 pid 的函数库文件, 禁通配(会误删并发实例的)
+		   rm -f "/tmp/vb_funcs_$$.sh"
         fi
     else
         echo -e "\n[ERROR] Node [$node] collection failed or interrupted."
@@ -11149,16 +11162,21 @@ run_collect_log_dbfiles() {
 
 run_collect_log_param() {
     local param_name=$1
-    # Default path; modify according to your environment
-    local pgdata_dir=${PGDATA:-"/data/vastdata"} 
+    # ★禁写死 /data/vastdata (2026-11-26): vb309=/data309、156 等布局各异, PGDATA
+    #   未设时盲读固定路径会拿错实例的配置产出静默错数据。PGDATA 缺失时先从
+    #   psql 问 data_directory; 两者都拿不到就放弃离线解析(不猜)。
+    local pgdata_dir="${PGDATA:-}"
     local param_value=""
 
     # 1. Attempt retrieval via psql (Online Method)
     # -t: tuples only, -A: unaligned, -c: execute command
     param_value=$(psql -tAc "show $param_name" 2>/dev/null)
+    if [ -z "$pgdata_dir" ]; then
+        pgdata_dir=$(psql -tAc "show data_directory" 2>/dev/null)
+    fi
 
     # 2. Fallback to configuration files if psql fails or returns empty (Offline Method)
-    if [[ -z "$param_value" ]]; then
+    if [[ -z "$param_value" && -n "$pgdata_dir" ]]; then
         # Read files in reverse using 'tac' as PostgreSQL honors the last defined setting.
         # Search scope: postgresql.base.conf and postgresql.conf
         # GNU tac reverses each file separately keeping file order: main config
@@ -11171,7 +11189,7 @@ run_collect_log_param() {
     # 3. Path Resolution Logic (Append PGDATA if the value is a relative directory/file path)
     if [[ -n "$param_value" ]]; then
         if [[ "$param_name" == *"directory"* || "$param_name" == *"file"* ]]; then
-            if [[ "$param_value" != /* ]]; then
+            if [[ "$param_value" != /* && -n "$pgdata_dir" ]]; then
                 param_value="$pgdata_dir/$param_value"
             fi
         fi
