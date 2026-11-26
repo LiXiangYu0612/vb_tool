@@ -3697,13 +3697,13 @@ BEGIN
       BEGIN
          FOR x IN 0 .. nrows LOOP
             v_ctid := '(' || j || ',' || x || ')';
-            v_sql := 'INSERT INTO ' || v_o_table || 
-                     ' SELECT * FROM ' || v_table || 
+            v_sql := 'INSERT INTO ' || v_o_table ||
+                     ' SELECT * FROM ' || v_table ||
                      ' WHERE ctid = ''' || v_ctid || '''';
             EXECUTE v_sql;
          END LOOP;
-      EXCEPTION 
-         WHEN OTHERS THEN 
+      EXCEPTION
+         WHEN OTHERS THEN
             NULL;
       END;
    END LOOP;
@@ -16683,23 +16683,26 @@ def process_single_file(file_name, args, total_elapsed_time=0):
     start_n = 0
     earliest_ts = parse_datetime(blocks[0])
     latest_ts = parse_datetime(blocks[-2])
+    # 首尾块时间戳畸形时 earliest_ts/latest_ts 为 None: 此时无法定位边界,
+    # 一律按"文件整体在窗内"处理(不跳文件、不裁剪), 绝不能拿 None 做比较炸掉整文件
     # 处理 begin
     v_begin = None
     if args.begin:
         v_begin = parse_datetime(args.begin)
         if v_begin is not None:
             # 开始时间晚于文件最后时间 → 跳过该文件
-            if v_begin > latest_ts:
+            if latest_ts is not None and v_begin > latest_ts:
                 return [], [], file_size_mb, [], [], [], new_connection_stats()
-            # 开始时间早于等于文件最早时间 → 从头开始
-            elif v_begin <= earliest_ts:
+            # 开始时间早于等于文件最早时间(或文件时间不可解析) → 从头开始
+            elif earliest_ts is None or v_begin <= earliest_ts:
                 start_n = 0
             else:
                 # 在文件范围内，定位起始块索引
                 for i in range(0, len(blocks)-2, 2):
                     timestamp1 = parse_datetime(blocks[i])
                     timestamp2 = parse_datetime(blocks[i+2])
-                    if v_begin <= timestamp2 and v_begin >= timestamp1:
+                    if timestamp1 is not None and timestamp2 is not None \
+                            and v_begin <= timestamp2 and v_begin >= timestamp1:
                         start_n = i
                         break
         # 无法解析 begin 则忽略，由后续逻辑处理
@@ -16708,14 +16711,14 @@ def process_single_file(file_name, args, total_elapsed_time=0):
         v_end = parse_datetime(args.end)
         if v_end is not None:
             # 结束时间早于文件最早时间 → 跳过该文件
-            if v_end < earliest_ts:
+            if earliest_ts is not None and v_end < earliest_ts:
                 return [], [], file_size_mb, [], [], [], new_connection_stats()
             # 结束时间早于文件最后时间 → 裁剪 blocks
-            elif v_end < latest_ts:
+            elif latest_ts is not None and v_end < latest_ts:
                 matching_index = -2
                 for i in range(len(blocks)-2, -2, -2):
                     time_value = parse_datetime(blocks[i])
-                    if time_value <= v_end:
+                    if time_value is not None and time_value <= v_end:
                         matching_index = i
                         break
                 if matching_index != -2:
@@ -19552,8 +19555,9 @@ class ReportGenerator:
             # 日志记录的是执行结束时间；开始时间由结束时间减去对应语句的执行耗时得到。
             max_times_str = stat['max_times'].strftime('%Y-%m-%d %H:%M:%S.%f')[:-3] if hasattr(stat['max_times'], 'strftime') else str(stat['max_times'])
             min_times_str = stat['min_times'].strftime('%Y-%m-%d %H:%M:%S.%f')[:-3] if hasattr(stat['min_times'], 'strftime') else str(stat['min_times'])
-            max_start_time = stat['max_times'] - timedelta(seconds=stat['max_duration'])
-            min_start_time = stat['min_times'] - timedelta(seconds=stat['min_duration'])
+            # time 可为 None(时间戳畸形记录): None 不能参与减法, 原样交给下方 str() 兜底显示
+            max_start_time = stat['max_times'] - timedelta(seconds=stat['max_duration']) if hasattr(stat['max_times'], 'strftime') else stat['max_times']
+            min_start_time = stat['min_times'] - timedelta(seconds=stat['min_duration']) if hasattr(stat['min_times'], 'strftime') else stat['min_times']
             max_start_times_str = max_start_time.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3] if hasattr(max_start_time, 'strftime') else str(max_start_time)
             min_start_times_str = min_start_time.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3] if hasattr(min_start_time, 'strftime') else str(min_start_time)
             
@@ -25128,7 +25132,10 @@ def parse_all_events(start_n, blocks, total_list, deadlock_list, lock_event_list
                     connection_key, thread_id, IP, database, user = _get_prefix(log_block)
 
                 query_content = EXECUTE_PATTERN.split(log_block)
-                if len(query_content) < 4:
+                # 无 unique id 的记录(如 "duration: X ms execute <unnamed>: SELECT...")只切出
+                # 3 段: [1]=耗时段 [2]=SQL 段; 有 unique id 时切 4 段, [3]=uid+SQL 混合段。
+                # 两类都要保留(uid 缺失由下方 0_<md5> 指纹归一兜住), 绝不能整条丢弃
+                if len(query_content) < 3:
                     continue
 
                 duration_match = DURATION_EXTRACT_PATTERN.search(log_block)
@@ -25181,7 +25188,7 @@ def parse_all_events(start_n, blocks, total_list, deadlock_list, lock_event_list
                 if connection_key and timestamp:
                     last_sql_time[connection_key] = timestamp
 
-                query_text = query_content[3]
+                query_text = query_content[3] if len(query_content) >= 4 else query_content[2]
                 # unique_id 提取: EXECUTE_PATTERN.split 在无 unique id 时只产 3 段,
                 # 有 unique id 时产 4 段(uid 与 SQL 同段),所以直接用正则从 log_block 提取更可靠
                 _uid_m = re.search(r'unique\s+id\s+(\S+)', log_block, re.IGNORECASE)
@@ -25197,7 +25204,7 @@ def parse_all_events(start_n, blocks, total_list, deadlock_list, lock_event_list
                 # EXPLAIN (ANALYZE ...) 前缀保留整段，按 EXPLAIN 后第一个 DML/DDL
                 # 关键字归类（如 EXPLAIN ... SELECT 归为 dml）
                 stripped_text = query_text.lstrip()
-                first_token = stripped_text.split(None, 1)[0].rstrip(';').upper()
+                first_token = stripped_text.split(None, 1)[0].rstrip(';').upper() if stripped_text else ''
                 is_explain = first_token == 'EXPLAIN'
                 type_token = first_token
                 if is_explain:
@@ -25249,7 +25256,7 @@ def parse_all_events(start_n, blocks, total_list, deadlock_list, lock_event_list
                     else:
                         query_text = stripped_text
                     # 重新判断
-                    first_token = query_text.split(None, 1)[0].rstrip(';').upper()
+                    first_token = query_text.split(None, 1)[0].rstrip(';').upper() if query_text else ''
                     is_dml = first_token in dml_keywords
                     is_ddl = first_token in ddl_keywords
                     sql_type = 'ddl' if is_ddl else 'dml'
