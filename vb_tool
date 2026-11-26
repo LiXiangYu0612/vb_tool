@@ -15096,6 +15096,10 @@ if _EVENT_FILTER_ACTIVE:
 # -e 只给日期时按“当天结束”理解（否则按 00:00 边界会把当天日志整文件排除）
 if args.end and re.match(r'^\d{4}-\d{2}-\d{2}$', args.end.strip()):
     args.end = args.end.strip() + ' 23:59:59.999'
+# -b 与 -e 对称: 裸日期补 00:00:00, 否则 parse_datetime 四格式全 miss 返 None,
+# 逐条过滤点拿 None 做比较直接 TypeError(2026-11-26 复核 P1)
+if args.begin and re.match(r'^\d{4}-\d{2}-\d{2}$', args.begin.strip()):
+    args.begin = args.begin.strip() + ' 00:00:00'
 
 # 归一化时间参数：-d/-b/-e 统一折算为单一的 args.begin/args.end，下游只用 -b/-e 一套逻辑。
 # 规则（-b/-e 优先级高于 -d，同时给出时忽略 -d）：
@@ -24402,9 +24406,11 @@ def parse_all_events(start_n, blocks, total_list, deadlock_list, lock_event_list
 
         # 错误、连接、锁和死锁仍按日志时间过滤；慢 SQL 按生命周期与报告区间的交集过滤。
         if timestamp:
-            if args.begin and timestamp < parse_datetime_cached(args.begin):
+            _begin_dt = parse_datetime_cached(args.begin) if args.begin else None
+            if _begin_dt is not None and timestamp < _begin_dt:
                 continue
-            if args.end and timestamp > parse_datetime_cached(args.end):
+            _end_dt = parse_datetime_cached(args.end) if args.end else None
+            if _end_dt is not None and timestamp > _end_dt:
                 continue
 
         # 快速分类：只使用廉价的字符串判断
@@ -25154,9 +25160,11 @@ def parse_all_events(start_n, blocks, total_list, deadlock_list, lock_event_list
 
                 if timestamp:
                     sql_start_time = timestamp - timedelta(seconds=max(0, duration))
-                    if args.begin and timestamp < parse_datetime_cached(args.begin):
+                    _begin_dt = parse_datetime_cached(args.begin) if args.begin else None
+                    if _begin_dt is not None and timestamp < _begin_dt:
                         continue
-                    if args.end and timestamp > parse_datetime_cached(args.end):
+                    _end_dt = parse_datetime_cached(args.end) if args.end else None
+                    if _end_dt is not None and timestamp > _end_dt:
                         continue
 
                 lock_wait_time_ms = 0.0
