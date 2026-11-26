@@ -6449,7 +6449,10 @@ with ev as (
                          and e.snap_wait - lag(e.snap_wait) over pw > 0
                     then e.snap_wait - lag(e.snap_wait) over pw end waits
         from snapshot.snap_global_wait_events e
-        where snap_event not in ('none','wait cmd')
+        join snapshot.snapshot s on e.snapshot_id = s.snapshot_id
+        where s.start_ts >= '$query_begin'::timestamp
+          and s.start_ts <= '$query_end'::timestamp
+          and snap_event not in ('none','wait cmd')
         window pw as (partition by e.snap_event order by e.snapshot_id)
     ) d where waits > 0
 )
