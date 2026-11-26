@@ -24367,17 +24367,20 @@ def parse_all_events(start_n, blocks, total_list, deadlock_list, lock_event_list
         related.sort(key=lambda x: x['timestamp'])
         return related
 
-    def _extract_sql_text_from_block(block):
+    def _extract_sql_text_from_block(block, allow_deadlock=True):
         m = re.search(r'(?:(?:execute|bind)\s+(?:<[^>]*>|\S+)\s*:\s*|statement:\s*)(.+)', block, re.IGNORECASE | re.DOTALL)
         if m:
             sql = m.group(1).strip()
             sql = re.split(r'\n\s*(?:DETAIL\s*:\s*)?parameters\s*:', sql, flags=re.IGNORECASE)[0]
             return sql
-        m = DEADLOCK_SQL_PATTERN.search(block)
-        if m:
-            sql = m.group(2).strip()
-            if sql:
-                return sql
+        # 死锁回退仅锁事件路径可用; 慢 SQL 路径必须关(无锚点但含 Process N: 的
+        # duration 块会经此伪造记录, 2026-11-26 第四轮复核构造复现)
+        if allow_deadlock:
+            m = DEADLOCK_SQL_PATTERN.search(block)
+            if m:
+                sql = m.group(2).strip()
+                if sql:
+                    return sql
         return ''
 
     def _is_related_follow_up_block(block, session_id):
@@ -25140,9 +25143,10 @@ def parse_all_events(start_n, blocks, total_list, deadlock_list, lock_event_list
                     connection_key, thread_id, IP, database, user = _get_prefix(log_block)
 
                 query_content = EXECUTE_PATTERN.split(log_block)
-                # 无 unique id 的记录(如 "duration: X ms execute <unnamed>: SELECT...")只切出
-                # 3 段: [1]=耗时段 [2]=SQL 段; 有 unique id 时切 4 段, [3]=uid+SQL 混合段。
-                # 两类都要保留(uid 缺失由下方 0_<md5> 指纹归一兜住), 绝不能整条丢弃
+                # split 产物现仅两用: ① <3 门块级粗筛(锚点存在 ⟹ ≥3 段, 门不会拦掉
+                # 成功的锚点提取) ② 时长兜底取 query_content[1]。SQL 文本不走段取法
+                # (字面量含 bind x:/execute x: 会被二次切开), 由下方锚点整段提取;
+                # 无 uid 记录由此保留并归 0_<md5> 指纹桶
                 if len(query_content) < 3:
                     continue
                 # SQL 文本提取 + 参数余料/空段守卫(2026-11-26 第四轮实测修正):
@@ -25156,7 +25160,8 @@ def parse_all_events(start_n, blocks, total_list, deadlock_list, lock_event_list
                 # 丢弃位置与放宽前 <4 门等价(不消费 pending_lock_events/不更新 last_sql_time)
                 _dur_pos = log_block.find('duration:')
                 query_text = _extract_sql_text_from_block(
-                    log_block[_dur_pos:] if _dur_pos >= 0 else log_block)
+                    log_block[_dur_pos:] if _dur_pos >= 0 else log_block,
+                    allow_deadlock=False)
                 # unique_id 提取: 直接用正则从 log_block 提取(与切分段无关)
                 _uid_m = re.search(r'unique\s+id\s+(\S+)', log_block, re.IGNORECASE)
                 unique_id = _uid_m.group(1).strip() if _uid_m else ''
