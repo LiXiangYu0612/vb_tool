@@ -4132,7 +4132,24 @@ run_xlogcom() {
     [[ "$start_wal" == */* ]] && lsn_opts+=(-s "$start_wal")
     [[ "$end_wal" == */* ]] && lsn_opts+=(-e "$end_wal")
 
-    pg_xlogdump -p "$wal_dir" ${lsn_opts[@]+"${lsn_opts[@]}"} "$start_file" "$end_file" | awk 'BEGIN {
+    # ★管道 rc 修复 (2026-11-26): 同 run_relxlog —— 管道尾是 awk, pg_xlogdump 失败
+    # 时 rc=0 假成功输出空表。先落临时文件 + 返回码检查。
+    if ! command -v pg_xlogdump >/dev/null 2>&1; then
+        echo "Error: pg_xlogdump not found in PATH" >&2
+        exit 1
+    fi
+    local dump errout
+    dump=$(mktemp /tmp/vb_xlogcom_dump.XXXXXX) || exit 1
+    errout=$(mktemp /tmp/vb_xlogcom_err.XXXXXX) || { rm -f "$dump"; exit 1; }
+    if ! pg_xlogdump -p "$wal_dir" ${lsn_opts[@]+"${lsn_opts[@]}"} "$start_file" "$end_file" >"$dump" 2>"$errout"; then
+        echo "Error: pg_xlogdump failed:" >&2
+        cat "$errout" >&2
+        rm -f "$dump" "$errout"
+        exit 1
+    fi
+    rm -f "$errout"
+
+    awk 'BEGIN {
     max_len = 19  
     count_len = 6  
 }
@@ -4160,7 +4177,10 @@ run_xlogcom() {
     print "+---------------------+--------+"
     printf "| %-19s | %6d |\n", "TOTAL", total
     print "+---------------------+--------+"
-}'
+}' "$dump"
+    rc=$?
+    rm -f "$dump"
+    return $rc
 }
 
 run_mem() {
@@ -7336,7 +7356,24 @@ run_relxlog() {
     [[ "$start_wal" == */* ]] && lsn_opts+=(-s "$start_wal")
     [[ "$end_wal" == */* ]] && lsn_opts+=(-e "$end_wal")
 
-    pg_xlogdump -p "$wal_dir" ${lsn_opts[@]+"${lsn_opts[@]}"} "$start_file" "$end_file" |
+    # ★管道 rc 修复 (2026-11-26): 原写法 pg_xlogdump | awk, 函数返回码=awk 的 0,
+    # 段被 recycle/权限不足时 stderr 有报错但 rc=0 输出空表假成功。改为先落临时
+    # 文件并检查 pg_xlogdump 返回码, awk 读文件(大段 dump 不进 shell 变量)。
+    if ! command -v pg_xlogdump >/dev/null 2>&1; then
+        echo "Error: pg_xlogdump not found in PATH" >&2
+        exit 1
+    fi
+    local dump errout
+    dump=$(mktemp /tmp/vb_relxlog_dump.XXXXXX) || exit 1
+    errout=$(mktemp /tmp/vb_relxlog_err.XXXXXX) || { rm -f "$dump"; exit 1; }
+    if ! pg_xlogdump -p "$wal_dir" ${lsn_opts[@]+"${lsn_opts[@]}"} "$start_file" "$end_file" >"$dump" 2>"$errout"; then
+        echo "Error: pg_xlogdump failed:" >&2
+        cat "$errout" >&2
+        rm -f "$dump" "$errout"
+        exit 1
+    fi
+    rm -f "$errout"
+
     awk '/REDO/{
         type=$19" - "$21;
         size=$15;
@@ -7377,7 +7414,10 @@ run_relxlog() {
                        (rel_size[rel]/rel_total_size)*100,
                        $2,$3);
             };
-    }'
+    }' "$dump"
+    rc=$?
+    rm -f "$dump"
+    return $rc
 }
 
 run_analyze() {
