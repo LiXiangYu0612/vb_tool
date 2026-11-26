@@ -25145,9 +25145,28 @@ def parse_all_events(start_n, blocks, total_list, deadlock_list, lock_event_list
                 # 两类都要保留(uid 缺失由下方 0_<md5> 指纹归一兜住), 绝不能整条丢弃
                 if len(query_content) < 3:
                     continue
-                # bind 的参数余料行(parameters: $1=...)不是 SQL: 门槛放宽前它们被 <4 门
-                # 挡住, 放宽后必须显式跳过, 否则聚合成假慢 SQL 记录(2026-11-26 独立复核)
-                if re.search(r'bind\s+\S+:\s*parameters:', log_block, re.IGNORECASE):
+                # 参数余料/空段守卫(2026-11-26 第三轮复核): 必须在提取段上锚定判断——
+                # log_block 级正则会误杀 SQL 字面量里含 'bind x: parameters:' 字样的合法语句。
+                # 提前取 query_text 并在此丢弃, 丢弃位置与放宽前 <4 门等价
+                # (不消费 pending_lock_events / 不更新 last_sql_time)
+                query_text = query_content[3] if len(query_content) >= 4 else query_content[2]
+                # unique_id 提取: EXECUTE_PATTERN.split 在无 unique id 时只产 3 段,
+                # 有 unique id 时产 4 段(uid 与 SQL 同段),所以直接用正则从 log_block 提取更可靠
+                _uid_m = re.search(r'unique\s+id\s+(\S+)', log_block, re.IGNORECASE)
+                unique_id = _uid_m.group(1).strip() if _uid_m else ''
+                # 记录原始 queryid（每条执行都不同，仅用于页面悬停展示，不作统计维度）
+                _qid_m = re.search(r'queryid\s+(\d+)', log_block, re.IGNORECASE)
+                queryid = _qid_m.group(1) if _qid_m else ''
+                # 若 query_content[3] 是 "uid SQL" 混合段,去掉开头的 uid 部分
+                if unique_id and query_text.lstrip().startswith(unique_id):
+                    query_text = query_text.lstrip()[len(unique_id):].lstrip()
+                # 剥同块参数尾巴(\nparameters: / \nDETAIL: parameters:)——不剥则同一语句
+                # 不同绑定值按含参数全文算指纹, 拆成多个聚合桶
+                query_text = re.split(r'\n\s*(?:DETAIL\s*:\s*)?parameters\s*:',
+                                      query_text, flags=re.IGNORECASE)[0].strip()
+                # 提取段以 parameters: 开头 = bind 参数余料行(非 SQL); uid 剥离后/空语句段
+                # 为空同样不是可统计 SQL —— 跳过
+                if not query_text or re.match(r'parameters\s*:', query_text, re.IGNORECASE):
                     continue
 
                 duration_match = DURATION_EXTRACT_PATTERN.search(log_block)
@@ -25202,18 +25221,6 @@ def parse_all_events(start_n, blocks, total_list, deadlock_list, lock_event_list
                 if connection_key and timestamp:
                     last_sql_time[connection_key] = timestamp
 
-                query_text = query_content[3] if len(query_content) >= 4 else query_content[2]
-                # unique_id 提取: EXECUTE_PATTERN.split 在无 unique id 时只产 3 段,
-                # 有 unique id 时产 4 段(uid 与 SQL 同段),所以直接用正则从 log_block 提取更可靠
-                _uid_m = re.search(r'unique\s+id\s+(\S+)', log_block, re.IGNORECASE)
-                unique_id = _uid_m.group(1).strip() if _uid_m else ''
-                # 记录原始 queryid（每条执行都不同，仅用于页面悬停展示，不作统计维度）
-                _qid_m = re.search(r'queryid\s+(\d+)', log_block, re.IGNORECASE)
-                queryid = _qid_m.group(1) if _qid_m else ''
-                # 若 query_content[3] 是 "uid SQL" 混合段,去掉开头的 uid 部分
-                if unique_id and query_text.lstrip().startswith(unique_id):
-                    query_text = query_text.lstrip()[len(unique_id):].lstrip()
-                query_text = query_text.strip()
                 # SQL类型打标：只取第一个有效词元判断
                 # EXPLAIN (ANALYZE ...) 前缀保留整段，按 EXPLAIN 后第一个 DML/DDL
                 # 关键字归类（如 EXPLAIN ... SELECT 归为 dml）
