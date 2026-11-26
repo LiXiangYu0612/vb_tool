@@ -25145,6 +25145,10 @@ def parse_all_events(start_n, blocks, total_list, deadlock_list, lock_event_list
                 # 两类都要保留(uid 缺失由下方 0_<md5> 指纹归一兜住), 绝不能整条丢弃
                 if len(query_content) < 3:
                     continue
+                # bind 的参数余料行(parameters: $1=...)不是 SQL: 门槛放宽前它们被 <4 门
+                # 挡住, 放宽后必须显式跳过, 否则聚合成假慢 SQL 记录(2026-11-26 独立复核)
+                if re.search(r'bind\s+\S+:\s*parameters:', log_block, re.IGNORECASE):
+                    continue
 
                 duration_match = DURATION_EXTRACT_PATTERN.search(log_block)
                 if duration_match:
