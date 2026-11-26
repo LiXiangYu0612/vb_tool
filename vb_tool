@@ -537,8 +537,11 @@ relxlog_help() {
 
 xlogcom_help() {
     echo "Options for xlogcom:"
-    echo "  Usage: vb_tool xlogcom <start_wal> <end_wal> [wal_dir]"
+    echo "  Usage: vb_tool xlogcom <start_wal|lsn> <end_wal|lsn> [wal_dir]"
     echo "  Description: analyze WAL commits per second"
+    echo "  start/end: WAL segment name (e.g. 000000010000000800000042)"
+    echo "             or LSN (e.g. 8/42000028, resolved to its segment automatically,"
+    echo "             reading starts/ends exactly at the LSN via pg_xlogdump -s/-e)"
     echo "  wal_dir: WAL file directory (default: \$PGDATA/pg_xlog)"
     echo ""
 }
@@ -4115,12 +4118,19 @@ run_xlogcom() {
 	
     if [ -z "$start_wal" ] || [ -z "$end_wal" ]; then
         echo "Error: Missing required parameters" >&2
-        echo "Usage: vb_tool xlogcom <start_wal> <end_wal> [wal_dir]" >&2
+        echo "Usage: vb_tool xlogcom <start_wal|lsn> <end_wal|lsn> [wal_dir]" >&2
         echo "Example: vb_tool xlogcom 000000010000000800000042 00000001000000080000004C" >&2
+        echo "         vb_tool xlogcom 8/42000028 8/4C000000" >&2
         exit 1
     fi
-    
-    pg_xlogdump -p "$wal_dir" "$start_wal" "$end_wal" | awk 'BEGIN {
+
+    local start_file end_file lsn_opts=()
+    start_file=$(wal_arg_resolve "$start_wal" "$wal_dir") || exit 1
+    end_file=$(wal_arg_resolve "$end_wal" "$wal_dir") || exit 1
+    [[ "$start_wal" == */* ]] && lsn_opts+=(-s "$start_wal")
+    [[ "$end_wal" == */* ]] && lsn_opts+=(-e "$end_wal")
+
+    pg_xlogdump -p "$wal_dir" ${lsn_opts[@]+"${lsn_opts[@]}"} "$start_file" "$end_file" | awk 'BEGIN {
     max_len = 19  
     count_len = 6  
 }
@@ -7277,7 +7287,7 @@ END \$\$;
 # Resolve a relxlog WAL argument: segment filename or LSN (X/Y).
 # For an LSN, locate the containing segment file in wal_dir (echo its name,
 # return nonzero if not found or ambiguous across timelines).
-relxlog_resolve_wal() {
+wal_arg_resolve() {
     local arg="$1" wal_dir="$2"
     if [[ "$arg" =~ ^[0-9A-Fa-f]{1,8}/[0-9A-Fa-f]{1,8}$ ]]; then
         local hi lo suffix candidates
@@ -7319,8 +7329,8 @@ run_relxlog() {
     fi
 
     local start_file end_file lsn_opts=()
-    start_file=$(relxlog_resolve_wal "$start_wal" "$wal_dir") || exit 1
-    end_file=$(relxlog_resolve_wal "$end_wal" "$wal_dir") || exit 1
+    start_file=$(wal_arg_resolve "$start_wal" "$wal_dir") || exit 1
+    end_file=$(wal_arg_resolve "$end_wal" "$wal_dir") || exit 1
     [[ "$start_wal" == */* ]] && lsn_opts+=(-s "$start_wal")
     [[ "$end_wal" == */* ]] && lsn_opts+=(-e "$end_wal")
 
