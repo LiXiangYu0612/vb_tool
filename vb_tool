@@ -28336,6 +28336,7 @@ _vtop_print_os() { # main-screen OS block; reads caller-scope vars (dynamic scop
 # as plain numbers ("inode显示数字吧 不需要转换"), and inode counts were its only
 # consumer. Only genuine byte quantities get a unit.
 _vtop_fmt_b() { awk -v v="$1" 'BEGIN{
+    if (v=="-") { print "-"; exit }     # 空基线哨兵直通 (2026-11-26), 数字格式化不碰它
     if (v<0) v=0
     if (v<1024)                     printf "%dB", v
     else if (v<1048576)             printf "%.1fKB", v/1024
@@ -32129,17 +32130,25 @@ order by s.sz desc;"
         t1=$(date +%s%3N); d1=$(_vtop_dsample); c1=$(_vtop_cpustat); n1=$(_vtop_net)
         v1=$(_vtop_vbcpu "$(_vtop_vbcpu_pid)")
         dt=$(( t1 - t0 )); [ "$dt" -le 0 ] && dt=1
-        read -r a_user a_nice a_sys a_idle a_iowait a_irq a_softirq a_steal <<< "$(awk -v a="$c0" -v b="$c1" 'BEGIN{split(a,x);split(b,y);
-            # ★逐状态钳非负 (2026-09-28): 累计值变小只有一种来源 —— CPU 热插拔/下线
-            # (VM 减核) 或 suspends。只把总窗口 d 兜到 1 是**不够**的: 被离线的那颗核
-            # 的 idle 增量会是 -75000 这种量级, 乘以 100/1 直接打出 -7500000% 的垃圾值。
-            # 钳法与本帧其它三块 (I/O、NET、PGCACHE) 完全一致。
-            for(i=2;i<=9;i++) if(y[i]<x[i]) y[i]=x[i];
-            # ★窗口分母改用"钳后逐状态增量之和" (2026-11-17 复核): 减核会让总数 y[1]-x[1]
-            #   变成负数/0 ⇒ 旧版 d=1, 于是每列都是几百倍的百分比 (剩余核的真实增量
-            #   除以 1)。求和既等于正常帧的总增量, 又天然与钳过的分子同口径。
-            d=0; for(i=2;i<=9;i++) d+=y[i]-x[i]; if(d<=0) d=1;
-            printf "%.1f %.1f %.1f %.1f %.1f %.1f %.1f %.1f", (y[2]-x[2])*100/d, (y[3]-x[3])*100/d, (y[4]-x[4])*100/d, (y[5]-x[5])*100/d, (y[6]-x[6])*100/d, (y[7]-x[7])*100/d, (y[8]-x[8])*100/d, (y[9]-x[9])*100/d}')"
+        # ★空样本 = 没有基线, 整块 '-' 不做差分 (2026-11-26, 与磁盘路径同规矩):
+        # _vtop_cpustat 同为 `timeout 3 awk` 无 END 收尾, 被杀时输出空串——空串按 0
+        # 差分 ⇒ c0 空打一帧"开机至今占比"(看着合理实则窗口错), c1 空打一帧假"全 idle"。
+        # 本帧 c0=$c1 落盘, 空洞自愈。
+        if [ -z "$c0" ] || [ -z "$c1" ]; then
+            a_user="-" a_nice="-" a_sys="-" a_idle="-" a_iowait="-" a_irq="-" a_softirq="-" a_steal="-"
+        else
+            read -r a_user a_nice a_sys a_idle a_iowait a_irq a_softirq a_steal <<< "$(awk -v a="$c0" -v b="$c1" 'BEGIN{split(a,x);split(b,y);
+                # ★逐状态钳非负 (2026-09-28): 累计值变小只有一种来源 —— CPU 热插拔/下线
+                # (VM 减核) 或 suspends。只把总窗口 d 兜到 1 是**不够**的: 被离线的那颗核
+                # 的 idle 增量会是 -75000 这种量级, 乘以 100/1 直接打出 -7500000% 的垃圾值。
+                # 钳法与本帧其它三块 (I/O、NET、PGCACHE) 完全一致。
+                for(i=2;i<=9;i++) if(y[i]<x[i]) y[i]=x[i];
+                # ★窗口分母改用"钳后逐状态增量之和" (2026-11-17 复核): 减核会让总数 y[1]-x[1]
+                #   变成负数/0 ⇒ 旧版 d=1, 于是每列都是几百倍的百分比 (剩余核的真实增量
+                #   除以 1)。求和既等于正常帧的总增量, 又天然与钳过的分子同口径。
+                d=0; for(i=2;i<=9;i++) d+=y[i]-x[i]; if(d<=0) d=1;
+                printf "%.1f %.1f %.1f %.1f %.1f %.1f %.1f %.1f", (y[2]-x[2])*100/d, (y[3]-x[3])*100/d, (y[4]-x[4])*100/d, (y[5]-x[5])*100/d, (y[6]-x[6])*100/d, (y[7]-x[7])*100/d, (y[8]-x[8])*100/d, (y[9]-x[9])*100/d}')"
+        fi
         # ★vbcpu% (user 2026-11-14, first column of the CPU row): CPU of the
         # instance vtop itself talks to, PER-CORE scale (top's IRIX style, user's
         # pick: 3 busy cores = 300.0) -- not host-share, so it deliberately does
@@ -32199,38 +32208,56 @@ order by s.sz desc;"
             dq=tq/ms;
             printf "%.0f %.1f %.1f %.0f %.1f %.1f %.2f %.0f", ro/s, rs/1048576/s, rl, wo/s, ws/1048576/s, wl, dq, u}')"
         fi
-        read -r n_rp n_tp n_re n_te n_rd n_td n_rb n_tb <<< "$(awk -v a="$n0" -v b="$n1" -v ms="$dt" 'BEGIN{split(a,x);split(b,y);s=ms/1000;
-            # x/y: 1=rx_bytes 2=rx_pkts 3=rx_errs 4=rx_drop 5=tx_bytes 6=tx_pkts 7=tx_errs 8=tx_drop
-            rp=(y[2]-x[2])/s; tp=(y[6]-x[6])/s; re=(y[3]-x[3])/s; te=(y[7]-x[7])/s;
-            rd=(y[4]-x[4])/s; td=(y[8]-x[8])/s; rb=(y[1]-x[1])/s; tb=(y[5]-x[5])/s;
-            if(rp<0)rp=0; if(tp<0)tp=0; if(re<0)re=0; if(te<0)te=0; if(rd<0)rd=0; if(td<0)td=0;
-            if(rb<0)rb=0; if(tb<0)tb=0;
-            printf "%.1f %.1f %.1f %.1f %.1f %.1f %.0f %.0f", rp, tp, re, te, rd, td, rb, tb}')"
+        # ★空样本 = 没有基线, 整块 '-' (2026-11-26, 磁盘/CPU 同规矩): _vtop_net 被
+        # timeout 杀时空串按 0 差分 ⇒ 下一帧 rb/tb 打出自开机累计字节的假速率。
+        if [ -z "$n0" ] || [ -z "$n1" ]; then
+            n_rp="-" n_tp="-" n_re="-" n_te="-" n_rd="-" n_td="-" n_rb="-" n_tb="-"
+        else
+            read -r n_rp n_tp n_re n_te n_rd n_td n_rb n_tb <<< "$(awk -v a="$n0" -v b="$n1" -v ms="$dt" 'BEGIN{split(a,x);split(b,y);s=ms/1000;
+                # x/y: 1=rx_bytes 2=rx_pkts 3=rx_errs 4=rx_drop 5=tx_bytes 6=tx_pkts 7=tx_errs 8=tx_drop
+                rp=(y[2]-x[2])/s; tp=(y[6]-x[6])/s; re=(y[3]-x[3])/s; te=(y[7]-x[7])/s;
+                rd=(y[4]-x[4])/s; td=(y[8]-x[8])/s; rb=(y[1]-x[1])/s; tb=(y[5]-x[5])/s;
+                if(rp<0)rp=0; if(tp<0)tp=0; if(re<0)re=0; if(te<0)te=0; if(rd<0)rd=0; if(td<0)td=0;
+                if(rb<0)rb=0; if(tb<0)tb=0;
+                printf "%.1f %.1f %.1f %.1f %.1f %.1f %.0f %.0f", rp, tp, re, te, rd, td, rb, tb}')"
+        fi
         read -r p_rq p_bq p_proc p_ctxt <<< "$(_vtop_procs)"
         p_dthr=$(_vtop_dthreads)
         p_cur="$p_rq $p_bq $p_proc $p_ctxt"
-        read -r p_fork p_csw <<< "$(awk -v a="$p0" -v b="$p_cur" -v ms="$dt" 'BEGIN{split(a,x);split(b,y);s=ms/1000;
-            f=(y[3]-x[3])/s; c=(y[4]-x[4])/s; if(f<0)f=0; if(c<0)c=0;
-            printf "%.1f %.0f", f, c}')"
+        # ★空样本 = 没有基线, '-' (2026-11-26, 磁盘/CPU/NET 同规矩): p0 空时按 0 差分
+        # ⇒ forks/s 打出自开机累计进程数的假值。
+        if [ -z "$p0" ] || [ -z "$p_cur" ]; then
+            p_fork="-" p_csw="-"
+        else
+            read -r p_fork p_csw <<< "$(awk -v a="$p0" -v b="$p_cur" -v ms="$dt" 'BEGIN{split(a,x);split(b,y);s=ms/1000;
+                f=(y[3]-x[3])/s; c=(y[4]-x[4])/s; if(f<0)f=0; if(c<0)c=0;
+                printf "%.1f %.0f", f, c}')"
+        fi
         read -r g_flt g_mflt g_pi g_po g_si g_so g_fr g_sk g_sd g_st g_af g_if g_aa g_ia g_cac g_buf g_sc g_mp g_drt g_shm <<< "$(_vtop_pgc)"
         g_cur="$g_flt $g_mflt $g_pi $g_po $g_si $g_so $g_fr $g_sk $g_sd $g_st $g_af $g_if $g_aa $g_ia $g_cac $g_buf $g_sc $g_mp $g_drt $g_shm"
-        read -r g_fltr g_mfltr g_pir g_por g_sir g_sor g_frr g_skr g_sdr g_str g_veff <<< "$(awk -v a="$g0" -v b="$g_cur" -v ms="$dt" 'BEGIN{split(a,x);split(b,y);s=ms/1000;
-            # pgpgin/pgpgout are KiB and pswpin/pswpout are PAGES (sar -B / -W
-            # and vmstat si,so all agree); both calibrated + documented.
-            # (the rate block used to be written twice with the reset loop in
-            # between, so the first copy was dead code -- dropped 2026-09-26.)
-            for(i=1;i<=10;i++) if((y[i]-x[i])<0) y[i]=x[i];    # counter reset -> no negative rate
-            flt=(y[1]-x[1])/s; mflt=(y[2]-x[2])/s;
-            pi=(y[3]-x[3])*1024/s; po=(y[4]-x[4])*1024/s;      # KiB -> bytes
-            # ★pswpin/pswpout stay in PAGES, never bytes: they are COUNTS, not a
-            # byte size, so they get no byte scaling and no byte unit (user call
-            # 2026-09-26: 有些是次数的，不是字节大小单位的就别转).
-            # Label and scale now both match sar -W exactly -- before, the name
-            # said pages while the value was bytes*4096, printed as "0B".
-            si=(y[5]-x[5])/s; so=(y[6]-x[6])/s;
-            fr=(y[7]-x[7])/s; sk=(y[8]-x[8])/s; sd=(y[9]-x[9])/s; st=(y[10]-x[10])/s;
-            ve=(sk+sd)>0 ? 100*st/(sk+sd) : 0;                 # sar %vmeff
-            printf "%.1f %.1f %.0f %.0f %.0f %.0f %.0f %.1f %.1f %.1f %.1f", flt, mflt, pi, po, si, so, fr, sk, sd, st, ve}')"
+        # ★空样本 = 没有基线, 速率块整行 '-' (2026-11-26, 磁盘/CPU/NET 同规矩):
+        # _vtop_pgc 被杀时空串按 0 差分 ⇒ fault/s 等打出自开机累计的假值。
+        if [ -z "$g0" ] || [ -z "$g_cur" ]; then
+            g_fltr="-" g_mfltr="-" g_pir="-" g_por="-" g_sir="-" g_sor="-" g_frr="-" g_skr="-" g_sdr="-" g_str="-" g_veff="-"
+        else
+            read -r g_fltr g_mfltr g_pir g_por g_sir g_sor g_frr g_skr g_sdr g_str g_veff <<< "$(awk -v a="$g0" -v b="$g_cur" -v ms="$dt" 'BEGIN{split(a,x);split(b,y);s=ms/1000;
+                # pgpgin/pgpgout are KiB and pswpin/pswpout are PAGES (sar -B / -W
+                # and vmstat si,so all agree); both calibrated + documented.
+                # (the rate block used to be written twice with the reset loop in
+                # between, so the first copy was dead code -- dropped 2026-09-26.)
+                for(i=1;i<=10;i++) if((y[i]-x[i])<0) y[i]=x[i];    # counter reset -> no negative rate
+                flt=(y[1]-x[1])/s; mflt=(y[2]-x[2])/s;
+                pi=(y[3]-x[3])*1024/s; po=(y[4]-x[4])*1024/s;      # KiB -> bytes
+                # ★pswpin/pswpout stay in PAGES, never bytes: they are COUNTS, not a
+                # byte size, so they get no byte scaling and no byte unit (user call
+                # 2026-09-26: 有些是次数的，不是字节大小单位的就别转).
+                # Label and scale now both match sar -W exactly -- before, the name
+                # said pages while the value was bytes*4096, printed as "0B".
+                si=(y[5]-x[5])/s; so=(y[6]-x[6])/s;
+                fr=(y[7]-x[7])/s; sk=(y[8]-x[8])/s; sd=(y[9]-x[9])/s; st=(y[10]-x[10])/s;
+                ve=(sk+sd)>0 ? 100*st/(sk+sd) : 0;                 # sar %vmeff
+                printf "%.1f %.1f %.0f %.0f %.0f %.0f %.0f %.1f %.1f %.1f %.1f", flt, mflt, pi, po, si, so, fr, sk, sd, st, ve}')"
+        fi
         read -r mt mf ma mbc msh mst msf <<< "$(_vtop_mem)"
         fsinfo=$(_vtop_fs "$datadir")
         # ★这里原来每帧 fork 一个 awk 算 MemTotal/MemAvailable 百分比, 结果没有任何
