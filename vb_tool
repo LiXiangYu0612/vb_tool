@@ -34221,7 +34221,7 @@ PSQL2
 PSQL2
     fi
     local t
-    for t in statement wait_events instance_time database pagewriter memory_node_detail shared_memory session_memory session_by_sess pg_settings file_redo_iostat; do
+    for t in statement wait_events instance_time database memory_node_detail shared_memory session_memory session_by_sess pg_settings file_redo_iostat; do
         [ -s "$dbd/$t.csv" ] || echo "  [WARN] db/$t.csv missing/empty (view unavailable or DB error)" >&2
     done
     # ---- core-data guard (user 2026-09-09): the connect probe can pass and the
@@ -34560,7 +34560,12 @@ print(json.dumps({
 # _awr_render <args...> -- write the python renderer to a temp file and run it.
 # python body is the verbatim compare_render.py; quoted heredoc => no shell expansion.
 _awr_render() {
+    local _ar_um; _ar_um=$(umask)
     umask 077   # reports carry SQL literals: same 0600 rule as the snapshots
+    # ★umask 是进程级状态, 返回前必须还原 (vtop 2026-11-17 立的规矩): 不还原的话
+    #   同一 vb_tool 进程里 awr 之后的命令产物权限全部退化 0600/0700。trap 自清
+    #   RETURN 防止泄给调用方后续函数。
+    trap 'umask "$_ar_um"; trap - RETURN' RETURN
     local tmp; tmp=$(mktemp /tmp/vb_tool_awr_render.XXXXXX.py) 2>/dev/null
     if [ -z "$tmp" ]; then echo "  [ERROR] mktemp failed" >&2; return 1; fi
     cat > "$tmp" <<'VB_BL_COMPARE_PY'
@@ -34601,6 +34606,11 @@ def to_num(v):
     except ValueError:
         # hex LSN etc. -> 0 for arithmetic
         return 0.0
+
+def _sgn(s):
+    """'+xx' for positive values (the percent plus flag has no effect on str args)."""
+    s = str(s)
+    return s if s[:1] in ("-", "+") else "+" + s
 
 def fmt_us(v):
     """microseconds -> human."""
@@ -34679,7 +34689,7 @@ def arrow_delta(base, cur):
     base = to_num(base); cur = to_num(cur)
     d = cur - base
     parts = []
-    parts.append(("%+s" % fmt_us(d)) if abs(d) >= 1000 else "%+.0f μs" % d)
+    parts.append((_sgn(fmt_us(d))) if abs(d) >= 1000 else "%+.0f μs" % d)
     if base > 0 and cur > 0:
         parts.append("(%.2fx)" % (cur / base))
     elif base == 0 and cur > 0:
@@ -35461,6 +35471,11 @@ def loadprofile_wal_pw_rows(win, duration):
     per_sec=0 when duration<=0."""
     def _sum(phase, table, col):
         return sum(to_num(r.get(col, 0)) for r in win["db"].get((phase, table), []))
+    # ★双侧存在性守卫 (2026-11-26, 与 loadprofile_iostat_rows 同规矩): 混代窗口
+    #   (begin 快照早于该表上线)一侧空表时, 老写法 begin 按 0 求和 ⇒ delta = END
+    #   自启动累积值冒充窗口增量。整表缺失 → ok=False → 调用方印 '-'。
+    io_ok = (bool(win["db"].get(("begin", "file_redo_iostat")))
+             and bool(win["db"].get(("end", "file_redo_iostat"))))
     tim_ok = (any("writetim" in r for r in win["db"].get(("end", "file_redo_iostat"), []))
               and any("writetim" in r for r in win["db"].get(("begin", "file_redo_iostat"), [])))
     rows = []
@@ -35468,7 +35483,7 @@ def loadprofile_wal_pw_rows(win, duration):
                               ("WAL blocks written", "file_redo_iostat", "phyblkwrt"),
                               ("WAL write time (ms)", "file_redo_iostat", "writetim")):
         b, e = _sum("begin", table, col), _sum("end", table, col)
-        ok = (col != "writetim") or tim_ok
+        ok = io_ok and ((col != "writetim") or tim_ok)
         rows.append((label, b, e, e - b, ((e - b) / duration) if duration else 0.0, ok, False, False))
     # pagewriter: Begin/End stay RAW PAGE COUNTS (user 2026-09-15: keep the
     # original unit there); only Delta Total / Delta Per Second are byte-scaled
@@ -35477,8 +35492,12 @@ def loadprofile_wal_pw_rows(win, duration):
     _pb = _sum("begin", "pagewriter", "pgwr_actual_flush_total_num")
     _pe = _sum("end", "pagewriter", "pgwr_actual_flush_total_num")
     _pd = _pe - _pb   # raw PAGES; renderer prints pages(bytes) via as_pages flag
+    # ★同上双侧守卫: begin 侧无 pagewriter.csv(混代窗口)时原样 ok=True ⇒ delta
+    #   = END 累计刷页数冒充窗口增量
+    pw_ok = (bool(win["db"].get(("begin", "pagewriter")))
+             and bool(win["db"].get(("end", "pagewriter"))))
     rows.append(("pagewriter flushed", _pb, _pe, _pd,
-                 (_pd / duration) if duration else 0.0, True, False, True))
+                 (_pd / duration) if duration else 0.0, pw_ok, False, True))
     return rows
 
 # ---- Long-txn + callstack samplers (awrrpt only; 5-min cadence, written by
@@ -38180,8 +38199,8 @@ def render(awr_dir, current_dir, metric, top_n, out_html):
         cells.append("<td class='sql'>%s<br><span class='muted'>%s</span>%s</td>"
                      % (esc(trunc(query)), esc(user), badge))
         # calls base→cur (count, neutral)
-        cells.append('<td class="num">%s → %s<br><span class="muted">%+s</span></td>'
-                     % (fmt_int(bcalls), fmt_int(ccalls), fmt_int(ccalls - bcalls)))
+        cells.append('<td class="num">%s → %s<br><span class="muted">%s</span></td>'
+                     % (fmt_int(bcalls), fmt_int(ccalls), _sgn(fmt_int(ccalls - bcalls))))
         # metric base→cur (latency: red if worse) + muted delta with multiplier
         cells.append('<td class="num %s">%s → %s<br><span class="muted">%s</span></td>' % (
             "worse" if cmt > bmt and bmt > 0 else "",
@@ -38194,8 +38213,8 @@ def render(awr_dir, current_dir, metric, top_n, out_html):
         cells.append(delta_cell(bd["cpu_time"], cd["cpu_time"], "time"))
         cells.append(delta_cell(bd["data_io_time"], cd["data_io_time"], "time"))
         # blocks delta (count)
-        cells.append('<td class="num">%+s</td>'
-                     % fmt_int(cd["n_blocks_fetched"] - bd["n_blocks_fetched"]))
+        cells.append('<td class="num">%s</td>'
+                     % _sgn(fmt_int(cd["n_blocks_fetched"] - bd["n_blocks_fetched"])))
         parts.append("<tr>" + "".join(cells) + "</tr>")
     parts.append("</table>")
 
@@ -38246,7 +38265,7 @@ def render(awr_dir, current_dir, metric, top_n, out_html):
                  "<th class='num'>current</th><th class='num'>Delta</th></tr>")
     def srow(label, bv, cv, fmt):
         parts.append("<tr><td>%s</td><td class='num'>%s</td><td class='num'>%s</td>"
-                     "<td class='num'>%+s</td></tr>" % (esc(label), fmt(bv), fmt(cv), fmt(cv - bv)))
+                     "<td class='num'>%s</td></tr>" % (esc(label), fmt(bv), fmt(cv), _sgn(fmt(cv - bv))))
     srow("context switches/s", bos.get("ctxt_per_sec",0), cos.get("ctxt_per_sec",0), lambda x: "%.0f" % x)
     srow("interrupts/s",      bos.get("intr_per_sec",0),  cos.get("intr_per_sec",0),  lambda x: "%.0f" % x)
     srow("procs_running (snapshot end)", bos.get("runq_end",0), cos.get("runq_end",0), lambda x: "%d" % int(x))
@@ -38261,7 +38280,7 @@ def render(awr_dir, current_dir, metric, top_n, out_html):
                  "<th class='num'>written</th><th class='num'>await (ms)</th></tr>")
     def dcell(b, c, key, fmt):
         bv = b.get(key, 0.0); cv = c.get(key, 0.0)
-        return "<td class='num'>%s <span class='muted'>(%+s)</span></td>" % (fmt(cv), fmt(cv - bv))
+        return "<td class='num'>%s <span class='muted'>(%s)</span></td>" % (fmt(cv), _sgn(fmt(cv - bv)))
     for nm in sorted(set(bdd) | set(cdd)):
         b = bdd.get(nm, {}); c = cdd.get(nm, {})
         parts.append("<tr><td>%s</td>%s%s%s%s%s</tr>" % (
@@ -38286,7 +38305,7 @@ def render(awr_dir, current_dir, metric, top_n, out_html):
     def nrate(b, c, key, fmt):
         br = b.get(key, 0.0) / (bdur or 1.0)
         cr = c.get(key, 0.0) / (cdur or 1.0)
-        return "%s <span class='muted'>(%+s)</span>" % (fmt(cr), fmt(cr - br))
+        return "%s <span class='muted'>(%s)</span>" % (fmt(cr), _sgn(fmt(cr - br)))
     def npair(b, c, rxk, txk, fmt):
         return "%s / %s" % (nrate(b, c, rxk, fmt), nrate(b, c, txk, fmt))
     for nm in sorted(set(bni) | set(cni)):
@@ -38318,7 +38337,7 @@ def render(awr_dir, current_dir, metric, top_n, out_html):
     for cat in cats:
         bv = bsf.get(cat, 0.0); cv = csf.get(cat, 0.0)
         parts.append("<tr><td>%s</td><td class='num'>%s</td><td class='num'>%s</td>"
-                     "<td class='num'>%+s</td></tr>" % (esc(cat), fmt_int(bv), fmt_int(cv), fmt_int(cv - bv)))
+                     "<td class='num'>%s</td></tr>" % (esc(cat), fmt_int(bv), fmt_int(cv), _sgn(fmt_int(cv - bv))))
     parts.append("</table>")
 
     # ---- Instance time model diff ----
@@ -38336,8 +38355,8 @@ def render(awr_dir, current_dir, metric, top_n, out_html):
         cv = cIT.get(k, {}).get("value", 0.0)
         cls = "worse" if cv > bv and bv > 0 else ""
         parts.append("<tr><td>%s</td><td class='num'>%s</td><td class='num %s'>%s</td>"
-                     "<td class='num %s'>%+s</td></tr>" % (
-                         esc(k), fmt_us(bv), cls, fmt_us(cv), cls, fmt_us(cv - bv)))
+                     "<td class='num %s'>%s</td></tr>" % (
+                         esc(k), fmt_us(bv), cls, fmt_us(cv), cls, _sgn(fmt_us(cv - bv))))
     parts.append("</table>")
 
     # ---- DB-level stats diff ----
@@ -38359,8 +38378,8 @@ def render(awr_dir, current_dir, metric, top_n, out_html):
         elif col == "xact_rollback" and cv > bv:
             cls = "worse"
         parts.append("<tr><td>%s</td><td class='num'>%s</td><td class='num %s'>%s</td>"
-                     "<td class='num'>%+s</td></tr>" % (
-                         esc(label), fmt_int(bv), cls, fmt_int(cv), fmt_int(cv - bv)))
+                     "<td class='num'>%s</td></tr>" % (
+                         esc(label), fmt_int(bv), cls, fmt_int(cv), _sgn(fmt_int(cv - bv))))
     parts.append("</table>")
 
     # ---- footer ----
@@ -38556,7 +38575,7 @@ def render_single(window_dir, metric, top_n, out_html):
     if not cats:
         parts.append("<tr><td colspan='2' class='muted'>no softirqs data</td></tr>")
     for cat in cats:
-        parts.append("<tr><td>%s</td><td class='num'>%+s</td></tr>" % (esc(cat), fmt_int(sf[cat])))
+        parts.append("<tr><td>%s</td><td class='num'>%s</td></tr>" % (esc(cat), _sgn(fmt_int(sf[cat]))))
     parts.append("</table>")
 
     # ---- Instance time model ----
@@ -40434,11 +40453,21 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
             parts.append('<tr><td>WAL replayed</td><td class="n">-</td><td class="n">-</td>'
                          '<td class="n">-</td><td class="n">-</td></tr>')
     else:
-        _wal_bs = _pwlsn_str("begin", "current_xlog_insert_lsn"); _wal_es = _pwlsn_str("end", "current_xlog_insert_lsn")
-        _wal_d = _pwlsn("end", "current_xlog_insert_lsn") - _pwlsn("begin", "current_xlog_insert_lsn")
-        parts.append('<tr><td>WAL written</td><td class="n">%s</td><td class="n">%s</td>'
-                     '<td class="n">%s</td><td class="n">%s</td></tr>'
-                     % (esc(_wal_bs), esc(_wal_es), fmt_bytes(_wal_d), fmt_bytes((_wal_d / duration) if duration else 0.0)))
+        # ★双侧存在性守卫 (2026-11-26, 与本函数 standby 分支/WAL replayed 同形态):
+        #   begin 侧无 pagewriter 行(混代窗口: patch_win_pagewriter_from_pw 遇
+        #   混代早退不合成)时, 老写法 begin 按 0 ⇒ delta = END 的 LSN 绝对位置
+        #   (几十 GB 级假增量)。缺任一侧 → 整行 '-'。
+        _wprb = win["db"].get(("begin", "pagewriter"), [])
+        _wpre = win["db"].get(("end", "pagewriter"), [])
+        if _wprb and _wpre:
+            _wal_bs = _pwlsn_str("begin", "current_xlog_insert_lsn"); _wal_es = _pwlsn_str("end", "current_xlog_insert_lsn")
+            _wal_d = _pwlsn("end", "current_xlog_insert_lsn") - _pwlsn("begin", "current_xlog_insert_lsn")
+            parts.append('<tr><td>WAL written</td><td class="n">%s</td><td class="n">%s</td>'
+                         '<td class="n">%s</td><td class="n">%s</td></tr>'
+                         % (esc(_wal_bs), esc(_wal_es), fmt_bytes(_wal_d), fmt_bytes((_wal_d / duration) if duration else 0.0)))
+        else:
+            parts.append('<tr><td>WAL written</td><td class="n">-</td><td class="n">-</td>'
+                         '<td class="n">-</td><td class="n">-</td></tr>')
     # ---- WAL writes + pagewriter flushes (v2.4.5; the old 'pagewriter written
     # (ckpt_redo_point)' line measured an LSN POSITION, not pages -- removed) ----
     _lpw_neg = False
@@ -41657,9 +41686,14 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         except Exception:
             return 0
     def _pwlsn_delta(win, col):
-        _e = sum(_lsn(r.get(col, "")) for r in win["db"].get(("end", "pagewriter"), []))
-        _b = sum(_lsn(r.get(col, "")) for r in win["db"].get(("begin", "pagewriter"), []))
-        return _e - _b
+        # ★双侧存在性守卫 (2026-11-26): 混代窗口一侧无 pagewriter 行时返回 None
+        #   (调用方 _fmtw 印 '-'), 不再拿 END 的 LSN 绝对位置冒充差值
+        _er = win["db"].get(("end", "pagewriter"), [])
+        _br = win["db"].get(("begin", "pagewriter"), [])
+        if not _br or not _er:
+            return None
+        return (sum(_lsn(r.get(col, "")) for r in _er)
+                - sum(_lsn(r.get(col, "")) for r in _br))
     sec("Load Profile")
     parts.append('<table class="t"><tr><th>Metric</th><th class="n">P1 total</th>'
                  '<th class="n">P2 total</th><th class="n">Delta</th>'
@@ -43367,7 +43401,7 @@ def text_pagew(win, repl_dir=None):
         if t in data_by_ts:
             out_rows.extend(data_by_ts[t])
         else:
-            out_rows.append([t, "(sample error)"] + [""] * (len(headers) - 1))
+            out_rows.append([t, "(sample error)"] + [""] * (len(headers) - 2))
     lines.append(_text_table(headers, out_rows,
                              align="l" + ("l" if multi_node else "") + "r" * 6))
     return 0, "\n".join(lines)
@@ -44549,8 +44583,11 @@ _awr_baseline_begin() {
     umask 077
     # non-blocking mutual exclusion for the id scan+mkdir (same discipline as
     # create.lock): two concurrent 'baseline begin' would race max+1
-    exec 8>"$root/baselines.lock"
-    if ! flock -n 8; then
+    # ★fd 9 而非重绑 fd 8 (2026-11-26): exec 8> 会先关闭 fd 8 上的迁移锁文件 ⇒
+    #   共享锁提前释放, 后面整个快照+日志拷贝期间数据目录迁移可并发推进。
+    #   fd 8 保持 _plock 到函数结束, baselines.lock 走 fd 9(跨函数复用既有模式)。
+    exec 9>"$root/baselines.lock"
+    if ! flock -n 9; then
         echo "Error: another baseline operation is running -- try again" >&2
         return 1
     fi
