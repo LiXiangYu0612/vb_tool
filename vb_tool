@@ -1195,11 +1195,14 @@ planbyline() {
 
 flamegraph_help() {
     echo "Options for flamegraph:"
-    echo "  Usage: vb_tool flamegraph [-p <pid>] [-s <seconds>]"
+    echo "  Usage: vb_tool flamegraph [-p <pid> | -t <tid>] [-s <seconds>]"
     echo "  Description: collect CPU perf data (call chains recorded with DWARF"
     echo "               unwinding) and generate an interactive SVG flame graph"
     echo "  Options:"
     echo "    -p: target process PID (optional, default: sample all processes)"
+    echo "    -t: target thread TID (optional; perf records only that thread --"
+    echo "        use for single-thread CPU attribution, e.g. one backend worker)"
+    echo "        -p and -t are mutually exclusive"
     echo "    -s: sampling duration in seconds (optional, default: 10)"
     echo "  Output: /tmp/vb_flame_<timestamp>.<pid>/perf_<timestamp>.tar.gz containing:"
     echo "    perf_<timestamp>.svg        - interactive flame graph"
@@ -1212,6 +1215,7 @@ flamegraph_help() {
 
 run_flamegraph() {
     local PID=""
+    local TID=""
     local SLEEP=10
     # ★每次运行独立子目录 (2026-11-26 复核): 固定 /tmp/perf.data 会被并发会话
     #   互相覆盖; 上次以 root 跑过的残留 perf.data 属主 root, vastbase 的 perf
@@ -1233,9 +1237,10 @@ run_flamegraph() {
 
     # ---------- parse options ----------
     local OPTIND=1
-    while getopts "p:s:" opt; do
+    while getopts "p:t:s:" opt; do
         case $opt in
             p) PID=$OPTARG ;;
+            t) TID=$OPTARG ;;
             s) SLEEP=$OPTARG ;;
             *)
                 echo "Error: unknown option -$OPTARG" >&2
@@ -1251,6 +1256,18 @@ run_flamegraph() {
 
     if [ -n "$PID" ] && ! [[ "$PID" =~ ^[0-9]+$ ]]; then
         echo "Error: -p must be a numeric PID" >&2
+        return 1
+    fi
+    if [ -n "$TID" ] && ! [[ "$TID" =~ ^[0-9]+$ ]]; then
+        echo "Error: -t must be a numeric TID" >&2
+        return 1
+    fi
+    if [ -n "$TID" ] && [ -n "$PID" ]; then
+        echo "Error: -p and -t are mutually exclusive" >&2
+        return 1
+    fi
+    if [ -n "$TID" ] && [ ! -d "/proc/$TID/task/$TID" ]; then
+        echo "Error: /proc/$TID/task/$TID not found (TID must be a thread id, not the process pid)" >&2
         return 1
     fi
 
@@ -3020,8 +3037,12 @@ FLAMEGRAPH_PL_EOF
     chmod +x "$FLAMEGRAPH_DIR/flamegraph.pl"
 
     # ---------- perf record ----------
+    # -t: thread-level filter (perf -t <tid>, still -a so DWARF unwinding sees
+    # the whole kernel context; only that thread's samples are kept)
     local RECORD_CMD
-    if [ -z "$PID" ]; then
+    if [ -n "$TID" ]; then
+        RECORD_CMD="perf record -F 99 -a --call-graph dwarf -t $TID -o $OUTPUT_DIR/perf.data -- sleep $SLEEP"
+    elif [ -z "$PID" ]; then
         RECORD_CMD="perf record -F 99 -a --call-graph dwarf -o $OUTPUT_DIR/perf.data -- sleep $SLEEP"
     else
         RECORD_CMD="perf record -F 99 -a --call-graph dwarf -p $PID -o $OUTPUT_DIR/perf.data -- sleep $SLEEP"
