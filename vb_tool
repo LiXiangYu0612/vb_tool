@@ -3357,7 +3357,6 @@ iodiag_help() {
     echo "    MUST run as root for ALL subcommands (vb_tool enforces):"
     echo "    sudo vb_tool iodiag trace /dev/sda -d 30   <- always use sudo/vb_tool-as-root"
     echo "  Examples:"
-    echo "    vb_tool iodiag -V"
     echo "    sudo vb_tool iodiag trace /dev/sda -d 30"
     echo "    sudo vb_tool iodiag mpath /dev/dm-0 -d 60      # FC multipath layer verdict"
     echo "    vb_tool iodiag analyze <blktrace files>"
@@ -46789,16 +46788,6 @@ fi
             netdiag_help
             exit 0
         fi
-        # ★同 iodiag: -V 报 vb_tool 版本为主, netdiag 二进制版本作注(免 root)
-        if [[ "$2" == "-V" || "$2" == "-version" || "$2" == "--version" ]]; then
-            echo "vb_tool ${VB_TOOL_VERSION} (netdiag pass-through)"
-            _vb=""
-            if _vb=$(_netdiag_find_bin); then
-                printf '  netdiag binary: '
-                "$_vb" -h 2>&1 | sed -n '2p' || true
-            fi
-            exit 0
-        fi
         if [ -z "${2:-}" ]; then
             echo "Error: netdiag requires arguments (try: sudo vb_tool netdiag <pcap-file>)" >&2
             netdiag_help
@@ -46809,17 +46798,6 @@ fi
     iodiag)
         if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
             iodiag_help
-            exit 0
-        fi
-        # ★-V 报 vb_tool 版本(用户令 2026-11-27: 包装命令的版本随 vb_tool),
-        #   底层 iodiag 二进制自身版本以注脚形式带出, 免 root
-        if [[ "$2" == "-V" || "$2" == "-version" || "$2" == "--version" ]]; then
-            echo "vb_tool ${VB_TOOL_VERSION} (iodiag pass-through)"
-            _vb=""
-            if _vb=$(_iodiag_find_bin); then
-                printf '  iodiag binary: '
-                "$_vb" -V 2>/dev/null | head -1 || true
-            fi
             exit 0
         fi
         if [ -z "${2:-}" ]; then
