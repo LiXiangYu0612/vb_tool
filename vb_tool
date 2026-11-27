@@ -1195,7 +1195,7 @@ flamegraph_help() {
     echo "  Options:"
     echo "    -p: target process PID (optional, default: sample all processes)"
     echo "    -s: sampling duration in seconds (optional, default: 10)"
-    echo "  Output: /tmp/perf_<timestamp>.tar.gz containing:"
+    echo "  Output: /tmp/vb_flame_<timestamp>.<pid>/perf_<timestamp>.tar.gz containing:"
     echo "    perf_<timestamp>.svg        - interactive flame graph"
     echo "    perf_<timestamp>.script.txt - detailed call stacks (perf script)"
     echo "    perf_<timestamp>.report.txt - per-symbol overhead with call chains"
@@ -1221,8 +1221,8 @@ run_flamegraph() {
     FLAMEGRAPH_DIR=$(mktemp -d /tmp/flamegraph_tools_XXXXXX)
 
     # ---------- cleanup on exit ----------
-    # OUTPUT_DIR 只留 tar/svg 等交付物(成功路径收尾统一 rm perf.data), trap 只清
-    # 工具目录与可能残留的 perf.data; 失败路径整个子目录一并带走
+    # trap 清工具目录与可能残留的 perf.data; OUTPUT_DIR(含成功交付物)保留,
+    # 失败路径可能留下带部分产物的子目录——按运行命名隔离, 无害
     trap "rm -rf '$FLAMEGRAPH_DIR' '$OUTPUT_DIR/perf.data'" RETURN
 
     # ---------- parse options ----------
@@ -3697,27 +3697,29 @@ BEGIN
    v_s_bno := 0;
    v_o_table := v_table || '_recover_' || to_char(clock_timestamp(), 'HH24MISSUS');
 
-   EXECUTE 'SET search_path TO ' || v_owner;
+   EXECUTE 'SET search_path TO ' || quote_ident(v_owner);
 
    v_s_bno := 0;
    v_o_table := concat(v_table, '_recover_', to_char(clock_timestamp(), 'HH24MISSUS'));
-   
-   EXECUTE 'SET search_path TO ' || v_owner;
 
-   EXECUTE 'CREATE TABLE IF NOT EXISTS ' || v_owner || '.' || v_o_table || 
-           ' (LIKE ' || v_owner || '.' || v_table || ')';
-      
-   SELECT (pg_relation_size((v_owner || '.' || v_table)::regclass) / 8192)::INTEGER INTO v_e_bno;
-   
-   
+   EXECUTE 'SET search_path TO ' || quote_ident(v_owner);
+
+   -- ★标识符全部 quote_ident + 全限定 (2026-11-27 复核): 裸拼接对混合大小写/含引号
+   --   的 schema/table 一直不可用; quote_ident 只在需要时加引号, 小写常规名零变化
+   EXECUTE 'CREATE TABLE IF NOT EXISTS ' || quote_ident(v_owner) || '.' || quote_ident(v_o_table) ||
+           ' (LIKE ' || quote_ident(v_owner) || '.' || quote_ident(v_table) || ')';
+
+   SELECT (pg_relation_size((quote_ident(v_owner) || '.' || quote_ident(v_table))::regclass) / 8192)::INTEGER INTO v_e_bno;
+
+
    -- 异常块必须按元组包裹: plpgsql 的 EXCEPTION 是子事务, 块级包裹时一个坏元组
    -- 会把同页已插入的有效行连同回滚, 且其后元组不再尝试(整页丢失)
    FOR j IN v_s_bno .. v_e_bno LOOP
       FOR x IN 0 .. nrows LOOP
          BEGIN
             v_ctid := '(' || j || ',' || x || ')';
-            v_sql := 'INSERT INTO ' || v_o_table ||
-                     ' SELECT * FROM ' || v_table ||
+            v_sql := 'INSERT INTO ' || quote_ident(v_owner) || '.' || quote_ident(v_o_table) ||
+                     ' SELECT * FROM ' || quote_ident(v_owner) || '.' || quote_ident(v_table) ||
                      ' WHERE ctid = ''' || v_ctid || '''';
             EXECUTE v_sql;
          EXCEPTION
@@ -4649,14 +4651,16 @@ run_show_privilege() {
         exit 1
     fi
 
-    psql -q -d "$db_param" -P footer=off <<EOF
+    # ★\set 改命令行 -v (2026-11-27 复核): \set '$var' 行对含引号的值会先在
+    #   psql 元命令解析层碎掉; -v 值按字面量直取, :'var' 用法不变
+    local _pv=()
+    [ -n "$user_param" ] && _pv+=(-v _user="$user_param")
+    [ -n "$table_param" ] && _pv+=(-v _table="$table_param")
+    _pv+=(-v _db="$db_param")
+    [ -n "$schema_param" ] && _pv+=(-v _schema="$schema_param")
+
+    psql -q -d "$db_param" -P footer=off "${_pv[@]}" <<EOF
 \pset tuples_only on
-$(
-    [ -n "$user_param" ] && echo "\\set _user '$user_param'"
-    [ -n "$table_param" ] && echo "\\set _table '$table_param'"
-    [ -n "$db_param" ] && echo "\\set _db '$db_param'"
-    [ -n "$schema_param" ] && echo "\\set _schema '$schema_param'"
-)
 
 $([ -n "$user_param" ] && cat <<'USER_PRIVS'
 SELECT  'ALTER ROLE ' || quote_ident(rolname) || ' ' ||    
@@ -5035,10 +5039,10 @@ run_tabstat() {
         echo "Error: -d (database), -s (schema), and -t (table) parameters are required" >&2
         exit 1
     fi
-    
-psql -d "$db_name" -P footer=off <<EOF
-\set schema '$schema_name'
-\set name '$table_name'
+
+# ★\set 改命令行 -v (2026-11-27 复核): \set '$var' 对含引号的值在元命令层碎掉;
+#   -v 字面量直取, :'schema'/:'name' 用法不变
+psql -d "$db_name" -P footer=off -v schema="$schema_name" -v name="$table_name" <<EOF
 \echo '================'
 \echo 'table statistics'
 \echo '================'
@@ -6925,11 +6929,14 @@ fi
 echo "dbname is ${dbname}"
 
 if [ -n "$schemaname" ]; then
-    schemacondition="AND N.nspname='${schemaname}'"
+    # ★单引号转义 (2026-11-27 复核): -s/-t 与 -d 同族, 标识符含引号时语法错误
+    _sch=${schemaname//\'/\'\'}
+    schemacondition="AND N.nspname='${_sch}'"
 fi
 
 if [ -n "$tablename" ]; then
-    tablecondition="AND C.relname='${tablename}'"
+    _tab=${tablename//\'/\'\'}
+    tablecondition="AND C.relname='${_tab}'"
 fi
 
 if [ -n "$number" ]; then
@@ -7600,7 +7607,9 @@ total_list = []
 def parse_nested(start_n, blocks):
     # ★\[local\] 转义 (2026-11-26 复核): 原 [local] 是字符类(匹配单字符 l/o/c/a),
     #   用户名含这几个字母时列序判定失效, IP 列填进用户名
-    pattern = r'(\d{1,3}\.){3}\d{1,3}\(\d+\)|\[local\]'
+    # ★主机名形态 (2026-11-27 复核): log_hostname=on 时 %r 渲染
+    #   dbhost.example.com(5432) —— 补 hostname(端口) 备选, 保持 host-first 判定
+    pattern = r'(\d{1,3}\.){3}\d{1,3}\(\d+\)|[a-zA-Z0-9._-]+\(\d+\)|\[local\]'
     for i in range(start_n, len(blocks), 2):
         timestamp = blocks[i]  # 当前时间戳
         timestamp = datetime.strptime(timestamp, '%Y-%m-%d %H:%M:%S.%f')
@@ -7658,7 +7667,9 @@ def parse_nested(start_n, blocks):
 
 # Parse logs for slow queries
 def parse_slow_sql(start_n, blocks):
-    pattern = r'(\d{1,3}\.){3}\d{1,3}\(\d+\)'
+    # ★与 parse_nested 同款三备选 (2026-11-27 复核): 补 [local] 字面量与
+    #   hostname(端口) 形态, 两解析器判定口径一致
+    pattern = r'(\d{1,3}\.){3}\d{1,3}\(\d+\)|[a-zA-Z0-9._-]+\(\d+\)|\[local\]'
     for i in range(start_n, len(blocks), 2):
         timestamp = parse_datetime(blocks[i])
         log_block = blocks[i + 1]
@@ -12574,8 +12585,20 @@ def check_memory_usage(threshold_mb=2048, raise_exception=True):
         if resource is None:
             print("警告: 当前系统不支持内存检查（resource模块不可用）")
             return
-        # 获取当前进程的内存使用（单位：KB; Linux 为 KB）
-        memory_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        # ★读当前 RSS 而非 ru_maxrss (2026-11-27 复核): maxrss 是高水位标记,
+        #   一旦某文件峰值越限, 之后每个文件(哪怕很小)都会被整体丢弃——大跑
+        #   尾段产出全零。/proc/self/status VmRSS 为当前值; 非 Linux 回退 maxrss。
+        memory_kb = 0
+        try:
+            with open('/proc/self/status', 'r') as _st:
+                for _line in _st:
+                    if _line.startswith('VmRSS:'):
+                        memory_kb = int(_line.split()[1])   # kB
+                        break
+        except (OSError, ValueError, IndexError):
+            memory_kb = 0
+        if memory_kb <= 0:
+            memory_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
         memory_mb = memory_kb / 1024
     except Exception:
         print("警告: 内存检查失败，请注意内存使用")
@@ -24381,7 +24404,9 @@ def parse_all_events(start_n, blocks, total_list, deadlock_list, lock_event_list
         hit = False
         for c in (tx_activity, lock_seen, thread_to_unique_id,
                   recent_sql_by_connection, unique_id_by_connection,
-                  last_sql_time, prefix_cache, prefix_txid_cache):
+                  last_sql_time, prefix_cache, prefix_txid_cache,
+                  pending_waiting_events, received_connections,
+                  pending_lock_events):
             if len(c) > _CACHE_CAP:
                 c.clear()
                 hit = True
@@ -32412,9 +32437,14 @@ order by s.sz desc;"
                 if(rb<0)rb=0; if(tb<0)tb=0;
                 printf "%.1f %.1f %.1f %.1f %.1f %.1f %.0f %.0f", rp, tp, re, te, rd, td, rb, tb}')"
         fi
-        read -r p_rq p_bq p_proc p_ctxt <<< "$(_vtop_procs)"
+        p_raw=$(_vtop_procs)
+        read -r p_rq p_bq p_proc p_ctxt <<< "$p_raw"
         p_dthr=$(_vtop_dthreads)
-        p_cur="$p_rq $p_bq $p_proc $p_ctxt"
+        # ★p_cur 必须用原始输出而非 read 后重拼 (2026-11-27 复核): 采样器空输出时
+        #   read 把四个变量置空, 重拼得到纯空格串, [ -z ] 恒假 ⇒ 守卫死代码,
+        #   当帧假 0.0/次帧开机累计假速率(实测 61728 forks/s)。空格分隔的 awk
+        #   split 对原始输出与重拼串行为一致, 正常帧无差。
+        p_cur="$p_raw"
         # ★空样本 = 没有基线, '-' (2026-11-26, 磁盘/CPU/NET 同规矩): p0 空时按 0 差分
         # ⇒ forks/s 打出自开机累计进程数的假值。
         if [ -z "$p0" ] || [ -z "$p_cur" ]; then
@@ -32424,8 +32454,10 @@ order by s.sz desc;"
                 f=(y[3]-x[3])/s; c=(y[4]-x[4])/s; if(f<0)f=0; if(c<0)c=0;
                 printf "%.1f %.0f", f, c}')"
         fi
-        read -r g_flt g_mflt g_pi g_po g_si g_so g_fr g_sk g_sd g_st g_af g_if g_aa g_ia g_cac g_buf g_sc g_mp g_drt g_shm <<< "$(_vtop_pgc)"
-        g_cur="$g_flt $g_mflt $g_pi $g_po $g_si $g_so $g_fr $g_sk $g_sd $g_st $g_af $g_if $g_aa $g_ia $g_cac $g_buf $g_sc $g_mp $g_drt $g_shm"
+        g_raw=$(_vtop_pgc)
+        read -r g_flt g_mflt g_pi g_po g_si g_so g_fr g_sk g_sd g_st g_af g_if g_aa g_ia g_cac g_buf g_sc g_mp g_drt g_shm <<< "$g_raw"
+        # ★同 p_cur: 用原始输出, 重拼串在空采样时是纯空格 ⇒ 守卫死代码
+        g_cur="$g_raw"
         # ★空样本 = 没有基线, 速率块整行 '-' (2026-11-26, 磁盘/CPU/NET 同规矩):
         # _vtop_pgc 被杀时空串按 0 差分 ⇒ fault/s 等打出自开机累计的假值。
         if [ -z "$g0" ] || [ -z "$g_cur" ]; then
