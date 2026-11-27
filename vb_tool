@@ -1207,7 +1207,11 @@ flamegraph_help() {
 run_flamegraph() {
     local PID=""
     local SLEEP=10
-    local OUTPUT_DIR=/tmp
+    # ★每次运行独立子目录 (2026-11-26 复核): 固定 /tmp/perf.data 会被并发会话
+    #   互相覆盖; 上次以 root 跑过的残留 perf.data 属主 root, vastbase 的 perf
+    #   record 打不开且 rm 不掉, 故障持续。产物路径形态不变(仍在 /tmp 下)。
+    local OUTPUT_DIR=/tmp/vb_flame_$(date +'%Y%m%d_%H%M%S').$$
+    mkdir -p "$OUTPUT_DIR" || { echo "Error: cannot create $OUTPUT_DIR" >&2; return 1; }
     local TS=$(date +'%Y%m%d_%H%M%S')
     local SVG_FILE="$OUTPUT_DIR/perf_$TS.svg"
     local SCRIPT_FILE="$OUTPUT_DIR/perf_$TS.script.txt"
@@ -1217,7 +1221,9 @@ run_flamegraph() {
     FLAMEGRAPH_DIR=$(mktemp -d /tmp/flamegraph_tools_XXXXXX)
 
     # ---------- cleanup on exit ----------
-    trap "rm -rf '$FLAMEGRAPH_DIR'" RETURN
+    # OUTPUT_DIR 只留 tar/svg 等交付物(成功路径收尾统一 rm perf.data), trap 只清
+    # 工具目录与可能残留的 perf.data; 失败路径整个子目录一并带走
+    trap "rm -rf '$FLAMEGRAPH_DIR' '$OUTPUT_DIR/perf.data'" RETURN
 
     # ---------- parse options ----------
     local OPTIND=1
@@ -3301,6 +3307,12 @@ run_osw() {
     local hostname=$(hostname)
     local ip=$(hostname -I | awk '{print $1}')
     local output_file="osw_${hostname}_${ip}_${timestamp}.log"
+    # ★产物落当前目录 (2026-11-26 复核): CWD 不可写时原写法静默全失败仍报
+    #   "Collection Completed" rc=0; 前置探测, 不可写立即报错退出
+    if ! touch -- "$output_file" 2>/dev/null; then
+        echo "Error: cannot write '$PWD/$output_file' (read-only dir?) -- run from a writable directory" >&2
+        return 1
+    fi
     local start_time=$(date +'%Y-%m-%d %H:%M:%S')
     local start_seconds=$(date -d "$start_time" +%s)
     local end_seconds=$((start_seconds + duration))
@@ -3664,26 +3676,31 @@ run_recover_table() {
         echo "Error: -n expects a positive integer, got '${rows_per_page:-}'" >&2
         exit 1;; esac
     echo "Starting table recovery: database=$db_name, schema=$schema_name, table=$table_name, rows_per_page=$rows_per_page"
-    
+    # ★标识符单引号转义 (2026-11-26 复核): DO 块里 '$schema_name' 字面量遇引号即
+    #   语法错误整个命令不可用; 恢复表名后缀升到微秒精度(原 hh24miss 同秒重跑会
+    #   CREATE TABLE IF NOT EXISTS 静默并入上一轮的表, 两批数据混在一起)
+    local _rt_schema=${schema_name//\'/\'\'}
+    local _rt_table=${table_name//\'/\'\'}
+
     psql -d "$db_name" <<EOF
 DO \$\$
 DECLARE
    v_s_bno INTEGER;
    v_e_bno INTEGER;
    v_ctid TID;
-   v_owner VARCHAR(100) := '$schema_name';
-   v_table VARCHAR(100) := '$table_name';
+   v_owner VARCHAR(100) := '$_rt_schema';
+   v_table VARCHAR(100) := '$_rt_table';
    v_o_table VARCHAR(100);
    v_sql TEXT;
    nrows INTEGER := $rows_per_page;
 BEGIN
    v_s_bno := 0;
-   v_o_table := v_table || '_recover_' || to_char(now(), 'hh24miss');
-   
+   v_o_table := v_table || '_recover_' || to_char(clock_timestamp(), 'HH24MISSUS');
+
    EXECUTE 'SET search_path TO ' || v_owner;
 
    v_s_bno := 0;
-   v_o_table := concat(v_table, '_recover_', to_char(sysdate,'hh24miss'));
+   v_o_table := concat(v_table, '_recover_', to_char(clock_timestamp(), 'HH24MISSUS'));
    
    EXECUTE 'SET search_path TO ' || v_owner;
 
@@ -4106,9 +4123,14 @@ run_redo() {
             }
             
             printf "%-20s %-20s %-20s %-20s %-15s\n", time_str, old_redo, new_redo, replay_wal, replay_speed
-            
+
             prev_seconds = current_seconds
         }'
+    else
+        # ★未知模式显式报错 (2026-11-26 复核): 原来无 else, -m Standby/-m stndby
+        #   之类拼写错两个分支都不进, 空输出 rc=0, 用户误以为日志里没有数据
+        echo "Error: unknown -m mode '$mode' (expected: primary or standby)" >&2
+        exit 1
     fi
 }
 
@@ -4236,6 +4258,9 @@ run_mem() {
     # query's output to that file too, which emptied the memory guc section)
     local _vb_smd_data _vb_smd_cte
     _vb_smd_data=$(psql -d postgres -qAtX -c "select concat(sessid,';',contextname,';',totalsize,';',freesize,';',usedsize) from gs_session_memory_detail" 2>/dev/null)
+    # ★单引号转义 (2026-11-26 复核): contextname 含 '(plpgsql 上下文名带函数名)时
+    #   未转义拼进 SQL 字面量 ⇒ 三段 session memory CTE 全部语法错误
+    _vb_smd_data=${_vb_smd_data//\'/\'\'}
     _vb_smd_cte="with smd as (
     select split_part(r,';',1) sessid,
            split_part(r,';',2) contextname,
@@ -4683,13 +4708,15 @@ USER_PRIVS
 )
 
 $([ -n "$table_param" ] && cat <<'TABLE_PRIVS'
-SELECT 'GRANT ' || privilege_type || ' ON TABLE "' || table_schema || '"."' || table_name || '" TO "' || grantee || 
-    (case when is_grantable ='YES' then '" WITH GRANT OPTION' else '"' end)  || ';'  
-    as show_privilege  
-FROM information_schema.table_privileges   
-WHERE table_name= :'_table';
+SELECT 'GRANT ' || privilege_type || ' ON TABLE "' || table_schema || '"."' || table_name || '" TO "' || grantee ||
+    (case when is_grantable ='YES' then '" WITH GRANT OPTION' else '"' end)  || ';'
+    as show_privilege
+FROM information_schema.table_privileges
+WHERE table_name= :'_table'
 TABLE_PRIVS
 )
+$([ -n "$table_param" ] && [ -n "$schema_param" ] && echo "  AND table_schema= :'_schema'")
+$([ -n "$table_param" ] && echo ";")
 
 $([ -n "$db_param" ] && cat <<'DB_PRIVS'
 SELECT 'GRANT ' || string_agg(privilege_type,',') || ' ON DATABASE "' || datname || '" TO "' || 
@@ -5058,11 +5085,11 @@ SELECT n.nspname AS "owner"
 FROM pg_catalog.pg_class c
 LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
 LEFT JOIN  (select lower(schema_name) schema_name,lower(name) as name,lower(string_agg(column_name,',' order by column_position)) cols  from dba_subpart_key_columns 
- where object_type='TABLE' and lower(schema_name)= :'schema' and lower(name) in (:'name')
-  group by schema_name,name)  p1 ON c.relname=p1.name and p1.schema_name=n.nspname 
+ where object_type='TABLE' and lower(schema_name)= lower(:'schema') and lower(name) in (lower(:'name'))
+  group by schema_name,name)  p1 ON lower(c.relname)=p1.name and p1.schema_name=lower(n.nspname) 
 LEFT JOIN  (select lower(schema_name) schema_name,lower(name) as name,lower(string_agg(column_name,',' order by column_position)) cols  from dba_part_key_columns 
- where object_type='TABLE' and lower(schema_name)= :'schema' and lower(name) in (:'name')
-  group by schema_name,name) p2 ON c.relname=p2.name and p2.schema_name=n.nspname 
+ where object_type='TABLE' and lower(schema_name)= lower(:'schema') and lower(name) in (lower(:'name'))
+  group by schema_name,name) p2 ON lower(c.relname)=p2.name and p2.schema_name=lower(n.nspname) 
 WHERE c.relkind IN ('r','p','v','m','S','f','')
         AND n.nspname <> 'pg_catalog'
         AND n.nspname !~ '^pg_toast'
@@ -5205,7 +5232,7 @@ select n.nspname schema_name,c.relname tab_name,partitionno partno,p.relname par
          ELSE NULL end parttype,cols partkey,p.relpages,p.reltuples,pg_size_pretty(pg_partition_size(p.parentid,p.oid)) as part_size,boundaries from pg_partition p,pg_class c,(select lower(schema_name) schema_name,lower(name) as name,lower(string_agg(column_name,',' order by column_position)) cols  from dba_part_key_columns 
  where object_type='TABLE' 
   group by schema_name,name) p1,pg_namespace n
-where p.parttype in ('p') and c.oid=p.parentid and p.subpartitionno is null and p1.name=c.relname and n.oid = c.relnamespace and p1.schema_name=n.nspname 
+where p.parttype in ('p') and c.oid=p.parentid and p.subpartitionno is null and p1.name=lower(c.relname) and n.oid = c.relnamespace and p1.schema_name=lower(n.nspname) 
   and   c.relname in (:'name')
   and n.nspname = :'schema' order by 1,2,3; 
 
@@ -5236,7 +5263,7 @@ select c.relname tab_name,p.relname part_name,ps.relname subpart_name,concat(CAS
  where object_type='TABLE' group by schema_name,name) p1,
   (select lower(schema_name) schema_name,lower(name) as name,lower(string_agg(column_name,',' order by column_position)) cols  from dba_subpart_key_columns
  where object_type='TABLE' group by schema_name,name) p2
-where (p.parttype='s' or (p.parttype='p' and p.subpartitionno is not null)) and c.oid=p.parentid and  c.relname =p1.name and n.oid = c.relnamespace and p1.schema_name=n.nspname
+where (p.parttype='s' or (p.parttype='p' and p.subpartitionno is not null)) and c.oid=p.parentid and  lower(c.relname)=p1.name and n.oid = c.relnamespace and p1.schema_name=lower(n.nspname)
   and ps.parentid=p.oid 
   and   c.relname in (:'name')
   and n.nspname = :'schema' order by 1,2,3; 
@@ -5494,6 +5521,10 @@ run_wdr_tabstat() {
         echo "Error: -t table_name is required" >&2
         return 1
     fi
+    # ★单引号转义 (2026-11-26 复核): 标识符可含引号, 未转义拼进 SQL 语法错误
+    db_name=${db_name//\'/\'\'}
+    schema_name=${schema_name//\'/\'\'}
+    table_name=${table_name//\'/\'\'}
 
     if [ $found_b -ne $found_e ]; then
         echo "Error: Both -b and -e parameters are required when specifying time" >&2
@@ -6745,7 +6776,7 @@ psql -P footer=off -d postgres -c "with tmp as (SELECT split_part(result, ',', 1
 \echo '================================'
 \echo 'long transaction info(limit 10)   '
 \echo '================================'
-SELECT concat(a.datname, ':',':',client_addr::text) client_info,
+SELECT concat(a.datname, ':', client_addr::text) client_info,
         concat(a.sessionid,':',decode(w.block_sessionid,null,'not wait',w.block_sessionid::text)) sid_bsid
         ,a.query_id as unique_sql_id
         ,w.wait_event
@@ -6758,7 +6789,7 @@ ORDER BY etime DESC nulls last limit 10;
 \echo '================================'
 \echo 'active session info(limit 30)   '
 \echo '================================'
-SELECT concat(a.datname, ':',':',client_addr::text) client_info,
+SELECT concat(a.datname, ':', client_addr::text) client_info,
         concat(a.sessionid,':',decode(w.block_sessionid,null,'not wait',w.block_sessionid::text)) sid_bsid
         --,a.unique_sql_id
 		,a.query_id
@@ -6877,7 +6908,9 @@ case "$number" in ''|*[!0-9]*)
 
 # 检查是否传入参数
 if [ -n "$dbname" ]; then
-    dbcondition="AND current_database()='${dbname}'"
+    # ★单引号转义 (2026-11-26 复核): 合法库名可含引号, 未转义拼进 SQL 直接语法错误
+    _dbn=${dbname//\'/\'\'}
+    dbcondition="AND current_database()='${_dbn}'"
 fi
 
 if [ -n "$all" ]; then
@@ -7770,10 +7803,13 @@ EOF
 run_kill_sessions() {
     CONDITIONS=()
     PSQL_OPTS=()
+    # ★SQL 字面量转义 (2026-11-26 复核): 值里的单引号(如 application_name
+    #   o'brien-app)会提前终结 ''..'' 字面量 ⇒ DO 块语法错误整个命令不可用
+    _sq() { printf '%s' "$1" | sed "s/'/''/g"; }
 
     while getopts ":i:s:p:q:d:abu:t:" opt; do
       case $opt in
-        i) CONDITIONS+=("client_addr = ''$OPTARG'' and datname not in (''postgres'',''vastbase'',''panweidb'')") ;;
+        i) CONDITIONS+=("client_addr = ''$(_sq "$OPTARG")'' and datname not in (''postgres'',''vastbase'',''panweidb'')") ;;
         s) case "$OPTARG" in
              a)    SF="active" ;;
              i)    SF="idle" ;;
@@ -7783,18 +7819,22 @@ run_kill_sessions() {
            esac
            if [ "$SF" = "$OPTARG" ]; then
              # user-supplied string: exact OR prefix match ("id" hits all idle* states)
-             CONDITIONS+=("(state = ''$SF'' or state like ''$SF%'') and datname not in (''postgres'',''vastbase'',''panweidb'')")
+             _sfs=$(_sq "$SF")
+             CONDITIONS+=("(state = ''$_sfs'' or state like ''$_sfs%'') and datname not in (''postgres'',''vastbase'',''panweidb'')")
            else
              # known abbreviation: exact match only ("i" is pure idle, NOT idle-in-transaction)
-             CONDITIONS+=("state = ''$SF'' and datname not in (''postgres'',''vastbase'',''panweidb'')")
+             CONDITIONS+=("state = ''$(_sq "$SF")'' and datname not in (''postgres'',''vastbase'',''panweidb'')")
            fi ;;
-        p) CONDITIONS+=("pid = ''$OPTARG''") ;;
-        q) CONDITIONS+=("unique_sql_id = ''$OPTARG''") ;;
-        d) CONDITIONS+=("application_name = ''$OPTARG'' and datname not in (''postgres'',''vastbase'',''panweidb'')") ;;
+        p) CONDITIONS+=("pid = ''$(_sq "$OPTARG")''") ;;
+        q) CONDITIONS+=("unique_sql_id = ''$(_sq "$OPTARG")''") ;;
+        d) CONDITIONS+=("application_name = ''$(_sq "$OPTARG")'' and datname not in (''postgres'',''vastbase'',''panweidb'')") ;;
         a) CONDITIONS+=("datname not in (''postgres'',''vastbase'',''panweidb'')") ;;
         b) MODE_BLOCKER=1 ;;
-        u) CONDITIONS+=("usename = ''$OPTARG'' and datname not in (''postgres'',''vastbase'',''panweidb'')") ;;
-        t) CONDITIONS+=("EXTRACT(EPOCH FROM (now() - xact_start))>$OPTARG and datname not in (''postgres'',''vastbase'',''panweidb'')") ;;
+        u) CONDITIONS+=("usename = ''$(_sq "$OPTARG")'' and datname not in (''postgres'',''vastbase'',''panweidb'')") ;;
+        t) case "$OPTARG" in
+             ''|*[!0-9]*) echo "Error: -t expects seconds (positive integer), got '$OPTARG'" >&2; exit 1 ;;
+           esac
+           CONDITIONS+=("EXTRACT(EPOCH FROM (now() - xact_start))>$OPTARG and datname not in (''postgres'',''vastbase'',''panweidb'')") ;;
         \?) echo "Invalid option: -$OPTARG" >&2; exit 1 ;;
         :) echo "Option -$OPTARG requires argument" >&2; exit 1 ;;
       esac
@@ -9651,11 +9691,22 @@ run_workload() {
     local action=""
     local top_n=30
     local order_by="total_dbtime"
-    
+    # ★快照文件带 port+user 标签 (2026-11-26): 固定名会被并发实例(vastbase@5432
+    #   与 vb309@6432 各跑 workload)互相覆盖 —— B 的 begin 覆盖 A 的基线, A 的
+    #   end 拿错基线出负/假 delta。同实例并发属误用, 不再防护。
+    local _wl_tag="_p${PGPORT:-5432}._u${USER:-$(id -un)}"
+    local _bak_disk="/tmp/vb_tool_diskstats_bak.${_wl_tag}"
+    local _bak_cpu="/tmp/vb_tool_cpustat_bak.${_wl_tag}"
+    local _bak_irq="/tmp/vb_tool_interrupts_bak.${_wl_tag}"
+    local _bak_sirq="/tmp/vb_tool_softirqs_bak.${_wl_tag}"
+    local _bak_net="/tmp/vb_tool_netdev_bak.${_wl_tag}"
+
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -n)
                 [ $# -lt 2 ] && { echo "Error: -n requires a value" >&2; return 2; }
+                case "$2" in ''|*[!0-9]*)
+                    echo "Error: -n expects a positive integer, got '$2'" >&2; return 2;; esac
                 top_n="$2"
                 shift 2
                 ;;
@@ -9685,16 +9736,12 @@ run_workload() {
     case "$action" in
         begin)
             echo "Starting workload collection"
-            rm -f /tmp/vb_tool_diskstats_bak \
-                  /tmp/vb_tool_cpustat_bak \
-                  /tmp/vb_tool_interrupts_bak \
-                  /tmp/vb_tool_softirqs_bak \
-                  /tmp/vb_tool_netdev_bak
-            cp /proc/diskstats   /tmp/vb_tool_diskstats_bak
-            cp /proc/stat        /tmp/vb_tool_cpustat_bak
-            cp /proc/interrupts  /tmp/vb_tool_interrupts_bak
-            cp /proc/softirqs    /tmp/vb_tool_softirqs_bak
-            cp /proc/net/dev     /tmp/vb_tool_netdev_bak
+            rm -f "$_bak_disk" "$_bak_cpu" "$_bak_irq" "$_bak_sirq" "$_bak_net"
+            cp /proc/diskstats   "$_bak_disk"
+            cp /proc/stat        "$_bak_cpu"
+            cp /proc/interrupts  "$_bak_irq"
+            cp /proc/softirqs    "$_bak_sirq"
+            cp /proc/net/dev     "$_bak_net"
             psql -d postgres <<EOF
 DO \$\$
 DECLARE
@@ -9869,7 +9916,7 @@ EOF
             # Columns: user% nice% sys% idle% iowait% irq% softirq% steal%
             # ---------------------------------------------------------------
             _print_cpustats() {
-                local bak=/tmp/vb_tool_cpustat_bak
+                local bak="$_bak_cpu"
                 if [ ! -f "$bak" ]; then
                     echo "  [WARN] No cpu stat snapshot ($bak). Did you run 'workload begin'?"
                     return
@@ -9945,8 +9992,8 @@ EOF
             # Only rows with at least one non-zero delta CPU are printed.
             # ---------------------------------------------------------------
             _print_irqstats() {
-                local sirq_bak=/tmp/vb_tool_softirqs_bak
-                local hirq_bak=/tmp/vb_tool_interrupts_bak
+                local sirq_bak="$_bak_sirq"
+                local hirq_bak="$_bak_irq"
 
                 # ---------- helper: print a dynamic-width CPU header ----------
                 _irq_hdr() {
@@ -10062,7 +10109,7 @@ EOF
             # Interfaces with zero RX+TX bytes delta and zero errors are skipped.
             # ---------------------------------------------------------------
             _print_netstats() {
-                local bak=/tmp/vb_tool_netdev_bak
+                local bak="$_bak_net"
                 if [ ! -f "$bak" ]; then
                     echo "  [WARN] No net/dev snapshot ($bak). Did you run 'workload begin'?"
                     return
@@ -10154,7 +10201,7 @@ EOF
             }
 
             _print_diskstats() {
-                local bak=/tmp/vb_tool_diskstats_bak
+                local bak="$_bak_disk"
                 if [ ! -f "$bak" ]; then
                     echo "  [WARN] No diskstats snapshot found ($bak). Did you run 'workload begin'?"
                     return
@@ -13677,8 +13724,8 @@ SELECT n.nspname AS "owner"
         ,replace(replace(replace(c.reloptions::text,'orientation','ori'),'compression','comp'),'fillfactor','fill') as options
 FROM pg_catalog.pg_class c
 LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-LEFT JOIN ({subpart_key_cols_sql}) p1 ON c.relname=p1.name and p1.schema_name=n.nspname
-LEFT JOIN ({part_key_cols_sql}) p2 ON c.relname=p2.name and p2.schema_name=n.nspname
+LEFT JOIN ({subpart_key_cols_sql}) p1 ON lower(c.relname)=p1.name and p1.schema_name=lower(n.nspname)
+LEFT JOIN ({part_key_cols_sql}) p2 ON lower(c.relname)=p2.name and p2.schema_name=lower(n.nspname)
 WHERE c.relkind IN ('r','p','v','m','S','f','')
         AND n.nspname <> 'pg_catalog'
         AND n.nspname !~ '^pg_toast'
@@ -26095,6 +26142,12 @@ local output_to_file=0
                 ;;
             -s)
                 [ $# -lt 2 ] && { echo "Error: -s requires a value (seconds)" >&2; return 2; }
+                # ★整数校验 (2026-11-26 复核): -n 校验了 -s 没有; 非数字进
+                #   $((...)) 算术展开直接 syntax error, 'abc' 按未定义变量=0 ⇒
+                #   阈值恒 0, 所有 SQL 静默降级 EXPLAIN 不走 PERFORMANCE
+                case "$2" in
+                    ''|*[!0-9]*) echo "Error: -s requires a positive integer (seconds), got '$2'" >&2; return 2 ;;
+                esac
                 duration_threshold_sec="$2"
                 shift 2
                 ;;
@@ -26153,12 +26206,19 @@ local output_to_file=0
     
     local log_file=""
     if [[ $output_to_file -eq 1 ]]; then
-        log_file="/tmp/vb_tool_sqlhc_${unique_id}_$(date +%Y%m%d_%H%M%S).txt"
+        # ★文件名成分白名单化 (2026-11-26 复核): unique_id 是命令行参数, 原样拼进
+        #   /tmp 路径, 含 '/' 或 '..' 可写出 /tmp 之外
+        local uid_safe
+        uid_safe=$(printf '%s' "$unique_id" | tr -cd 'A-Za-z0-9_.-' | cut -c1-64)
+        [ -z "$uid_safe" ] && uid_safe="sqlhc"
+        log_file="/tmp/vb_tool_sqlhc_${uid_safe}_$(date +%Y%m%d_%H%M%S).txt"
         # save BOTH fds (old code kept only stderr on fd3 and never restored);
         # RETURN trap gives them back on any exit path of this function
         exec 3>&1 4>&2
         exec > "$log_file" 2>&1
-        trap 'exec >&3 2>&4 3>&- 4>&-' RETURN
+        # ★trap 自清 (2026-11-26 复核): 不清的话 trap 挂在 shell 上, 之后每个函数
+        #   返回都会再触发一次(此时 fd3/4 已关, bash4.2 上 exec 重定向失败可致命)
+        trap 'exec >&3 2>&4 3>&- 4>&-; trap - RETURN' RETURN
 		echo "SQLHC ... Output saved to: $log_file" > /dev/tty
     fi
 
@@ -27257,14 +27317,14 @@ LEFT JOIN (
     from dba_subpart_key_columns
     where object_type='TABLE'
     group by schema_name,name
-) p1 ON c.relname=p1.name and p1.schema_name=n.nspname
+) p1 ON lower(c.relname)=p1.name and p1.schema_name=lower(n.nspname)
 LEFT JOIN (
     select lower(schema_name) schema_name,lower(name) as name,
            lower(string_agg(column_name,',' order by column_position)) cols
     from dba_part_key_columns
     where object_type='TABLE'
     group by schema_name,name
-) p2 ON c.relname=p2.name and p2.schema_name=n.nspname
+) p2 ON lower(c.relname)=p2.name and p2.schema_name=lower(n.nspname)
 WHERE c.relkind IN ('r','p','v','m','S','f','')
         AND n.nspname <> 'pg_catalog'
         AND n.nspname !~ '^pg_toast'
@@ -28618,6 +28678,9 @@ _vtop_th() { # $1 = ready-formatted header line -> dim cyan
     printf '%s%s%s\n' "${c_lbl:-}" "$1" "${c_off:-}"
 }
 _vtop_age() { # seconds -> 3d04h / 4h05m / 12m30s / 45s (same shape as the main [LTX])
+    # ★空入参 = NULL 年龄(如锁链中会话已消失的 holder) → '-', 不再伪装成 0s
+    #   (全站口径: 空=不知道, 不是 0)
+    [ -z "${1:-}" ] && { printf '%s' '-'; return; }
     awk -v s="${1:-0}" 'BEGIN{
         if (s == "" || s < 0) s = 0
         d=int(s/86400); h=int(s%86400/3600); m=int(s%3600/60); x=s%60
