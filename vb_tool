@@ -31011,16 +31011,23 @@ _vtop_keys_hint() { # $1=screen -> key legend line, interactive mode only.
             #   全变白、"走过才变蓝" (用户 2026-11-18 实测反馈), res=off+sec 后
             #   未选中条目全行统一蓝。hint_cur 经动态作用域取 run_vtop 的 local。
             local _hl="s=sess l=ltx a=istat e=wait x=xlog r=repl m=dbmem+memctx+topmem t=topsql k=lock g=stack d=iostat c=cpu v=vmstat n=net f=osmem"
-            local _h2="Enter=cmd  ESC=cmd  q=quit"
             if [ "${hint_cur:-0}" -ge 1 ] 2>/dev/null && [ "${hint_cur:-0}" -le 15 ] 2>/dev/null; then
                 _hl=$(printf '%s\n' "$_hl" | awk -v n="$hint_cur" -v on="${c_ybd:-}" -v res="${c_off:-}${c_sec:-}" '
                     { for (i = 1; i <= NF; i++)
                           printf "%s%s%s", (i == n ? on "[" : " "), $i, (i == n ? "]" res : " ") }
                     END { printf "\n" }')
-                _h2="←→↑↓=move  Enter=open  ESC=cmd  q=quit"
+                printf '%sHINT%s    %s%s%s\n        %s←→↑↓=move  Enter=open  ESC=cmd  q=quit%s\n' \
+                          "${c_grn:-}" "${c_off:-}" "${c_sec:-}" "$_hl" "${c_off:-}" "${c_ylw:-}" "${c_off:-}"
+                return
             fi
-            printf '%sHINT%s    %s%s%s\n        %s%s%s\n' \
-                      "${c_grn:-}" "${c_off:-}" "${c_sec:-}" "$_hl" "${c_off:-}" "${c_ylw:-}" "$_h2" "${c_off:-}" ;;
+            # ★hint_cur=0 = 默认框在 HINT 标签上 (用户令 2026-11-27: "默认框放在HINT那里
+            #   吧" -- 推翻 11-18 "默认放第一个": 框落在 s=sess 时开屏一按回车就直进
+            #   [SESS], "ENTER:" 命令行反而够不着)。框在 HINT ⇒ Enter=原命令行 (分派处
+            #   hint_cur>=1 才进子屏, 0 天然落到 cmd), 方向键才把光标走进条目 (→ 到
+            #   1 号 s=sess, ← 到 15 号 f=osmem)。★标签宽度恒 8 列: "HINT    "=4+4,
+            #   "[HINT]  "=6+2, 条目起始列不动, 两行重画路径的 149 列前提不破。
+            printf '%s[HINT]%s  %s%s%s\n        %s←→↑↓=move  Enter=cmd  ESC=cmd  q=quit%s\n' \
+                      "${c_ybd:-}" "${c_off:-}${c_sec:-}" "${c_sec:-}" "$_hl" "${c_off:-}" "${c_ylw:-}" "${c_off:-}" ;;
         *)    printf '%sHINT%s    %sESC=back%s   %sEnter=refresh  q=quit%s\n' \
                       "${c_grn:-}" "${c_off:-}" "${c_sec:-}" "${c_off:-}" "${c_ylw:-}" "${c_off:-}" ;;
     esac
@@ -31129,7 +31136,9 @@ _vtop_boxify() { # $1 = frame file, rewritten in place
         #   窄终端 / 非 UTF-8 locale 三条通知都以 "!! " 开头; 旧正则不认识 ⇒ 它们
         #   落在 LWLOCK 方框内, 被垫成一行数据 (┊ 前缀+右边框), 与 HINT 等其它通知
         #   两种长相, 还让方框看起来多了一行假数据。
-        if (plain ~ /^(HINT |unknown command|command line |!! )/) {
+        #   ★"[HINT]" 豁免 (2026-11-27): hint_cur=0 时默认框落在 HINT 标签上, 该行
+        #   素文本变成 "[HINT]  s=sess..." 开头; 旧正则不认识 ⇒ 这行被垫成假数据行。
+        if (plain ~ /^(HINT |\[HINT\]|unknown command|command line |!! )/) {
             if (inbox) { print bot(); inbox = 0 }
             print $0
             next
@@ -32045,10 +32054,11 @@ order by s.sz desc;"
     fi
     local prev_rsent= prev_rwr= prev_rfl= prev_rrp=
     # ★HINT 光标 (用户令 2026-11-17: 方向键移动、回车进对应子屏): hint_cur = 选中项
-    #   (1..15, 0=隐藏); _hint_screens 与 HINT 行的 15 个条目一一对应 (顺序也是)。
-    #   ★默认落 1 号 s=sess (用户令 2026-11-18: "启动就该有光标 默认放第一个上面"):
-    #   开屏即 [s=sess] 黄粗, Enter 直进 SESS; ESC/子屏返回仍清 0=隐藏态, 方向键再激活。
-    local hint_cur=1
+    #   (1..15; 0=框在 HINT 标签上, 2026-11-27 用户令 "默认框放在HINT那里吧" 推翻
+    #   11-18 "默认放第一个" -- 框在 s=sess 时开屏一按回车就直进 [SESS], ENTER:
+    #   命令行够不着)。_hint_screens 与 HINT 行的 15 个条目一一对应 (顺序也是)。
+    #   开屏 0=框在 [HINT]: Enter=原命令行, 方向键走进条目; ESC/子屏返回回 0=框回 HINT。
+    local hint_cur=0
     local _hint_screens=(sess ltx istat wait xlog repl memctx topsql lock stack iostat cpu vmstat net osmem)
     local prev_xc="" prev_xr="" prev_br="" prev_bh="" prev_tb="" prev_lsn="" prev_nc="" prev_pw=""
     local ist_qps= ist_cm= ist_roll= ist_tps= ist_lg= ist_ph= ist_pw= ist_rd= ist_tp= ist_dl=
@@ -32188,10 +32198,10 @@ order by s.sz desc;"
                         fi
                     elif [ "$screen" != "main" ]; then
                         screen=main
-                        # ★光标一并撤掉 (2026-11-17 复核): hint_cur 若跨子屏存活, 回到
-                        #   主屏后的第一次 Enter 会直接再进该子屏, 而不是文档写的命令行
-                        #   —— 与主屏 ESC 清光标 (30336 附近) 的语义保持一致: ESC 永远
-                        #   回到"无光标的素主屏", 光标要靠方向键重新激活。
+                        # ★光标一并回 HINT (2026-11-17 复核, 2026-11-27 语义改): hint_cur
+                        #   若跨子屏存活, 回到主屏后的第一次 Enter 会直接再进该子屏, 而不
+                        #   是文档写的命令行 -- 与主屏 ESC 的语义保持一致: ESC 永远回 0=
+                        #   框在 HINT 标签 (Enter=命令行), 光标要靠方向键重新走进条目。
                         hint_cur=0
                         # fresh sampling baseline: without this the first main frame
                         # after coming back would average over the whole sub-screen
@@ -32217,11 +32227,11 @@ order by s.sz desc;"
                         # main screen: ESC opens the command line. A key that arrived
                         # right behind the ESC (coalesced/scripted input) pre-fills it --
                         # bash cannot push a byte back to stdin.
-                        # ★ESC 同时清掉 HINT 光标 (2026-11-17 复核): hint_cur 原先只有
+                        # ★ESC 同时把框回 HINT (2026-11-17 复核): hint_cur 原先只有
                         #   0→1 和环形移动, 没有任何回 0 的路径 ⇒ 误按一次方向键后, 主屏
                         #   Enter 永远变成"进所选子屏", 用户文档里的 Enter=cmd 再也回不来。
                         #   ESC 本就是"原路径/命令行"的入口 (用户令 "原有进入方式也支持"),
-                        #   用它顺手把光标撤掉, 两种 Enter 语义就都能到达。
+                        #   用它顺手把框撤回 HINT (0), 两种 Enter 语义就都能到达。
                         hint_cur=0
                         _vtop_cmd_exec "$_vtop_drain_ret"
                         [ "$_vtop_cmd_quit" = "1" ] && break
