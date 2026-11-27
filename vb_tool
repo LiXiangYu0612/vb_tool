@@ -12493,29 +12493,28 @@ def check_memory_usage(threshold_mb=2048, raise_exception=True):
         threshold_mb (float): 内存阈值（MB），默认为2048MB（2GB）
         raise_exception (bool): 是否在超过阈值时抛出异常，默认为True
     """
-    memory_mb = 0
-    
+    # ★先算后抛 (2026-11-26 复核): 原写法 raise MemoryError 位于自家 try 内,
+    #   被 except Exception 吞掉 ⇒ 2GB 护栏永不生效。try 只罩 rusage 读取,
+    #   阈值判断与 raise 移出。
     try:
-        if resource is not None:
-            # 获取当前进程的内存使用（单位：KB）
-            memory_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-            # 在Linux上单位是KB，在其他系统上可能是字节
-            memory_mb = memory_kb / 1024
-            # 检查是否成功获取内存使用
-            if memory_mb > 0:
-                # 检查内存阈值
-                if memory_mb > threshold_mb:
-                    error_msg = f"内存使用超过限制: {memory_mb:.2f}MB > MAX_LIMIT:  {threshold_mb}MB "
-                    if raise_exception:
-                        raise MemoryError(error_msg)
-                else:
-                    print(f"内存使用正常: {memory_mb:.2f}MB    MAX_LIMIT: {threshold_mb}MB ")
-            else:
-                print("警告: 内存检查失败，请注意内存使用")
-        else:
+        if resource is None:
             print("警告: 当前系统不支持内存检查（resource模块不可用）")
-    
+            return
+        # 获取当前进程的内存使用（单位：KB; Linux 为 KB）
+        memory_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        memory_mb = memory_kb / 1024
     except Exception:
+        print("警告: 内存检查失败，请注意内存使用")
+        return
+
+    if memory_mb > 0:
+        if memory_mb > threshold_mb:
+            error_msg = f"内存使用超过限制: {memory_mb:.2f}MB > MAX_LIMIT:  {threshold_mb}MB "
+            if raise_exception:
+                raise MemoryError(error_msg)
+        else:
+            print(f"内存使用正常: {memory_mb:.2f}MB    MAX_LIMIT: {threshold_mb}MB ")
+    else:
         print("警告: 内存检查失败，请注意内存使用")
  
 
@@ -12531,8 +12530,15 @@ def get_log_line_prefix():
             stderr=subprocess.PIPE,
             universal_newlines=True
         )
-        stdout, stderr = process.communicate()
-        
+        # ★timeout (2026-11-26 复核): 数据库挂起时裸 communicate 会无限等, 整个
+        #   分析卡死; 同文件其他 vsql 助手均已带 timeout, 这三处是漏网点
+        try:
+            stdout, stderr = process.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill(); process.communicate()
+            print("WARNING: 查询 log_line_prefix 超时(10s)，数据库无响应")
+            return None
+
         if process.returncode != 0:
             print("WARNING: 无法从数据库获取日志行前缀格式")
             return None
@@ -12560,8 +12566,13 @@ def get_db_log_directory():
             stderr=subprocess.PIPE,
             universal_newlines=True
         )
-        stdout, stderr = process.communicate()
-        
+        try:
+            stdout, stderr = process.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill(); process.communicate()
+            print("WARNING: 查询 log_directory 超时(10s)，数据库无响应")
+            return None
+
         if process.returncode != 0:
             print("WARNING: 无法从数据库获取日志目录，请指定日志文件")
             return None
@@ -12578,8 +12589,13 @@ def get_db_log_directory():
                 stderr=subprocess.PIPE,
                 universal_newlines=True
             )
-            stdout_data, stderr_data = process_data.communicate()
-            
+            try:
+                stdout_data, stderr_data = process_data.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                process_data.kill(); process_data.communicate()
+                print("WARNING: 查询 data_directory 超时(10s)，数据库无响应")
+                return None
+
             if process_data.returncode != 0:
                 print(f"ERROR: 获取data_directory失败: {stderr_data.strip()}")
                 return None
@@ -24282,6 +24298,25 @@ def parse_all_events(start_n, blocks, total_list, deadlock_list, lock_event_list
     prefix_cache = {}
     prefix_txid_cache = {}
 
+    # ---- 容量上限 (2026-11-26 复核): 逐行级关联容器在 GB 级日志上只增不减 ⇒
+    #      OOM。超限时整体清空并只警告一次——损失的是超旧记录的锁链关联/事件
+    #      去重(降级不崩), 换取分析继续。上限取正常库远达不到的保守大量。 ----
+    _CACHE_CAP = 400000
+    _cache_cap_warned = [False]
+    def _cap_caches():
+        hit = False
+        for c in (tx_activity, lock_seen, thread_to_unique_id,
+                  recent_sql_by_connection, unique_id_by_connection,
+                  last_sql_time, prefix_cache, prefix_txid_cache):
+            if len(c) > _CACHE_CAP:
+                c.clear()
+                hit = True
+        if hit and not _cache_cap_warned[0]:
+            _cache_cap_warned[0] = True
+            print("WARNING: 单遍扫描关联缓存超过 %d 条(日志过大), 已清空重置: "
+                  "锁链关联/事件去重只覆盖重置之后的窗口" % _CACHE_CAP)
+    _cap_tick = 0
+
     _PREFIX_MARKERS = ('LOG:', 'ERROR:', 'WARNING:', 'FATAL:', 'PANIC:',
                        'DETAIL:', 'STATEMENT:', 'HINT:', 'CONTEXT:')
 
@@ -24458,6 +24493,11 @@ def parse_all_events(start_n, blocks, total_list, deadlock_list, lock_event_list
         processed += 1
         if processed % 500 == 0:
             show_progress(processed, total_blocks, "解析事件", start_time, total_elapsed_time)
+        # 每 4096 块查一次关联缓存容量(热路径零成本化)
+        _cap_tick += 1
+        if _cap_tick >= 4096:
+            _cap_tick = 0
+            _cap_caches()
 
         timestamp_str = blocks[i]
         log_block = blocks[i + 1]
