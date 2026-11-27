@@ -3390,17 +3390,19 @@ run_tidwatch() {
         echo "  D samples: active(vcsw moving)=$active_total frozen(vcsw still)=$frozen_total"
         [ "$d_run_max" -gt 0 ] && echo "  longest consecutive D run: ${d_run_max}s (start $d_run_max_start, frozen=$d_run_max_frozen)"
         # ---- verdict per the decision table ----
-        if [ "$d_run_max_frozen" -ge 5 ]; then
+        # 阈值按秒不按拍(用户问 5s 合理性时抓出的漂移 bug); VB_TOOL_TIDWATCH_STALL_SEC 可调
+        local stall_sec="${VB_TOOL_TIDWATCH_STALL_SEC:-5}"
+        if [ $((d_run_max_frozen * interval)) -ge "$stall_sec" ]; then
             echo "  [WARN] frozen D run >= 5s -- thread was STUCK, not working:"
             echo "         wchan at that time names the layer:"
             echo "           folio_wait_bit/writeback -> IO not returning (queue above device / link)"
             echo "           rq_qos_wait              -> wbt/cgroup io throttle"
             echo "           shrink_node/try_to_free  -> memory direct reclaim"
             echo "           blk_mq_freeze_queue      -> queue frozen (NVMe reset)"
-        elif [ "$d_run_max" -ge 5 ]; then
+        elif [ $((d_run_max * interval)) -ge "$stall_sec" ]; then
             echo "  [OK] long D runs all had moving vcsw -- IO-bound work, normal"
         elif [ "$total" -gt 0 ]; then
-            echo "  [OK] no D run >= 5s -- occasional D frames are normal IO naps"
+            echo "  [OK] no frozen D run >= ${stall_sec}s -- occasional D frames are normal IO naps"
         fi
         [ "$gone" = "1" ] && echo "  thread exited during watch (TID-GONE recorded)"
         echo "  log file: $outfile"
@@ -3457,7 +3459,7 @@ run_tidwatch() {
             else
                 d_active=$((d_active+1)); active_total=$((active_total+1))
             fi
-            if [ "$d_run" -ge "$d_run_max" ]; then
+            if [ $((d_run * interval)) -ge $((d_run_max * interval)) ]; then
                 d_run_max=$d_run; d_run_max_frozen=$d_frozen
                 d_run_max_start=$(date -d "@$(( $(date +%s) - d_run * interval ))" +'%T' 2>/dev/null)
             fi
