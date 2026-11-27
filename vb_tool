@@ -3318,8 +3318,8 @@ tidwatch_help() {
     echo "  Output columns: state / wchan / vcsw / ivcsw / cpu=N (last ran on) / cpu%=X.X (single-core)"
     echo "  Notes:"
     echo "    every line is also appended to the output file; live output goes to stdout"
-    echo "    kernel stack needs root; non-root still samples State/wchan/counters"
-    echo "    (host-side only, DB not touched; same root-branch discipline as collect_log)"
+    echo "    MUST run as root: sudo vb_tool tidwatch ... (kernel stack access)"
+    echo "    host-side only, DB not touched"
 }
 
 iodiag_help() {
@@ -3330,10 +3330,9 @@ iodiag_help() {
     echo "               byte-identical to running the iodiag binary directly"
     echo "  -P <port>: database port (default: current \$PGPORT)"
     echo "  Args (any iodiag args, passed through verbatim):"
-    echo "  Root requirements (enforced by iodiag itself):"
-    echo "    trace / mpath     MUST run as root       (tracefs + kernel stack access)"
-    echo "    analyze / compare run fine without root  (offline parsing)"
-    echo "    sudo vb_tool iodiag trace ...            <- recommended form for root"
+    echo "  Root requirement:"
+    echo "    MUST run as root for ALL subcommands (vb_tool enforces):"
+    echo "    sudo vb_tool iodiag trace /dev/sda -d 30   <- always use sudo/vb_tool-as-root"
     echo "  Examples:"
     echo "    vb_tool iodiag -V"
     echo "    sudo vb_tool iodiag trace /dev/sda -d 30"
@@ -3347,6 +3346,11 @@ iodiag_help() {
 }
 
 run_iodiag() {
+    # ★必须 root(用户令 2026-11-27): 统一口径不分子命令, 非 root 一律拒绝
+    if [ "$(id -u)" != "0" ]; then
+        echo "Error: iodiag must run as root: sudo vb_tool iodiag ..." >&2
+        return 1
+    fi
     local arch bin=""
     arch=$(uname -m 2>/dev/null || echo "")
     if command -v iodiag >/dev/null 2>&1; then
@@ -3399,12 +3403,12 @@ run_tidwatch() {
     fi
     umask 077
 
-    local have_stack=0
-    if [ "$(id -u)" = "0" ]; then
-        have_stack=1
-    else
-        echo "[NOTE] not root: kernel stack unavailable, sampling State/wchan/counters only" >&2
+    # ★必须 root(用户令 2026-11-27): 栈是核心输出, 非 root 一律拒绝不降级
+    if [ "$(id -u)" != "0" ]; then
+        echo "Error: tidwatch must run as root (kernel stack access): sudo vb_tool tidwatch ..." >&2
+        return 1
     fi
+    local have_stack=1
 
     # ---- live counters for the end-of-run verdict ----
     declare -A ST_N=() WC_N=()
