@@ -7830,7 +7830,9 @@ run_kill_sessions() {
     PSQL_OPTS=()
     # ★SQL 字面量转义 (2026-11-26 复核): 值里的单引号(如 application_name
     #   o'brien-app)会提前终结 ''..'' 字面量 ⇒ DO 块语法错误整个命令不可用
-    _sq() { printf '%s' "$1" | sed "s/'/''/g"; }
+    # 条件文本最终嵌在 DO 块 EXECUTE '...$WHERE_CLAUSE...' 的 PL/pgSQL 字面量里,
+    # '' 会被外层归约成 ' —— 值里的引号必须四连('')'' 才能在动态 SQL 里成为 ''
+    _sq() { printf '%s' "$1" | sed "s/'/''''/g"; }
 
     while getopts ":i:s:p:q:d:abu:t:" opt; do
       case $opt in
