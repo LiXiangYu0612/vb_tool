@@ -43,6 +43,7 @@ show_help() {
     echo "  mem             display memory usage information"
     echo "  memhist         display memory usage history"
     echo "  net             display network information"
+    echo "  netdiag         pass-through to the netdiag network packet analyzer"
     echo "  iodiag          pass-through to the iodiag block-IO latency analyzer"
     echo "  tidwatch        watch one thread: State/wchan/stack/cpu per second + verdict"
     echo "  osw             collect system performance data (OSWatcher style)"
@@ -107,6 +108,7 @@ show_list() {
     echo "  mem             display memory usage information"
     echo "  memhist         display memory usage history"
     echo "  net             display network information"
+    echo "  netdiag         pass-through to the netdiag network packet analyzer"
     echo "  iodiag          pass-through to the iodiag block-IO latency analyzer"
     echo "  tidwatch        watch one thread: State/wchan/stack/cpu per second + verdict"
     echo "  osw             collect system performance data (OSWatcher style)"
@@ -3345,30 +3347,87 @@ iodiag_help() {
     echo "        in PATH, \$HOME, /opt, or \$VB_TOOL_IODIAG_BIN pointing at a readable path"
 }
 
+netdiag_help() {
+    echo "Options for netdiag:"
+    echo "  Usage: vb_tool netdiag <netdiag args...>"
+    echo "  Description: pass-through to the netdiag network packet analyzer"
+    echo "               (pcap/pcapng/tcpdump-text offline + live pipe analysis);"
+    echo "               output is byte-identical to running the netdiag binary directly"
+    echo "  -P <port>: database port (default: current \$PGPORT)"
+    echo "  Root requirement:"
+    echo "    MUST run as root for live capture forms (tcpdump pipe / device capture);"
+    echo "    offline pcap/text file analysis also goes through root per vb_tool gate"
+    echo "    sudo vb_tool netdiag <pcap-file>          <- always use sudo/vb_tool-as-root"
+    echo "  Examples:"
+    echo "    sudo vb_tool netdiag /tmp/capture.pcap"
+    echo "    sudo tcpdump -w - | sudo vb_tool netdiag -"
+    echo "    sudo vb_tool netdiag /tmp/tcpdump.txt -seq 3"
+    echo "  Binary discovery order:"
+    echo "    PATH -> \$VB_TOOL_NETDIAG_BIN -> /root/netdiag_<arch> -> \$HOME/netdiag_<arch> -> /opt/netdiag_<arch>"
+    echo "    (<arch> from uname -m: x86_64 / aarch64)"
+    echo "  NOTE: /root is only traversable by root -- binaries must sit where the"
+    echo "        running user can reach them (see discovery order above)"
+}
+
+_netdiag_find_bin() {   # -> echoes path, rc=1 + hint on stderr when absent
+    local arch
+    arch=$(uname -m 2>/dev/null || echo "")
+    if command -v netdiag >/dev/null 2>&1; then
+        command -v netdiag; return 0
+    elif [ -n "${VB_TOOL_NETDIAG_BIN:-}" ] && [ -x "$VB_TOOL_NETDIAG_BIN" ]; then
+        echo "$VB_TOOL_NETDIAG_BIN"; return 0
+    elif [ -n "$arch" ] && [ -x "/root/netdiag_$arch" ]; then
+        echo "/root/netdiag_$arch"; return 0
+    elif [ -n "$arch" ] && [ -x "$HOME/netdiag_$arch" ]; then
+        echo "$HOME/netdiag_$arch"; return 0
+    elif [ -n "$arch" ] && [ -x "/opt/netdiag_$arch" ]; then
+        echo "/opt/netdiag_$arch"; return 0
+    fi
+    echo "Error: netdiag binary not found" >&2
+    echo "  searched: PATH, \$VB_TOOL_NETDIAG_BIN, /root/netdiag_$arch, \$HOME/netdiag_$arch, /opt/netdiag_$arch" >&2
+    echo "  deploy it (same route as vb_tool) or: export VB_TOOL_NETDIAG_BIN=/path/to/netdiag" >&2
+    return 1
+}
+
+run_netdiag() {
+    # ★必须 root(与 tidwatch/iodiag 同口径, 用户令 2026-11-27)
+    if [ "$(id -u)" != "0" ]; then
+        echo "Error: netdiag must run as root: sudo vb_tool netdiag ..." >&2
+        return 1
+    fi
+    local bin
+    bin=$(_netdiag_find_bin) || return 1
+    exec "$bin" "$@"
+}
+
+_iodiag_find_bin() {   # -> echoes path, rc=1 + hint on stderr when absent
+    local arch bin=""
+    arch=$(uname -m 2>/dev/null || echo "")
+    if command -v iodiag >/dev/null 2>&1; then
+        command -v iodiag; return 0
+    elif [ -n "${VB_TOOL_IODIAG_BIN:-}" ] && [ -x "$VB_TOOL_IODIAG_BIN" ]; then
+        echo "$VB_TOOL_IODIAG_BIN"; return 0
+    elif [ -n "$arch" ] && [ -x "/root/iodiag_$arch" ]; then
+        echo "/root/iodiag_$arch"; return 0
+    elif [ -n "$arch" ] && [ -x "$HOME/iodiag_$arch" ]; then
+        echo "$HOME/iodiag_$arch"; return 0
+    elif [ -n "$arch" ] && [ -x "/opt/iodiag_$arch" ]; then
+        echo "/opt/iodiag_$arch"; return 0
+    fi
+    echo "Error: iodiag binary not found" >&2
+    echo "  searched: PATH, \$VB_TOOL_IODIAG_BIN, /root/iodiag_$arch, \$HOME/iodiag_$arch, /opt/iodiag_$arch" >&2
+    echo "  deploy it (same route as vb_tool) or: export VB_TOOL_IODIAG_BIN=/path/to/iodiag" >&2
+    return 1
+}
+
 run_iodiag() {
     # ★必须 root(用户令 2026-11-27): 统一口径不分子命令, 非 root 一律拒绝
     if [ "$(id -u)" != "0" ]; then
         echo "Error: iodiag must run as root: sudo vb_tool iodiag ..." >&2
         return 1
     fi
-    local arch bin=""
-    arch=$(uname -m 2>/dev/null || echo "")
-    if command -v iodiag >/dev/null 2>&1; then
-        bin=$(command -v iodiag)
-    elif [ -n "${VB_TOOL_IODIAG_BIN:-}" ] && [ -x "$VB_TOOL_IODIAG_BIN" ]; then
-        bin="$VB_TOOL_IODIAG_BIN"
-    elif [ -n "$arch" ] && [ -x "/root/iodiag_$arch" ]; then
-        bin="/root/iodiag_$arch"
-    elif [ -n "$arch" ] && [ -x "$HOME/iodiag_$arch" ]; then
-        bin="$HOME/iodiag_$arch"
-    elif [ -n "$arch" ] && [ -x "/opt/iodiag_$arch" ]; then
-        bin="/opt/iodiag_$arch"
-    else
-        echo "Error: iodiag binary not found" >&2
-        echo "  searched: PATH, \$VB_TOOL_IODIAG_BIN, /root/iodiag_$arch, \$HOME/iodiag_$arch, /opt/iodiag_$arch" >&2
-        echo "  deploy it (same route as vb_tool) or: export VB_TOOL_IODIAG_BIN=/path/to/iodiag" >&2
-        return 1
-    fi
+    local bin
+    bin=$(_iodiag_find_bin) || return 1
     exec "$bin" "$@"
 }
 
@@ -46704,9 +46763,42 @@ if [ "$rc" -ne 0 ]; then
     exit "$rc"
 fi
         ;;
+    netdiag)
+        if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
+            netdiag_help
+            exit 0
+        fi
+        # ★同 iodiag: -V 报 vb_tool 版本为主, netdiag 二进制版本作注(免 root)
+        if [[ "$2" == "-V" || "$2" == "-version" || "$2" == "--version" ]]; then
+            echo "vb_tool ${VB_TOOL_VERSION} (netdiag pass-through)"
+            _vb=""
+            if _vb=$(_netdiag_find_bin); then
+                printf '  netdiag binary: '
+                "$_vb" -h 2>&1 | sed -n '2p' || true
+            fi
+            exit 0
+        fi
+        if [ -z "${2:-}" ]; then
+            echo "Error: netdiag requires arguments (try: sudo vb_tool netdiag <pcap-file>)" >&2
+            netdiag_help
+            exit 1
+        fi
+        run_netdiag "${@:2}"
+        ;;
     iodiag)
         if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
             iodiag_help
+            exit 0
+        fi
+        # ★-V 报 vb_tool 版本(用户令 2026-11-27: 包装命令的版本随 vb_tool),
+        #   底层 iodiag 二进制自身版本以注脚形式带出, 免 root
+        if [[ "$2" == "-V" || "$2" == "-version" || "$2" == "--version" ]]; then
+            echo "vb_tool ${VB_TOOL_VERSION} (iodiag pass-through)"
+            _vb=""
+            if _vb=$(_iodiag_find_bin); then
+                printf '  iodiag binary: '
+                "$_vb" -V 2>/dev/null | head -1 || true
+            fi
             exit 0
         fi
         if [ -z "${2:-}" ]; then
