@@ -43,6 +43,7 @@ show_help() {
     echo "  mem             display memory usage information"
     echo "  memhist         display memory usage history"
     echo "  net             display network information"
+    echo "  tidwatch        watch one thread: State/wchan/stack/cpu per second + verdict"
     echo "  osw             collect system performance data (OSWatcher style)"
     echo "  osw_netstat     analyze OSWbb oswnetstat archive (RX/TX + retrans deltas)"
     echo "  planbyline      analyze execution plan and output self-time by line"
@@ -105,6 +106,7 @@ show_list() {
     echo "  mem             display memory usage information"
     echo "  memhist         display memory usage history"
     echo "  net             display network information"
+    echo "  tidwatch        watch one thread: State/wchan/stack/cpu per second + verdict"
     echo "  osw             collect system performance data (OSWatcher style)"
     echo "  osw_netstat     analyze OSWbb oswnetstat archive (RX/TX + retrans deltas)"
     echo "  planbyline      analyze execution plan and output self-time by line"
@@ -3298,6 +3300,200 @@ run_osw_netstat() {
         echo "Error: not a file or directory: $TARGET" >&2
         return 1
     fi
+}
+
+tidwatch_help() {
+    echo "Options for tidwatch:"
+    echo "  Usage: vb_tool tidwatch -t <TID> [-i <interval_sec>] [-d <duration_sec>] [-o <file>]"
+    echo "  Description: sample one thread's State/wchan/kernel-stack per interval;"
+    echo "               auto-verdict at end (state histogram, D runs, vcsw freeze)"
+    echo "  -P <port>: database port (default: current \$PGPORT)"
+    echo "  Args:"
+    echo "    -t: TID to watch (required; from 'top -H -p <pid>' or ps -eLf column 4)"
+    echo "    -i: sample interval in seconds (default 1)"
+    echo "    -d: stop after N seconds (default 60)"
+    echo "    -o: output file (default /tmp/tidwatch_<TID>_<timestamp>.log)"
+    echo "  Output columns: state / wchan / vcsw / ivcsw / cpu=N (last ran on) / cpu%=X.X (single-core)"
+    echo "  Notes:"
+    echo "    every line is also appended to the output file; live output goes to stdout"
+    echo "    kernel stack needs root; non-root still samples State/wchan/counters"
+    echo "    (host-side only, DB not touched; same root-branch discipline as collect_log)"
+}
+
+run_tidwatch() {
+    local tid="" interval=1 duration=60 outfile=""
+    OPTIND=1
+    while getopts ":t:i:d:o:h" opt; do
+        case "$opt" in
+            t) tid="$OPTARG" ;;
+            i) case "$OPTARG" in ''|*[!0-9]*) echo "Error: -i expects seconds (positive integer)" >&2; return 2;; esac
+               [ "$OPTARG" -ge 1 ] || { echo "Error: -i must be >= 1" >&2; return 2; }
+               interval="$OPTARG" ;;
+            d) case "$OPTARG" in ''|*[!0-9]*) echo "Error: -d expects seconds (positive integer)" >&2; return 2;; esac
+               duration="$OPTARG" ;;
+            o) outfile="$OPTARG" ;;
+            h) tidwatch_help; return 0 ;;
+            \?) echo "Error: unknown option -$OPTARG" >&2; tidwatch_help; return 2 ;;
+            :) echo "Error: option -$OPTARG requires an argument" >&2; return 2 ;;
+        esac
+    done
+    shift $((OPTIND-1))
+    [ -n "$tid" ] || { echo "Error: -t <TID> is required" >&2; tidwatch_help; return 2; }
+    case "$tid" in ''|*[!0-9]*) echo "Error: TID must be numeric" >&2; return 2;; esac
+    [ -d "/proc/$tid" ] || { echo "Error: /proc/$tid not found (thread exited? TID is not PID)" >&2; return 1; }
+    # 输出文件固定落 /tmp(用户令 2026-11-27), -o 可改路径
+    # ★root 写 /tmp 的加固: 随机后缀(防预置符号链接) + 已存在即拒绝(防链接追写)
+    #   + umask 077/600(内核栈含内核地址, 不给其他用户读)
+    outfile="${outfile:-/tmp/tidwatch_${tid}_$(date +%Y%m%d_%H%M%S)_$RANDOM.log}"
+    if [ -e "$outfile" ]; then
+        echo "Error: $outfile already exists -- refusing (symlink guard); use -o for another path" >&2
+        return 1
+    fi
+    umask 077
+
+    local have_stack=0
+    if [ "$(id -u)" = "0" ]; then
+        have_stack=1
+    else
+        echo "[NOTE] not root: kernel stack unavailable, sampling State/wchan/counters only" >&2
+    fi
+
+    # ---- live counters for the end-of-run verdict ----
+    declare -A ST_N=() WC_N=()
+    local total=0 gone=0
+    local prev_key="" same=0 stack_hinted=0
+    local prev_vcsw=""
+    local d_run=0 d_frozen=0 d_active=0
+    local d_run_max=0 d_run_max_frozen=0 d_run_max_start=""
+    local frozen_total=0 active_total=0
+    local comm_all dur_start=$SECONDS
+    local _tw_prev_ticks="" _tw_cpu_sum=0 _tw_cpu_n=0
+
+    tw_summary() {
+        local rc=$?
+        trap - INT TERM
+        echo ""
+        echo "================ tidwatch summary ($total samples, ${SECONDS:-$dur_start}s) ================"
+        local k
+        for k in "${!ST_N[@]}"; do
+            printf "  %-12s %6d  (%s%%)\n" "$k" "${ST_N[$k]}" "$(awk "BEGIN{printf \"%.1f\", ${ST_N[$k]}*100/($total+1)}")"
+        done
+        if [ ${#WC_N[@]} -gt 0 ]; then
+            echo "  top wchan:"
+            local w n
+            for w in "${!WC_N[@]}"; do echo "$w ${WC_N[$w]}"; done | sort -k2 -rn | head -5 | \
+                while read -r w n; do printf "    %-32s %6d\n" "$w" "$n"; done
+        fi
+        if [ "$_tw_cpu_n" -gt 0 ]; then
+            awk "BEGIN{printf \"  avg cpu%%: %.1f (single-core scale)\\n\", $_tw_cpu_sum/$_tw_cpu_n}"
+        fi
+        echo "  D samples: active(vcsw moving)=$active_total frozen(vcsw still)=$frozen_total"
+        [ "$d_run_max" -gt 0 ] && echo "  longest consecutive D run: ${d_run_max}s (start $d_run_max_start, frozen=$d_run_max_frozen)"
+        # ---- verdict per the decision table ----
+        if [ "$d_run_max_frozen" -ge 5 ]; then
+            echo "  [WARN] frozen D run >= 5s -- thread was STUCK, not working:"
+            echo "         wchan at that time names the layer:"
+            echo "           folio_wait_bit/writeback -> IO not returning (queue above device / link)"
+            echo "           rq_qos_wait              -> wbt/cgroup io throttle"
+            echo "           shrink_node/try_to_free  -> memory direct reclaim"
+            echo "           blk_mq_freeze_queue      -> queue frozen (NVMe reset)"
+        elif [ "$d_run_max" -ge 5 ]; then
+            echo "  [OK] long D runs all had moving vcsw -- IO-bound work, normal"
+        elif [ "$total" -gt 0 ]; then
+            echo "  [OK] no D run >= 5s -- occasional D frames are normal IO naps"
+        fi
+        [ "$gone" = "1" ] && echo "  thread exited during watch (TID-GONE recorded)"
+        echo "  log file: $outfile"
+        return $rc
+    }
+    # (summary 的每行双写通过下面包装实现)
+    trap 'tw_summary 2>&1 | tee -a "$outfile" >/dev/null; tw_summary; exit 0' INT TERM
+
+    echo "# tidwatch TID=$tid interval=${interval}s duration=${duration}s stack=$have_stack out=$outfile start=$(date +'%F %T')"
+    while :; do
+        if [ ! -d "/proc/$tid" ]; then
+            echo "$(date +'%F %T.%N' | cut -c1-21) TID-GONE"
+            gone=1; break
+        fi
+        local ts st wc vc nv comm stack key
+        ts=$(date +'%F %T.%N' | cut -c1-21)
+        st=$(awk '/^State:/{print $2" "$3}' "/proc/$tid/status" 2>/dev/null)
+        vc=$(awk '/^voluntary_ctxt_switches/{print $2}' "/proc/$tid/status" 2>/dev/null)
+        nv=$(awk '/^nonvoluntary_ctxt_switches/{print $2}' "/proc/$tid/status" 2>/dev/null)
+        wc=$(cat "/proc/$tid/wchan" 2>/dev/null)
+        comm=$(cat "/proc/$tid/comm" 2>/dev/null)
+        # ★stat: comm 可含空格/括号, 以最后一个 ')' 截断; 其后字段号 = 原字段号-2
+        #   (utime=$12 stime=$13 processor=$37); 单核口径 CPU% = (utime+stime 差分)/CLK_TCK/interval
+        stat_raw=$(cat "/proc/$tid/stat" 2>/dev/null)
+        local cpu="?" cpu_pct="-" ut sp
+        if [ -n "$stat_raw" ]; then
+            local rest="${stat_raw##*) }"
+            # shellcheck disable=SC2086
+            set -- $rest
+            ut=${12}; sp=${13}; cpu=${37}
+            if [ -n "$_tw_prev_ticks" ]; then
+                cpu_pct=$(awk -v u="$ut" -v s="$sp" -v p="$_tw_prev_ticks" -v i="$interval" \
+                    'BEGIN{d=(u+s-p)/100.0/i*100; if(d<0)d=0; if(d>100)d=100; printf "%.1f", d}')
+                _tw_cpu_sum=$(awk -v a="$_tw_cpu_sum" -v c="$cpu_pct" 'BEGIN{printf "%.3f", a+(c=="-"?0:c)}')
+                _tw_cpu_n=$((_tw_cpu_n+1))
+            fi
+            _tw_prev_ticks=$((ut+sp))
+        fi
+        # 退出竞态: 目录在但 status 读不到 → 跳过本拍不记账(勿把 UNREAD 记进直方图)
+        if [ -z "$st" ]; then
+            sleep "$interval"; continue
+        fi
+
+        total=$((total+1))
+        ST_N[${st%% *}]=$(( ${ST_N[${st%% *}]:-0} + 1 ))
+        [ -n "$wc" ] && WC_N[$wc]=$(( ${WC_N[$wc]:-0} + 1 ))
+        comm_all=$comm
+
+        # D-run tracking: consecutive D samples, frozen vs moving vcsw
+        if [ "${st%% *}" = "D" ]; then
+            d_run=$((d_run+1))
+            if [ -n "$prev_vcsw" ] && [ "$vc" = "$prev_vcsw" ]; then
+                d_frozen=$((d_frozen+1)); frozen_total=$((frozen_total+1))
+            else
+                d_active=$((d_active+1)); active_total=$((active_total+1))
+            fi
+            if [ "$d_run" -ge "$d_run_max" ]; then
+                d_run_max=$d_run; d_run_max_frozen=$d_frozen
+                d_run_max_start=$(date -d "@$(( $(date +%s) - d_run * interval ))" +'%T' 2>/dev/null)
+            fi
+        else
+            d_run=0; d_frozen=0
+        fi
+        prev_vcsw=$vc
+
+        # stack: dedup on state|wchan|stack
+        stack=""
+        if [ "$have_stack" = "1" ] && stack=$(cat "/proc/$tid/stack" 2>/dev/null) && [ -n "$stack" ]; then
+            key=$(printf '%s|%s|%s' "$st" "$wc" "$stack" | cksum | cut -d' ' -f1)
+        else
+            if [ "$have_stack" = "0" ] && [ "$stack_hinted" = "0" ]; then
+                echo "---- stack UNREADABLE (need root)" | tee -a "$outfile"; stack_hinted=1
+            fi
+            key=$(printf '%s|%s' "$st" "$wc" | cksum | cut -d' ' -f1)
+        fi
+        if [ "$key" = "$prev_key" ]; then
+            same=$((same+1))
+            echo "$ts $comm state=$st wchan=${wc:-?} vcsw=${vc:-?} ivcsw=${nv:-?} cpu=$cpu cpu%=$cpu_pct [same x$same]"
+        else
+            prev_key=$key; same=0
+            echo "$ts $comm state=$st wchan=${wc:-?} vcsw=${vc:-?} ivcsw=${nv:-?} cpu=$cpu cpu%=$cpu_pct"
+            if [ -n "$stack" ]; then
+                { echo "---- stack:"; printf '%s\n' "$stack"; } | tee -a "$outfile"
+            fi
+        fi
+        [ -n "$outfile" ] && printf '%s\n' "$ts $comm state=$st wchan=${wc:-?} vcsw=${vc:-?} ivcsw=${nv:-?} cpu=$cpu cpu%=$cpu_pct" >> "$outfile"
+
+        [ "$duration" -gt 0 ] && [ "$SECONDS" -ge "$((dur_start + duration))" ] && break
+        sleep "$interval"
+    done
+    tw_summary 2>&1 | tee -a "$outfile" >/dev/null
+    tw_summary
+    return 0
 }
 
 run_osw() {
@@ -46453,6 +46649,14 @@ if [ "$rc" -ne 0 ]; then
     fi
     exit "$rc"
 fi
+        ;;
+    tidwatch)
+        if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
+            tidwatch_help
+            exit 0
+        fi
+        run_tidwatch "${@:2}"
+        exit $?
         ;;
     tps)
         if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
