@@ -43,6 +43,7 @@ show_help() {
     echo "  mem             display memory usage information"
     echo "  memhist         display memory usage history"
     echo "  net             display network information"
+    echo "  iodiag          pass-through to the iodiag block-IO latency analyzer"
     echo "  tidwatch        watch one thread: State/wchan/stack/cpu per second + verdict"
     echo "  osw             collect system performance data (OSWatcher style)"
     echo "  osw_netstat     analyze OSWbb oswnetstat archive (RX/TX + retrans deltas)"
@@ -106,6 +107,7 @@ show_list() {
     echo "  mem             display memory usage information"
     echo "  memhist         display memory usage history"
     echo "  net             display network information"
+    echo "  iodiag          pass-through to the iodiag block-IO latency analyzer"
     echo "  tidwatch        watch one thread: State/wchan/stack/cpu per second + verdict"
     echo "  osw             collect system performance data (OSWatcher style)"
     echo "  osw_netstat     analyze OSWbb oswnetstat archive (RX/TX + retrans deltas)"
@@ -3318,6 +3320,43 @@ tidwatch_help() {
     echo "    every line is also appended to the output file; live output goes to stdout"
     echo "    kernel stack needs root; non-root still samples State/wchan/counters"
     echo "    (host-side only, DB not touched; same root-branch discipline as collect_log)"
+}
+
+iodiag_help() {
+    echo "Options for iodiag:"
+    echo "  Usage: vb_tool iodiag <iodiag args...>"
+    echo "  Description: pass-through to the iodiag block-device latency analyzer"
+    echo "               (trace/analyze/compare/mpath layer-verdict)"
+    echo "  -P <port>: database port (default: current \$PGPORT)"
+    echo "  Examples:"
+    echo "    vb_tool iodiag -V"
+    echo "    vb_tool iodiag trace /dev/sda -d 30            # needs root"
+    echo "    vb_tool iodiag mpath /dev/dm-0 -d 60           # FC multipath layer verdict, needs root"
+    echo "    vb_tool iodiag analyze <blktrace files>        # no root needed"
+    echo "  Discovery order: PATH -> \$VB_TOOL_IODIAG_BIN -> /root/iodiag_<arch> -> \$HOME/iodiag_<arch>"
+    echo "                  (<arch> from uname -m: x86_64 / aarch64 / ppc64le)"
+}
+
+run_iodiag() {
+    local arch bin=""
+    arch=$(uname -m 2>/dev/null || echo "")
+    if command -v iodiag >/dev/null 2>&1; then
+        bin=$(command -v iodiag)
+    elif [ -n "${VB_TOOL_IODIAG_BIN:-}" ] && [ -x "$VB_TOOL_IODIAG_BIN" ]; then
+        bin="$VB_TOOL_IODIAG_BIN"
+    elif [ -n "$arch" ] && [ -x "/root/iodiag_$arch" ]; then
+        bin="/root/iodiag_$arch"
+    elif [ -n "$arch" ] && [ -x "$HOME/iodiag_$arch" ]; then
+        bin="$HOME/iodiag_$arch"
+    elif [ -n "$arch" ] && [ -x "/opt/iodiag_$arch" ]; then
+        bin="/opt/iodiag_$arch"
+    else
+        echo "Error: iodiag binary not found" >&2
+        echo "  searched: PATH, \$VB_TOOL_IODIAG_BIN, /root/iodiag_$arch, \$HOME/iodiag_$arch, /opt/iodiag_$arch" >&2
+        echo "  deploy it (same route as vb_tool) or: export VB_TOOL_IODIAG_BIN=/path/to/iodiag" >&2
+        return 1
+    fi
+    exec "$bin" "$@"
 }
 
 run_tidwatch() {
@@ -46651,6 +46690,18 @@ if [ "$rc" -ne 0 ]; then
     fi
     exit "$rc"
 fi
+        ;;
+    iodiag)
+        if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
+            iodiag_help
+            exit 0
+        fi
+        if [ -z "${2:-}" ]; then
+            echo "Error: iodiag requires arguments (try: vb_tool iodiag -V)" >&2
+            iodiag_help
+            exit 1
+        fi
+        run_iodiag "${@:2}"
         ;;
     tidwatch)
         if [[ "$2" == "-h" || "$2" == "-help" || "$2" == "--help" ]]; then
