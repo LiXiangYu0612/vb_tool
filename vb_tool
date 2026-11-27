@@ -35893,12 +35893,14 @@ def _pw_endpoints(repl_dir, begin_ts, end_ts):
         node = f[0] or "-"
         # begin side: latest sample AT OR BEFORE begin_ts; end side: latest
         # AT OR BEFORE end_ts (a sample ts == begin_ts belongs to begin side)
+        # ★第 4 元=f[6] current_xlog_insert_lsn (2026-11-27 复核): 合成行原先
+        #   丢掉 LSN ⇒ WAL written 行空 Begin/End + 0 B, 而 pw 日志里带着真值
         if b and ts <= b:
             cur = sides["begin"].get(node)
-            if cur is None or ts >= cur[0]: sides["begin"][node] = (ts, tot, f[8])
+            if cur is None or ts >= cur[0]: sides["begin"][node] = (ts, tot, f[8], f[6])
         if e and ts <= e:
             cur = sides["end"].get(node)
-            if cur is None or ts >= cur[0]: sides["end"][node] = (ts, tot, f[8])
+            if cur is None or ts >= cur[0]: sides["end"][node] = (ts, tot, f[8], f[6])
     return sides
 
 def patch_win_pagewriter_from_pw(win, repl_dir):
@@ -35945,7 +35947,7 @@ def patch_win_pagewriter_from_pw(win, repl_dir):
                 "remain_dirty_page_num": "",
                 "queue_head_page_rec_lsn": "",
                 "queue_rec_lsn": "",
-                "current_xlog_insert_lsn": "",
+                "current_xlog_insert_lsn": side[node][3],
                 "ckpt_redo_point": ""})
 
 def _pw_lsn(v):
@@ -40621,7 +40623,11 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
         #   (几十 GB 级假增量)。缺任一侧 → 整行 '-'。
         _wprb = win["db"].get(("begin", "pagewriter"), [])
         _wpre = win["db"].get(("end", "pagewriter"), [])
-        if _wprb and _wpre:
+        # ★双保险: 行在但 LSN 全空(极端: pw 日志行本身缺 LSN)也按缺侧印 '-',
+        #   不再产 0-0=0 B 的假"WAL 没写"
+        _wlsn_ok = (any(r.get("current_xlog_insert_lsn") for r in _wprb)
+                    and any(r.get("current_xlog_insert_lsn") for r in _wpre))
+        if _wprb and _wpre and _wlsn_ok:
             _wal_bs = _pwlsn_str("begin", "current_xlog_insert_lsn"); _wal_es = _pwlsn_str("end", "current_xlog_insert_lsn")
             _wal_d = _pwlsn("end", "current_xlog_insert_lsn") - _pwlsn("begin", "current_xlog_insert_lsn")
             parts.append('<tr><td>WAL written</td><td class="n">%s</td><td class="n">%s</td>'
@@ -40645,7 +40651,10 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                         fmt_int(_e) if _ok else '-',
                         _cf(_d) if _ok else '-',
                         _pf(_ps) if _ok else '-'))
-        if _d < 0:
+        # ★负值告警须 _ok 门控 (2026-11-27 复核): 反向混代窗(end 侧缺表)时
+        #   _d=-_b<0 但行已印 '-', 不门控会独发"counter reset (switchover/
+        #   promote)"误导——无数据不该暗示主备切换
+        if _ok and _d < 0:
             _lpw_neg = True
     if _lpw_neg:
         note("WARNING: negative delta in WAL/pagewriter counters — possible counter reset (switchover/promote); these rows may be unreliable.")
@@ -41850,9 +41859,13 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
     def _pwlsn_delta(win, col):
         # ★双侧存在性守卫 (2026-11-26): 混代窗口一侧无 pagewriter 行时返回 None
         #   (调用方 _fmtw 印 '-'), 不再拿 END 的 LSN 绝对位置冒充差值
+        # ★行在但 LSN 全空(2026-11-27)同样按缺侧: 0-0=0 B 是假"WAL 没写"
         _er = win["db"].get(("end", "pagewriter"), [])
         _br = win["db"].get(("begin", "pagewriter"), [])
         if not _br or not _er:
+            return None
+        if (not any(r.get("current_xlog_insert_lsn") for r in _br)
+                or not any(r.get("current_xlog_insert_lsn") for r in _er)):
             return None
         return (sum(_lsn(r.get(col, "")) for r in _er)
                 - sum(_lsn(r.get(col, "")) for r in _br))
@@ -41947,7 +41960,8 @@ table.params td.wrap { white-space: normal; overflow: visible; text-overflow: cl
                      '<td class="n">%s</td><td class="n">%s</td></tr>' % (
                          esc(_lbl), _cell(_d1), _cell(_d2), _cell(_d2 - _d1),
                          _celln(_ps1), _celln(_ps2)))
-        if _d1 < 0 or _d2 < 0:
+        # ★同 awrrpt: 负值告警须 _ok 门控(混代缺侧 _d 为负会误导 counter reset)
+        if _ok and (_d1 < 0 or _d2 < 0):
             _lpw_neg = True
     if _lpw_neg:
         note("WARNING: negative delta in WAL/pagewriter counters — possible counter reset (switchover/promote); these rows may be unreliable.")
