@@ -3521,7 +3521,7 @@ run_tidwatch() {
     local d_run_max=0 d_run_max_frozen=0 d_run_max_start=""
     local frozen_total=0 active_total=0
     local comm_all dur_start=$SECONDS
-    local _tw_prev_ticks="" _tw_cpu_sum=0 _tw_cpu_n=0
+    local _tw_prev_ticks="" _tw_prev_ns="" _tw_cpu_sum=0 _tw_cpu_n=0
 
     tw_summary() {
         local rc=$?
@@ -3580,20 +3580,30 @@ run_tidwatch() {
         comm=$(cat "/proc/$tid/comm" 2>/dev/null)
         # ★stat: comm 可含空格/括号, 以最后一个 ')' 截断; 其后字段号 = 原字段号-2
         #   (utime=$12 stime=$13 processor=$37); 单核口径 CPU% = (utime+stime 差分)/CLK_TCK/interval
-        stat_raw=$(cat "/proc/$tid/stat" 2>/dev/null)
+        # ★读 task/<tid>/stat 而非 /proc/<tid>/stat: 后者对线程组 leader 走
+        #   proc_tgid_stat(whole=1)→thread_group_cputime → 返回全进程所有线程
+        #   的 CPU 总和(kernel fs/proc/array.c:565); 本工具是单线程口径, 必须
+        #   走 task 路径(proc_tid_stat, whole=0)。否则 S 状态线程也会显示
+        #   100%(进程里别的 worker 在用 CPU)
+        stat_raw=$(cat "/proc/$tid/task/$tid/stat" 2>/dev/null)
         local cpu="?" cpu_pct="-" ut sp
         if [ -n "$stat_raw" ]; then
             local rest="${stat_raw##*) }"
             # shellcheck disable=SC2086
             set -- $rest
             ut=${12}; sp=${13}; cpu=${37}
-            if [ -n "$_tw_prev_ticks" ]; then
-                cpu_pct=$(awk -v u="$ut" -v s="$sp" -v p="$_tw_prev_ticks" -v i="$interval" \
-                    'BEGIN{d=(u+s-p)/100.0/i*100; if(d<0)d=0; if(d>100)d=100; printf "%.1f", d}')
+            # CPU%: 单线程口径(task/<tid>/stat) + 用真实采样间隔做分母
+            # (名义 interval 只是 sleep 时长, 实际两拍墙钟差还要加采集开销,
+            #  用名义值做分母会高估)
+            _now_ns=$(date +%s%N)
+            if [ -n "$_tw_prev_ticks" ] && [ -n "$_tw_prev_ns" ]; then
+                _el=$(awk -v a="$_now_ns" -v b="$_tw_prev_ns" 'BEGIN{e=(a-b)/1e9; if(e<=0)e=1; printf "%.3f", e}')
+                cpu_pct=$(awk -v u="$ut" -v s="$sp" -v p="$_tw_prev_ticks" -v e="$_el" \
+                    'BEGIN{d=(u+s-p)/100.0/e*100; if(d<0)d=0; if(d>100)d=100; printf "%.1f", d}')
                 _tw_cpu_sum=$(awk -v a="$_tw_cpu_sum" -v c="$cpu_pct" 'BEGIN{printf "%.3f", a+(c=="-"?0:c)}')
                 _tw_cpu_n=$((_tw_cpu_n+1))
             fi
-            _tw_prev_ticks=$((ut+sp))
+            _tw_prev_ticks=$((ut+sp)); _tw_prev_ns=$_now_ns
         fi
         # 退出竞态: 目录在但 status 读不到 → 跳过本拍不记账(勿把 UNREAD 记进直方图)
         if [ -z "$st" ]; then
