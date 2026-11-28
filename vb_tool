@@ -3522,6 +3522,8 @@ run_tidwatch() {
     local frozen_total=0 active_total=0
     local comm_all dur_start=$SECONDS
     local _tw_prev_ticks="" _tw_prev_ns="" _tw_cpu_sum=0 _tw_cpu_n=0
+    # tick 频率: 不同架构可能非 100(ia64/部分 arm 为 1000), 从 getconf 取
+    local _tw_clk; _tw_clk=$(getconf CLK_TCK 2>/dev/null); case "$_tw_clk" in ''|*[!0-9]*) _tw_clk=100;; esac
 
     tw_summary() {
         local rc=$?
@@ -3598,8 +3600,8 @@ run_tidwatch() {
             _now_ns=$(date +%s%N)
             if [ -n "$_tw_prev_ticks" ] && [ -n "$_tw_prev_ns" ]; then
                 _el=$(awk -v a="$_now_ns" -v b="$_tw_prev_ns" 'BEGIN{e=(a-b)/1e9; if(e<=0)e=1; printf "%.3f", e}')
-                cpu_pct=$(awk -v u="$ut" -v s="$sp" -v p="$_tw_prev_ticks" -v e="$_el" \
-                    'BEGIN{d=(u+s-p)/100.0/e*100; if(d<0)d=0; if(d>100)d=100; printf "%.1f", d}')
+                cpu_pct=$(awk -v u="$ut" -v s="$sp" -v p="$_tw_prev_ticks" -v e="$_el" -v c="$_tw_clk" \
+                    'BEGIN{d=(u+s-p)/c/e*100; if(d<0)d=0; if(d>100)d=100; printf "%.1f", d}')
                 _tw_cpu_sum=$(awk -v a="$_tw_cpu_sum" -v c="$cpu_pct" 'BEGIN{printf "%.3f", a+(c=="-"?0:c)}')
                 _tw_cpu_n=$((_tw_cpu_n+1))
             fi
